@@ -125,13 +125,14 @@ class InstallService:
                     )
 
             elif platform == "codex":
-                # AGENTS.md → <codex_home>/skills/r2p/AGENTS.md
-                agents_src = template_dir / "AGENTS.md"
-                agents_dest = platform_home / "skills" / "r2p" / "AGENTS.md"
-                content = _render(agents_src.read_text(), R2P_VERSION, str(bin_dir))
-                _safe_write(
-                    agents_dest, content, backups, installed_paths, written, backup_dir
-                )
+                # skills/r2p-*/SKILL.md → <codex_home>/skills/r2p-*/SKILL.md
+                skills_dir = template_dir / "skills"
+                for src in sorted(skills_dir.glob("r2p-*/SKILL.md")):
+                    dest = platform_home / "skills" / src.parent.name / "SKILL.md"
+                    content = _render(src.read_text(), R2P_VERSION, str(bin_dir))
+                    _safe_write(
+                        dest, content, backups, installed_paths, written, backup_dir
+                    )
 
             elif platform == "gemini":
                 # commands/r2p-*.toml → <gemini_home>/commands/r2p-*.toml

@@ -52,7 +52,7 @@ Install copies platform-specific skill or command templates to platform home dir
 | Platform | Skill destination | Command destination |
 |---|---|---|
 | `claude` | `~/.claude/skills/r2p/SKILL.md` | `~/.claude/commands/r2p-*.md` |
-| `codex` | `~/.codex/skills/r2p-*/AGENTS.md` | (same) |
+| `codex` | `~/.codex/skills/r2p-*/SKILL.md` | (same) |
 | `gemini` | (no skill concept) | `~/.gemini/commands/r2p-*.toml` |
 
 Install also copies absolute-path-referenced bin scripts to `~/.req-to-plan/bin/` so templates can reference scripts by stable absolute path independent of repo location. This shared bin directory is reference-counted across platforms: it is removed only when the last platform uninstalls.

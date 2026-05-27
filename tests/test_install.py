@@ -368,11 +368,19 @@ class TestInstallService:
     # codex and gemini platforms
     # -----------------------------------------------------------------------
 
-    def test_install_codex_copies_agents_md(self, tmp_path):
+    def test_install_codex_copies_shortcut_skills(self, tmp_path):
         svc, manifest_root, ph_root = make_service(tmp_path)
         svc.install("codex")
-        agents = ph_root / "codex" / "skills" / "r2p" / "AGENTS.md"
-        assert agents.exists(), "AGENTS.md should be installed for codex"
+        for command in [
+            "r2p-adapt",
+            "r2p-continue",
+            "r2p-reopen",
+            "r2p-start",
+            "r2p-status",
+            "r2p-switch",
+        ]:
+            skill = ph_root / "codex" / "skills" / command / "SKILL.md"
+            assert skill.exists(), f"{command} SKILL.md should be installed for codex"
 
     def test_install_gemini_copies_toml_commands(self, tmp_path):
         svc, manifest_root, ph_root = make_service(tmp_path)
