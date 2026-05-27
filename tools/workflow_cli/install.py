@@ -5,13 +5,12 @@ Supports: claude, codex, gemini
 """
 from __future__ import annotations
 
+import json
 import shutil
 import shlex
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-
-import yaml
 
 from tools.workflow_cli.version import R2P_VERSION
 
@@ -154,9 +153,7 @@ class InstallService:
                 "schema_version": SCHEMA_VERSION,
             }
             manifest_path.parent.mkdir(parents=True, exist_ok=True)
-            manifest_path.write_text(
-                yaml.dump(manifest, default_flow_style=False, sort_keys=True)
-            )
+            manifest_path.write_text(_dump_manifest(manifest), encoding="utf-8")
             return manifest
 
         except Exception:
@@ -182,7 +179,7 @@ class InstallService:
                 f"No manifest for platform {platform!r}. Not installed?"
             )
 
-        manifest = yaml.safe_load(manifest_path.read_text())
+        manifest = _load_manifest(manifest_path)
         removed: list[str] = []
         restored: list[str] = []
 
@@ -244,7 +241,7 @@ class InstallService:
         for platform in SUPPORTED_PLATFORMS:
             mp = self._manifest_path(platform)
             if mp.exists():
-                data = yaml.safe_load(mp.read_text())
+                data = _load_manifest(mp)
                 result.append(
                     {
                         "schema_version": data.get("schema_version"),
@@ -262,7 +259,7 @@ class InstallService:
             mp = self._manifest_path(platform)
             if not mp.exists():
                 continue
-            manifest = yaml.safe_load(mp.read_text())
+            manifest = _load_manifest(mp)
             issues: list[str] = []
 
             for path_str in manifest.get("installed_paths", []):
@@ -319,6 +316,100 @@ def _render_bin_script(content: str, repo_root: Path) -> str:
         'REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"',
         f"REPO_ROOT={shlex.quote(str(repo_root))}",
     )
+
+
+def _dump_manifest(manifest: dict[str, Any]) -> str:
+    """Return a manifest string readable as YAML without requiring PyYAML."""
+    return json.dumps(manifest, indent=2, sort_keys=True) + "\n"
+
+
+def _load_manifest(path: Path) -> dict[str, Any]:
+    """Load current JSON-formatted manifests and legacy simple YAML manifests."""
+    text = path.read_text(encoding="utf-8")
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        data = _load_legacy_manifest_yaml(text)
+    if not isinstance(data, dict):
+        raise ValueError(f"Invalid manifest at {path}: expected object")
+    return data
+
+
+def _load_legacy_manifest_yaml(text: str) -> dict[str, Any]:
+    """Parse the limited manifest YAML shape written by older r2p versions."""
+    result: dict[str, Any] = {}
+    lines = text.splitlines()
+    i = 0
+
+    while i < len(lines):
+        line = lines[i]
+        if not line.strip() or line.startswith(" "):
+            i += 1
+            continue
+        if ":" not in line:
+            i += 1
+            continue
+
+        key, raw_value = line.split(":", 1)
+        value = raw_value.strip()
+        if value:
+            result[key] = _parse_manifest_scalar(value)
+            i += 1
+            continue
+
+        i += 1
+        items: list[Any] = []
+        while i < len(lines):
+            child = lines[i]
+            if not child.strip():
+                i += 1
+                continue
+            if not child.startswith("- ") and not child.startswith("  "):
+                break
+
+            if child.startswith("- "):
+                rest = child[2:].strip()
+                if ":" in rest:
+                    item: dict[str, Any] = {}
+                    child_key, child_value = rest.split(":", 1)
+                    item[child_key.strip()] = _parse_manifest_scalar(child_value.strip())
+                    i += 1
+                    while i < len(lines) and lines[i].startswith("  "):
+                        nested = lines[i].strip()
+                        if nested and ":" in nested:
+                            nested_key, nested_value = nested.split(":", 1)
+                            item[nested_key.strip()] = _parse_manifest_scalar(
+                                nested_value.strip()
+                            )
+                        i += 1
+                    items.append(item)
+                else:
+                    items.append(_parse_manifest_scalar(rest))
+                    i += 1
+            else:
+                i += 1
+
+        result[key] = items
+
+    return result
+
+
+def _parse_manifest_scalar(value: str) -> Any:
+    value = value.strip()
+    if value == "[]":
+        return []
+    if value == "{}":
+        return {}
+    if value in {"''", '""'}:
+        return ""
+    if (
+        len(value) >= 2
+        and ((value[0] == "'" and value[-1] == "'") or (value[0] == '"' and value[-1] == '"'))
+    ):
+        value = value[1:-1]
+    if value.isdigit():
+        return int(value)
+    return value
 
 
 def _safe_copy(
