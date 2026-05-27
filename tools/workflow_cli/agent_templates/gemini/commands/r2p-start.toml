@@ -1,0 +1,4 @@
+name = "r2p-start"
+description = "Start a new requirement-to-PLAN workflow run"
+command = "{{R2P_BIN_DIR}}/r2p-start"
+version = "{{R2P_VERSION}}"

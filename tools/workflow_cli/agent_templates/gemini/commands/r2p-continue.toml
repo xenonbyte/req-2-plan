@@ -1,0 +1,4 @@
+name = "r2p-continue"
+description = "Continue the active requirement-to-PLAN workflow run"
+command = "{{R2P_BIN_DIR}}/r2p-continue"
+version = "{{R2P_VERSION}}"
