@@ -1,0 +1,45 @@
+# Tier modifier triggers.
+# Match rules:
+#   - English: word-boundary (\b), case-insensitive
+#   - Chinese: substring match (no word boundary)
+#   - Hyphen variants normalized: "re-write" matches "rewrite"
+
+migration:
+  verbs:
+    zh: [重写, 改写, 改成, 改用, 换成, 换用, 重做, 迁移, 移植, 转换, 转写, 升级到, 替代, 替换, 推倒重来]
+    en: [rewrite, rewriting, rewritten, migrate, migration, migrating, port to, porting, convert to, translate to, re-implement, reimplement, rebuild, replatform, modernize, refactor to]
+  nouns:
+    zh: [大版本升级, 技术栈迁移, 重写计划]
+    en: [major version upgrade, tech stack migration, rewrite plan]
+
+cross_project:
+  languages: [rust, go, golang, typescript, javascript, python, java, kotlin, swift, "c", "c++", cpp, "c#", csharp, ruby, php, scala, elixir, erlang, haskell, ocaml, lua, dart, zig, nim, clojure, r, julia]
+  frontend_frameworks: [react, vue, angular, svelte, solid, qwik, "next.js", nextjs, nuxt, remix, astro, ember]
+  backend_frameworks: [express, fastify, nestjs, django, flask, fastapi, rails, spring, laravel, gin, echo, axum, actix]
+  databases: [mysql, postgresql, postgres, mariadb, sqlite, mongodb, redis, cassandra, dynamodb, elasticsearch, clickhouse, timescaledb, neo4j, etcd, cockroachdb]
+  runtimes: ["node.js", nodejs, deno, bun, jvm, ".net", dotnet, wasm]
+  cloud: [aws, gcp, azure, aliyun, "alibaba cloud", "tencent cloud", cloudflare, vercel, netlify]
+  architecture: [monolith, microservices, monorepo, multirepo, serverless, edge, "service mesh"]
+  signals_zh: [项目, 仓库, 跨项目, 跨仓库, 两个项目, 多个项目, 多个仓库]
+  signals_en: [project, repo, repository, "across repos", "cross-project", monorepo]
+
+safety:
+  verbs:
+    zh: [删除, 删掉, 删表, 删库, 清理, 清除, 清空, 截断, 销毁, 下线, 关闭]
+    en: [delete, drop, truncate, purge, wipe, "remove data", destroy, retire, deprecate, "shut down"]
+  domains:
+    zh: [生产, 线上, 实时, 用户数据, 客户数据, 个人信息, 隐私, 敏感, 认证, 鉴权, 登录, 权限, 角色, 密钥, 凭证, 令牌, token, 支付, 计费, 订单, 财务, 退款, 不可逆, 破坏性]
+    en: [production, prod, live, "customer data", "user data", pii, privacy, sensitive, auth, authentication, authorization, login, permission, role, secret, credential, "api key", token, payment, billing, refund, order, financial, irreversible, "breaking change"]
+
+dependency:
+  verbs:
+    zh: [接入, 集成, 调用, 对接, 依赖]
+    en: [integrate, integrating, "call out to", "depend on", "external service"]
+  nouns:
+    zh: [第三方, 外部 api, sdk, mcp]
+    en: [third-party, "external api", sdk, mcp, "external service"]
+
+scope_expanding:
+  signals:
+    zh: [整个, 全部, 所有, 全套, 全部模块, 所有模块, 整套系统, 系统级, 全栈, 统一改造, 批量]
+    en: [entire, "all of", whole, full, everything, "system-wide", "across the board", comprehensive, sweeping]
