@@ -2,11 +2,10 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
-
-import os
 
 from tools.workflow_cli.version import R2P_VERSION
 
@@ -20,7 +19,7 @@ def test_package_json_exposes_r2p_bin():
     data = json.loads(package_json.read_text(encoding="utf-8"))
 
     assert data["name"] == "req-2-plan"
-    assert data["version"] == "0.1.0"
+    assert data["version"] == R2P_VERSION
     assert data["bin"]["r2p"] == "bin/r2p.js"
 
 

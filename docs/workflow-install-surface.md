@@ -71,7 +71,7 @@ Each install writes a manifest under `~/.req-to-plan/install/<platform>.yaml`:
 ```yaml
 schema_version: 1
 platform: claude
-r2p_version: v1
+r2p_version: 0.1.1
 installed_at: 2026-05-27T12:00:00+08:00
 installed_paths:
   - /Users/<user>/.claude/skills/r2p/SKILL.md

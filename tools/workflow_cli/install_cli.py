@@ -14,7 +14,7 @@ def main(args=None):
 
     # install
     p_install = subparsers.add_parser("install", help="Install agent integration templates")
-    p_install.add_argument("--platform", required=True)
+    p_install.add_argument("--platform", required=True, help="Platform or comma-separated platform list")
     p_install.add_argument(
         "--confirm",
         action="store_true",
@@ -25,7 +25,7 @@ def main(args=None):
 
     # uninstall
     p_uninstall = subparsers.add_parser("uninstall", help="Uninstall agent integration")
-    p_uninstall.add_argument("--platform", required=True)
+    p_uninstall.add_argument("--platform", required=True, help="Platform or comma-separated platform list")
     p_uninstall.set_defaults(func=_cmd_uninstall)
 
     # installed
@@ -53,41 +53,47 @@ def _make_service():
 
 
 def _cmd_install(args):
-    from tools.workflow_cli.install import InstallService
+    from tools.workflow_cli.install import SUPPORTED_PLATFORMS
 
     service = _make_service()
-    try:
-        manifest = service.install(args.platform, confirm=args.confirm)
-    except FileExistsError as exc:
-        print(f"Error: {exc}")
-        print("Use --confirm to reinstall.")
-        sys.exit(1)
-    except ValueError as exc:
-        print(f"Error: {exc}")
-        sys.exit(1)
+    platforms = _parse_platforms(args.platform, SUPPORTED_PLATFORMS)
+    for platform in platforms:
+        try:
+            manifest = service.install(platform, confirm=args.confirm)
+        except FileExistsError as exc:
+            print(f"Error: {exc}")
+            print("Use --confirm to reinstall.")
+            sys.exit(1)
+        except ValueError as exc:
+            print(f"Error: {exc}")
+            sys.exit(1)
 
-    n = len(manifest.get("installed_paths", []))
-    manifest_path = (
-        Path.home() / ".req-to-plan" / "install" / f"{args.platform}.yaml"
-    )
-    print(
-        f"install: platform={args.platform!r} "
-        f"installed_paths={n} "
-        f"manifest={manifest_path}"
-    )
+        n = len(manifest.get("installed_paths", []))
+        manifest_path = (
+            Path.home() / ".req-to-plan" / "install" / f"{platform}.yaml"
+        )
+        print(
+            f"install: platform={platform!r} "
+            f"installed_paths={n} "
+            f"manifest={manifest_path}"
+        )
 
 
 def _cmd_uninstall(args):
+    from tools.workflow_cli.install import SUPPORTED_PLATFORMS
+
     service = _make_service()
-    try:
-        result = service.uninstall(args.platform)
-    except FileNotFoundError as exc:
-        print(f"Error: {exc}")
-        sys.exit(1)
-    print(
-        f"uninstall: platform={args.platform!r} "
-        f"removed={len(result['removed'])} paths"
-    )
+    platforms = _parse_platforms(args.platform, SUPPORTED_PLATFORMS)
+    for platform in platforms:
+        try:
+            result = service.uninstall(platform)
+        except FileNotFoundError as exc:
+            print(f"Error: {exc}")
+            sys.exit(1)
+        print(
+            f"uninstall: platform={platform!r} "
+            f"removed={len(result['removed'])} paths"
+        )
 
 
 def _cmd_installed(args):
@@ -123,6 +129,22 @@ def _cmd_version(args):
     from tools.workflow_cli.version import R2P_VERSION
 
     print(R2P_VERSION)
+
+
+def _parse_platforms(raw: str, supported: tuple[str, ...]) -> list[str]:
+    platforms: list[str] = []
+    for part in raw.split(","):
+        platform = part.strip()
+        if platform and platform not in platforms:
+            platforms.append(platform)
+    if not platforms:
+        print("Error: --platform must name at least one platform")
+        sys.exit(1)
+    invalid = [p for p in platforms if p not in supported]
+    if invalid:
+        print(f"Error: Unknown platform(s): {invalid!r}. Supported: {supported}")
+        sys.exit(1)
+    return platforms
 
 
 if __name__ == "__main__":

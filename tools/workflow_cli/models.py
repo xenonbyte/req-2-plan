@@ -11,6 +11,8 @@ from datetime import datetime
 from enum import Enum
 from typing import Optional
 
+from tools.workflow_cli.version import R2P_VERSION
+
 
 # ---------------------------------------------------------------------------
 # Enums
@@ -489,7 +491,7 @@ class RunRecord:
     work_id: WorkId
     status: RunStatus = RunStatus.NOT_STARTED
     current_stage: Stage = Stage.RAW_REQUIREMENT
-    r2p_version: str = "v1"
+    r2p_version: str = R2P_VERSION
     approved_checkpoints: list[CheckpointRecord] = field(default_factory=list)
     bundle_authorizations: list[BundleAuthorization] = field(default_factory=list)
     active_artifacts: list[ActiveArtifact] = field(default_factory=list)

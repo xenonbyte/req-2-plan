@@ -64,6 +64,12 @@ r2p install --platform codex
 r2p install --platform gemini
 ```
 
+Install multiple platforms at once:
+
+```bash
+r2p install --platform claude,codex,gemini
+```
+
 If a platform was already installed, reinstall with explicit confirmation:
 
 ```bash
@@ -123,6 +129,12 @@ Uninstall a platform:
 
 ```bash
 r2p uninstall --platform claude
+```
+
+Uninstall multiple platforms:
+
+```bash
+r2p uninstall --platform claude,codex,gemini
 ```
 
 Shared wrappers in `~/.req-to-plan/bin/` are removed only when no installed platform still needs them.

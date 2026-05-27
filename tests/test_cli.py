@@ -634,11 +634,71 @@ class TestInstallCli:
         out = capsys.readouterr().out
         assert "install" in out.lower()
 
+    def test_install_accepts_comma_platform_list(self, capsys, tmp_path):
+        from tools.workflow_cli.install_cli import main as install_main
+        from tools.workflow_cli.install import InstallService
+
+        repo_root = Path(__file__).parent.parent
+        svc = InstallService(
+            repo_root=repo_root,
+            manifest_root=tmp_path / "manifest",
+            platform_homes={
+                "claude": tmp_path / "claude",
+                "codex": tmp_path / "codex",
+                "gemini": tmp_path / "gemini",
+            },
+        )
+
+        with __import__("unittest.mock", fromlist=["patch"]).patch(
+            "tools.workflow_cli.install_cli._make_service", return_value=svc
+        ):
+            install_main(["install", "--platform", "claude,codex,gemini"])
+
+        out = capsys.readouterr().out
+        assert "platform='claude'" in out
+        assert "platform='codex'" in out
+        assert "platform='gemini'" in out
+        assert (tmp_path / "manifest" / "install" / "claude.yaml").exists()
+        assert (tmp_path / "manifest" / "install" / "codex.yaml").exists()
+        assert (tmp_path / "manifest" / "install" / "gemini.yaml").exists()
+
+    def test_uninstall_accepts_comma_platform_list(self, capsys, tmp_path):
+        from tools.workflow_cli.install_cli import main as install_main
+        from tools.workflow_cli.install import InstallService
+
+        repo_root = Path(__file__).parent.parent
+        svc = InstallService(
+            repo_root=repo_root,
+            manifest_root=tmp_path / "manifest",
+            platform_homes={
+                "claude": tmp_path / "claude",
+                "codex": tmp_path / "codex",
+                "gemini": tmp_path / "gemini",
+            },
+        )
+        svc.install("claude")
+        svc.install("codex")
+        svc.install("gemini")
+
+        with __import__("unittest.mock", fromlist=["patch"]).patch(
+            "tools.workflow_cli.install_cli._make_service", return_value=svc
+        ):
+            install_main(["uninstall", "--platform", "claude,codex,gemini"])
+
+        out = capsys.readouterr().out
+        assert "platform='claude'" in out
+        assert "platform='codex'" in out
+        assert "platform='gemini'" in out
+        assert not (tmp_path / "manifest" / "install" / "claude.yaml").exists()
+        assert not (tmp_path / "manifest" / "install" / "codex.yaml").exists()
+        assert not (tmp_path / "manifest" / "install" / "gemini.yaml").exists()
+
     def test_version(self, capsys):
         from tools.workflow_cli.install_cli import main as install_main
+        from tools.workflow_cli.version import R2P_VERSION
         install_main(["version"])
         out = capsys.readouterr().out
-        assert "v1" in out
+        assert R2P_VERSION in out
 
     def test_installed_stub(self, capsys):
         from tools.workflow_cli.install_cli import main as install_main

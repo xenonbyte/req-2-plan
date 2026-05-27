@@ -29,9 +29,11 @@ class TestCreateRunRecord(unittest.TestCase):
         record = self.create_run_record(self._work_id())
         self.assertEqual(record.current_stage, self.Stage.RAW_REQUIREMENT)
 
-    def test_r2p_version_is_v1(self):
+    def test_r2p_version_matches_package_version(self):
+        from tools.workflow_cli.version import R2P_VERSION
+
         record = self.create_run_record(self._work_id())
-        self.assertEqual(record.r2p_version, "v1")
+        self.assertEqual(record.r2p_version, R2P_VERSION)
 
     def test_work_id_preserved(self):
         wid = self._work_id()

@@ -25,6 +25,7 @@ from tools.workflow_cli.models import (
     WorkId,
     is_transition_allowed,
 )
+from tools.workflow_cli.version import R2P_VERSION
 
 
 # ---------------------------------------------------------------------------
@@ -38,7 +39,7 @@ def create_run_record(work_id: WorkId) -> RunRecord:
         work_id=work_id,
         status=RunStatus.ACTIVE_STAGE_DRAFT,
         current_stage=Stage.RAW_REQUIREMENT,
-        r2p_version="v1",
+        r2p_version=R2P_VERSION,
         resume_context=ResumeContext(
             last_completed_operation="start_workflow_run",
             next_allowed_operation="produce_stage_artifact",
@@ -464,7 +465,7 @@ def parse_run_record(md: str, work_id: WorkId) -> RunRecord:
 
     status = RunStatus(sections.get("Status", "not_started").strip())
     current_stage = Stage(sections.get("Current Stage", "raw_requirement").strip())
-    r2p_version = sections.get("r2p Version", "v1").strip()
+    r2p_version = sections.get("r2p Version", R2P_VERSION).strip()
 
     tier_locked = _block_to_tier(sections.get("Tier Lock", "unlocked"), "unlocked")
     tier_estimate = _block_to_tier(sections.get("Tier Estimate", "none"), "none")
