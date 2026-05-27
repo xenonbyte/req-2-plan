@@ -6,6 +6,7 @@ Supports: claude, codex, gemini
 from __future__ import annotations
 
 import shutil
+import shlex
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -75,6 +76,8 @@ class InstallService:
                 f"Platform {platform!r} is already installed. "
                 "Pass confirm=True to reinstall."
             )
+        if manifest_path.exists() and confirm:
+            self.uninstall(platform)
 
         installed_paths: list[str] = []
         backups: list[dict[str, str]] = []
@@ -89,7 +92,14 @@ class InstallService:
             for src in sorted(self.repo_root.glob("tools/r2p-*")):
                 if src.is_file():
                     dest = bin_dir / src.name
-                    _safe_copy(src, dest, backups, installed_paths, written, backup_dir)
+                    content = _render_bin_script(
+                        src.read_text(encoding="utf-8"),
+                        self.repo_root,
+                    )
+                    _safe_write(
+                        dest, content, backups, installed_paths, written, backup_dir
+                    )
+                    shutil.copymode(str(src), str(dest))
 
             # Copy platform templates
             template_dir = (
@@ -181,12 +191,18 @@ class InstallService:
         for bk in manifest.get("backups", []):
             backed_up_targets.add(str(bk["target"]))
 
+        other_platforms_installed = self._other_platforms_have_manifests(platform)
+        bin_dir = self.manifest_root / "bin"
+
         # Remove installed paths (skip paths that will be restored from backup)
         for path_str in manifest.get("installed_paths", []):
             if path_str in backed_up_targets:
                 # Will be overwritten by backup restore below — skip deletion
                 continue
             p = Path(path_str)
+            if other_platforms_installed and p.is_relative_to(bin_dir):
+                # r2p-* wrappers are shared by every platform manifest.
+                continue
             if p.exists():
                 p.unlink()
                 removed.append(path_str)
@@ -202,8 +218,7 @@ class InstallService:
                 backup_path.unlink(missing_ok=True)
 
         # Reference-count bin dir: only remove when no other platform manifests exist
-        if not self._other_platforms_have_manifests(platform):
-            bin_dir = self.manifest_root / "bin"
+        if not other_platforms_installed:
             if bin_dir.exists():
                 shutil.rmtree(str(bin_dir))
 
@@ -296,6 +311,14 @@ def _render(content: str, version: str, bin_dir: str) -> str:
     content = content.replace("{{R2P_VERSION}}", version)
     content = content.replace("{{R2P_BIN_DIR}}", bin_dir)
     return content
+
+
+def _render_bin_script(content: str, repo_root: Path) -> str:
+    """Render an installed wrapper so it imports modules from the source repo."""
+    return content.replace(
+        'REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"',
+        f"REPO_ROOT={shlex.quote(str(repo_root))}",
+    )
 
 
 def _safe_copy(

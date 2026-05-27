@@ -10,6 +10,13 @@ from pathlib import Path
 import pytest
 
 from tools.workflow_cli.cli import main
+from tools.workflow_cli.models import (
+    CheckpointRecord,
+    OpenRoute,
+    RunStatus,
+    Stage,
+)
+from tools.workflow_cli.state import RunStateManager
 
 
 # ---------------------------------------------------------------------------
@@ -26,6 +33,36 @@ def invoke(args: list[str], base_path: str | Path | None = None, expect_exit: in
         main(full_args)
     assert exc.value.code == expect_exit, (
         f"Expected exit {expect_exit}, got {exc.value.code}"
+    )
+
+
+def load_record(base_path: str | Path, work_id: str):
+    run_dir = Path(base_path) / ".req-to-plan" / work_id
+    return RunStateManager(run_dir).load()
+
+
+def save_record(base_path: str | Path, record):
+    run_dir = Path(base_path) / ".req-to-plan" / str(record.work_id)
+    RunStateManager(run_dir).save(record)
+
+
+def plan_checkpoint() -> CheckpointRecord:
+    return CheckpointRecord(
+        stage=Stage.PLAN,
+        artifact="07-plan.md",
+        version=1,
+        approved_at="2026-05-27T00:00:00+00:00",
+        downstream_authorization="executor",
+    )
+
+
+def requirement_checkpoint() -> CheckpointRecord:
+    return CheckpointRecord(
+        stage=Stage.REQUIREMENT_BRIEF,
+        artifact="03-requirement-brief.md",
+        version=1,
+        approved_at="2026-05-27T00:00:00+00:00",
+        downstream_authorization="next_stage",
     )
 
 
@@ -192,6 +229,45 @@ class TestStageProduce:
             text = artifact.read_text()
             assert "Content from file" in text
 
+    def test_refuses_non_current_stage(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work_id = "WF-20260527-test"
+            invoke(
+                ["run-start", "--work-id", work_id, "--requirement", "Add rate limiting"],
+                base_path=tmp,
+            )
+
+            invoke(
+                ["stage-produce", "--work-id", work_id, "--stage", "design", "--content", "Design"],
+                base_path=tmp,
+                expect_exit=6,
+            )
+
+            artifact = Path(tmp) / ".req-to-plan" / work_id / "05-design.md"
+            assert not artifact.exists()
+
+    def test_requires_entry_gate_for_current_stage(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work_id = "WF-20260527-test"
+            invoke(
+                ["run-start", "--work-id", work_id, "--requirement", "Add rate limiting"],
+                base_path=tmp,
+            )
+            record = load_record(tmp, work_id)
+            record.current_stage = Stage.DESIGN
+            save_record(tmp, record)
+
+            invoke(
+                ["stage-produce", "--work-id", work_id, "--stage", "design", "--content", "Design"],
+                base_path=tmp,
+                expect_exit=3,
+            )
+
+            artifact = Path(tmp) / ".req-to-plan" / work_id / "05-design.md"
+            assert not artifact.exists()
+            record = load_record(tmp, work_id)
+            assert record.status == RunStatus.ENTRY_GATE_FAILED
+
 
 # ---------------------------------------------------------------------------
 # status-run
@@ -283,11 +359,121 @@ class TestRunResume:
 
 
 # ---------------------------------------------------------------------------
+# run-close
+# ---------------------------------------------------------------------------
+
+
+class TestRunClose:
+    def test_refuses_checkpoint_approved_non_plan_stage(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work_id = "WF-20260527-test"
+            invoke(["run-start", "--work-id", work_id, "--requirement", "foo"], base_path=tmp)
+            record = load_record(tmp, work_id)
+            record.status = RunStatus.CHECKPOINT_APPROVED
+            record.current_stage = Stage.REQUIREMENT_BRIEF
+            record.approved_checkpoints = [requirement_checkpoint()]
+            save_record(tmp, record)
+
+            invoke(["run-close", "--work-id", work_id], base_path=tmp, expect_exit=6)
+
+            record = load_record(tmp, work_id)
+            assert record.status == RunStatus.CHECKPOINT_APPROVED
+            assert record.current_stage == Stage.REQUIREMENT_BRIEF
+
+    def test_refuses_close_with_open_routes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work_id = "WF-20260527-test"
+            invoke(["run-start", "--work-id", work_id, "--requirement", "foo"], base_path=tmp)
+            record = load_record(tmp, work_id)
+            record.status = RunStatus.CHECKPOINT_APPROVED
+            record.current_stage = Stage.PLAN
+            record.approved_checkpoints = [plan_checkpoint()]
+            record.open_routes = [
+                OpenRoute(
+                    route_id="GAP-001",
+                    from_stage=Stage.PLAN,
+                    owner_stage=Stage.SPEC,
+                    required_action="repair traceability",
+                    status="open",
+                )
+            ]
+            save_record(tmp, record)
+
+            invoke(["run-close", "--work-id", work_id], base_path=tmp, expect_exit=6)
+
+            record = load_record(tmp, work_id)
+            assert record.status == RunStatus.CHECKPOINT_APPROVED
+            assert record.current_stage == Stage.PLAN
+
+    def test_closes_only_after_approved_plan_checkpoint(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work_id = "WF-20260527-test"
+            invoke(["run-start", "--work-id", work_id, "--requirement", "foo"], base_path=tmp)
+            record = load_record(tmp, work_id)
+            record.status = RunStatus.CHECKPOINT_APPROVED
+            record.current_stage = Stage.PLAN
+            record.approved_checkpoints = [plan_checkpoint()]
+            save_record(tmp, record)
+
+            invoke(["run-close", "--work-id", work_id], base_path=tmp)
+
+            record = load_record(tmp, work_id)
+            assert record.status == RunStatus.CLOSED_AT_PLAN_CHECKPOINT
+            assert record.current_stage == Stage.CLOSED
+
+
+# ---------------------------------------------------------------------------
+# run-reopen
+# ---------------------------------------------------------------------------
+
+
+class TestRunReopen:
+    def test_repeated_reopen_uses_next_free_suffix(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source = "WF-20260527-test"
+            invoke(["run-start", "--work-id", source, "--requirement", "foo"], base_path=tmp)
+            record = load_record(tmp, source)
+            record.status = RunStatus.CLOSED_AT_PLAN_CHECKPOINT
+            record.current_stage = Stage.CLOSED
+            record.approved_checkpoints = [plan_checkpoint()]
+            save_record(tmp, record)
+
+            invoke(
+                ["run-reopen", "--from", source, "--stage", "spec", "--reason", "fix gap"],
+                base_path=tmp,
+            )
+            invoke(
+                ["run-reopen", "--from", source, "--stage", "spec", "--reason", "fix another gap"],
+                base_path=tmp,
+            )
+
+            assert (Path(tmp) / ".req-to-plan" / f"{source}-r1").exists()
+            assert (Path(tmp) / ".req-to-plan" / f"{source}-r2").exists()
+
+
+# ---------------------------------------------------------------------------
 # tier-lock
 # ---------------------------------------------------------------------------
 
 
 class TestTierLock:
+    def test_lock_requires_confirm(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work_id = "WF-20260527-test"
+            invoke(
+                ["run-start", "--work-id", work_id, "--requirement", "Add rate limiting"],
+                base_path=tmp,
+            )
+
+            invoke(
+                ["tier-lock", "--work-id", work_id, "--base", "standard"],
+                base_path=tmp,
+                expect_exit=2,
+            )
+
+            record = load_record(tmp, work_id)
+            assert record.tier_locked is None
+
     def test_lock_at_floor_succeeds(self, capsys):
         with tempfile.TemporaryDirectory() as tmp:
             invoke(
@@ -330,6 +516,44 @@ class TestGateQuality:
             assert exc.value.code in (0, 3)
             out = capsys.readouterr().out
             assert len(out.strip()) > 0
+
+    def test_pass_persists_ready_for_checkpoint_review(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work_id = "WF-20260527-test"
+            invoke(
+                ["run-start", "--work-id", work_id, "--requirement", "Add rate limiting"],
+                base_path=tmp,
+            )
+            invoke(
+                ["tier-lock", "--work-id", work_id, "--base", "standard", "--confirm"],
+                base_path=tmp,
+            )
+            invoke(
+                ["stage-produce", "--work-id", work_id, "--stage", "raw_requirement", "--content", "Some content"],
+                base_path=tmp,
+            )
+
+            invoke(["gate-quality", "--work-id", work_id, "--stage", "raw_requirement"], base_path=tmp)
+
+            record = load_record(tmp, work_id)
+            assert record.status == RunStatus.READY_FOR_CHECKPOINT_REVIEW
+
+    def test_failure_persists_quality_gate_failed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work_id = "WF-20260527-test"
+            invoke(
+                ["run-start", "--work-id", work_id, "--requirement", "Add rate limiting"],
+                base_path=tmp,
+            )
+
+            invoke(
+                ["gate-quality", "--work-id", work_id, "--stage", "raw_requirement"],
+                base_path=tmp,
+                expect_exit=3,
+            )
+
+            record = load_record(tmp, work_id)
+            assert record.status == RunStatus.QUALITY_GATE_FAILED
 
 
 # ---------------------------------------------------------------------------

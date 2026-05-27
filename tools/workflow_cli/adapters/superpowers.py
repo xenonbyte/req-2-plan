@@ -11,6 +11,27 @@ SUPPORTED_PLAN_SECTIONS = {
 }
 
 
+def _write_repair_request(
+    output_path: Path,
+    plan_path: Path,
+    issues: list[str],
+    required_action: str,
+) -> None:
+    repair_path = output_path.with_name(output_path.name + ".repair.md")
+    repair_path.parent.mkdir(parents=True, exist_ok=True)
+    issue_lines = "\n".join(f"- {issue}" for issue in issues)
+    repair_path.write_text(
+        f"# Post-PLAN Gap Repair Request\n\n"
+        f"Adapter: {ADAPTER_NAME} {ADAPTER_RULE_VERSION}\n"
+        f"Source: {plan_path}\n\n"
+        f"## Issues\n\n"
+        f"{issue_lines}\n\n"
+        f"## Required Action\n\n"
+        f"{required_action}\n",
+        encoding="utf-8",
+    )
+
+
 def adapt_plan(plan_path: Path, output_path: Path) -> str:
     """Adapt neutral 07-plan.md to Superpowers-executable plan."""
     if not plan_path.exists():
@@ -33,18 +54,31 @@ def adapt_plan(plan_path: Path, output_path: Path) -> str:
     )
 
     if not task_sections:
-        # Write repair request
-        repair_path = output_path.with_name(output_path.name + ".repair.md")
-        repair_path.write_text(
-            f"# Post-PLAN Gap Repair Request\n\n"
-            f"Adapter: {ADAPTER_NAME} {ADAPTER_RULE_VERSION}\n"
-            f"Source: {plan_path}\n\n"
-            f"## Issues\n\n"
-            f"- No `PLAN-TASK-*` sections found in source plan.\n"
-            f"- The source plan must have at least one `## PLAN-TASK-NNN` section.\n\n"
-            f"## Required Action\n\n"
-            f"Add `## PLAN-TASK-NNN` sections to the source plan and re-run adaptation.\n",
-            encoding="utf-8",
+        _write_repair_request(
+            output_path,
+            plan_path,
+            [
+                "No `PLAN-TASK-*` sections found in source plan.",
+                "The source plan must have at least one `## PLAN-TASK-NNN` section.",
+            ],
+            "Add `## PLAN-TASK-NNN` sections to the source plan and re-run adaptation.",
+        )
+        return "adapter_gap_detected"
+
+    missing_spec_refs = [
+        task_id
+        for task_id, task_body in task_sections
+        if not re.search(r'^Spec References?:\s*(.+)$', task_body, re.MULTILINE)
+    ]
+    if missing_spec_refs:
+        _write_repair_request(
+            output_path,
+            plan_path,
+            [
+                f"{task_id} is missing required `Spec References`."
+                for task_id in missing_spec_refs
+            ],
+            "Add `Spec References: SPEC-...` to every `PLAN-TASK-*` section and re-run adaptation.",
         )
         return "adapter_gap_detected"
 

@@ -222,10 +222,39 @@ def _cmd_run_close(args):
             ),
             EXIT_CONFLICT,
         )
+    if record.current_stage != Stage.PLAN:
+        print_and_exit(
+            format_error(
+                f"Cannot close run at stage {record.current_stage.value!r}; "
+                "current stage must be plan",
+                exit_code=EXIT_CONFLICT,
+            ),
+            EXIT_CONFLICT,
+        )
+    if not any(cp.stage == Stage.PLAN for cp in record.approved_checkpoints):
+        print_and_exit(
+            format_error(
+                "Cannot close run without an approved plan checkpoint",
+                exit_code=EXIT_CONFLICT,
+            ),
+            EXIT_CONFLICT,
+        )
+    open_routes = [r.route_id for r in record.open_routes if r.status == "open"]
+    if open_routes:
+        print_and_exit(
+            format_error(
+                "Cannot close run while routes remain open",
+                details=open_routes,
+                exit_code=EXIT_CONFLICT,
+            ),
+            EXIT_CONFLICT,
+        )
     try:
         record = update_run_status(record, RunStatus.CLOSED_AT_PLAN_CHECKPOINT)
     except ValueError as e:
         print_and_exit(format_error(str(e), exit_code=EXIT_CONFLICT), EXIT_CONFLICT)
+    record.current_stage = Stage.CLOSED
+    update_resume_context(record, last_operation="close_at_plan_checkpoint")
     mgr.save(record)
     print_and_exit(
         format_success({"work_id": str(record.work_id), "status": record.status.value}, message="Run closed"),
@@ -267,14 +296,31 @@ def _cmd_run_reopen(args):
         base = m.group(1)
         suffix = int(m.group(2)) + 1
 
-    new_work_id_str = f"{base}-r{suffix}"
-    try:
-        new_work_id = WorkId(new_work_id_str)
-    except ValueError as e:
-        print_and_exit(format_error(str(e), exit_code=EXIT_CLI_ERR), EXIT_CLI_ERR)
+    new_work_id = None
+    new_work_id_str = ""
+    new_run_dir = None
+    for candidate_suffix in range(suffix, 100):
+        candidate = f"{base}-r{candidate_suffix}"
+        try:
+            candidate_work_id = WorkId(candidate)
+        except ValueError as e:
+            print_and_exit(format_error(str(e), exit_code=EXIT_CLI_ERR), EXIT_CLI_ERR)
+        candidate_dir = _get_run_dir(candidate, args.base_path)
+        if not candidate_dir.exists():
+            new_work_id = candidate_work_id
+            new_work_id_str = candidate
+            new_run_dir = candidate_dir
+            break
+    if new_work_id is None or new_run_dir is None:
+        print_and_exit(
+            format_error(
+                f"Could not find an unused reopen work ID for {source_id!r}",
+                exit_code=EXIT_CONFLICT,
+            ),
+            EXIT_CONFLICT,
+        )
 
-    new_run_dir = _get_run_dir(new_work_id_str, args.base_path)
-    new_run_dir.mkdir(parents=True, exist_ok=True)
+    new_run_dir.mkdir(parents=True, exist_ok=False)
 
     # Copy artifacts up to (not including) target_stage
     from tools.workflow_cli.models import STAGE_ORDER
@@ -344,6 +390,15 @@ def _cmd_tier_estimate(args):
 
 def _cmd_tier_lock(args):
     record, mgr, run_dir = _load_run(args.work_id, args.base_path)
+
+    if not args.confirm:
+        print_and_exit(
+            format_error(
+                "Locking tier requires --confirm",
+                exit_code=EXIT_CLI_ERR,
+            ),
+            EXIT_CLI_ERR,
+        )
 
     base = _parse_tier_base(args.base)
     modifiers = _parse_modifiers(args.modifiers)
@@ -497,6 +552,14 @@ def _cmd_gate_quality(args):
     )
 
     if not result.passed:
+        record.status = RunStatus.QUALITY_GATE_FAILED
+        update_resume_context(
+            record,
+            last_operation=f"quality_gate_failed_{stage.value}",
+            next_operation="repair_stage_artifact",
+            active_item=stage.value,
+        )
+        mgr.save(record)
         print_and_exit(format_gate_result(result, gate_type="quality-gate"), result.exit_code)
 
     # Check forced subagent review
@@ -508,6 +571,14 @@ def _cmd_gate_quality(args):
             EXIT_REVIEW_REQ,
         )
 
+    record.status = RunStatus.READY_FOR_CHECKPOINT_REVIEW
+    update_resume_context(
+        record,
+        last_operation=f"quality_gate_passed_{stage.value}",
+        next_operation="checkpoint_review",
+        active_item=stage.value,
+    )
+    mgr.save(record)
     print_and_exit(format_gate_result(result, gate_type="quality-gate"), EXIT_OK)
 
 
@@ -583,6 +654,37 @@ def _resolve_content(args) -> str:
 def _cmd_stage_produce(args):
     record, mgr, run_dir = _load_run(args.work_id, args.base_path)
     stage = _parse_stage(args.stage)
+
+    if stage != record.current_stage:
+        print_and_exit(
+            format_error(
+                f"Cannot produce stage {stage.value!r}; current stage is "
+                f"{record.current_stage.value!r}",
+                exit_code=EXIT_CONFLICT,
+            ),
+            EXIT_CONFLICT,
+        )
+
+    entry_result = check_entry_gate(
+        run_dir,
+        stage,
+        record.approved_checkpoints,
+        record.bundle_authorizations,
+    )
+    if not entry_result.passed:
+        record.status = RunStatus.ENTRY_GATE_FAILED
+        update_resume_context(
+            record,
+            last_operation=f"entry_gate_failed_{stage.value}",
+            next_operation="repair_upstream_checkpoint",
+            active_item=stage.value,
+        )
+        mgr.save(record)
+        print_and_exit(
+            format_gate_result(entry_result, gate_type="entry-gate"),
+            entry_result.exit_code,
+        )
+
     content = _resolve_content(args)
 
     am = ArtifactManager(run_dir)
@@ -592,6 +694,7 @@ def _cmd_stage_produce(args):
         print_and_exit(format_error(str(e), exit_code=EXIT_CONFLICT), EXIT_CONFLICT)
 
     # Update run record active artifacts
+    record.status = RunStatus.ACTIVE_STAGE_DRAFT
     artifact_file = STAGE_ARTIFACT_MAP[stage]
     upsert_active_artifact(record, stage, artifact_file, 1, "draft")
     update_resume_context(record, last_operation=f"produce_{stage.value}")
@@ -714,7 +817,7 @@ def _register_tier_commands(subparsers):
     p.add_argument("--base", required=True, choices=["light", "standard"])
     p.add_argument("--modifiers", default=None, help="Comma-separated modifiers")
     p.add_argument("--override-floor", action="store_true", help="Allow locking below floor")
-    p.add_argument("--confirm", action="store_true", help="Required confirmation for override-floor")
+    p.add_argument("--confirm", action="store_true", help="Required confirmation before locking tier")
     p.set_defaults(func=_cmd_tier_lock)
 
     # tier-escalate

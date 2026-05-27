@@ -85,6 +85,16 @@ class TestInstallService:
         bin_dir = str(manifest_root / "bin")
         assert bin_dir in content, "rendered bin dir path should appear in file"
 
+    def test_install_renders_bin_script_with_source_repo_root(self, tmp_path):
+        svc, manifest_root, _ = make_service(tmp_path)
+        svc.install("claude")
+
+        script = manifest_root / "bin" / "r2p-start"
+        content = script.read_text()
+
+        assert str(REPO_ROOT) in content
+        assert 'REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"' not in content
+
     def test_install_backs_up_existing_file(self, tmp_path):
         svc, manifest_root, ph_root = make_service(tmp_path)
         # pre-create a file at the skill destination
@@ -147,6 +157,30 @@ class TestInstallService:
         svc.install("claude", confirm=True)
         manifest_path = manifest_root / "install" / "claude.yaml"
         assert manifest_path.exists()
+
+    def test_confirm_reinstall_preserves_original_backup_state(self, tmp_path):
+        svc, manifest_root, ph_root = make_service(tmp_path)
+        skill_dest = ph_root / "claude" / "skills" / "r2p" / "SKILL.md"
+        skill_dest.parent.mkdir(parents=True, exist_ok=True)
+        skill_dest.write_text("original content")
+
+        svc.install("claude")
+        svc.install("claude", confirm=True)
+        svc.uninstall("claude")
+
+        assert skill_dest.exists()
+        assert skill_dest.read_text() == "original content"
+
+    def test_confirm_reinstall_uninstall_does_not_leave_managed_files(self, tmp_path):
+        svc, manifest_root, ph_root = make_service(tmp_path)
+        svc.install("claude")
+        skill_dest = ph_root / "claude" / "skills" / "r2p" / "SKILL.md"
+        assert skill_dest.exists()
+
+        svc.install("claude", confirm=True)
+        svc.uninstall("claude")
+
+        assert not skill_dest.exists()
 
     def test_install_copies_bin_scripts(self, tmp_path):
         svc, manifest_root, _ = make_service(tmp_path)
@@ -243,6 +277,18 @@ class TestInstallService:
         # cleanup
         svc.uninstall("codex")
         assert not bin_dir.exists(), "bin dir removed after last platform gone"
+
+    def test_uninstall_preserves_shared_bin_scripts_when_other_platforms_installed(self, tmp_path):
+        svc, manifest_root, _ = make_service(tmp_path)
+        svc.install("claude")
+        svc.install("codex")
+
+        script = manifest_root / "bin" / "r2p-start"
+        assert script.exists()
+
+        svc.uninstall("claude")
+
+        assert script.exists(), "shared bin scripts should remain for codex install"
 
     # -----------------------------------------------------------------------
     # installed

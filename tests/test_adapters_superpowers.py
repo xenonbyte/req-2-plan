@@ -118,6 +118,45 @@ def test_missing_task_repair_file_written(tmp_path: Path):
 
 
 # ---------------------------------------------------------------------------
+# Missing spec references
+# ---------------------------------------------------------------------------
+
+TASK_WITHOUT_SPEC_REFERENCES = """\
+# Plan: WF-20260527-feature
+
+## PLAN-TASK-001
+Goal: Implement rate limiting middleware
+Steps:
+1. Add rate limit check in middleware
+TDD:
+- Red: write failing test
+- Green: implement
+Verification:
+- Unit test passes
+"""
+
+
+def test_task_without_spec_references_returns_adapter_gap_detected(tmp_path: Path):
+    from tools.workflow_cli.adapters.superpowers import adapt_plan
+    plan = tmp_path / "07-plan.md"
+    plan.write_text(TASK_WITHOUT_SPEC_REFERENCES, encoding="utf-8")
+    out = tmp_path / "superpowers-plan.md"
+    result = adapt_plan(plan, out)
+    assert result == "adapter_gap_detected"
+
+
+def test_task_without_spec_references_writes_repair_file(tmp_path: Path):
+    from tools.workflow_cli.adapters.superpowers import adapt_plan
+    plan = tmp_path / "07-plan.md"
+    plan.write_text(TASK_WITHOUT_SPEC_REFERENCES, encoding="utf-8")
+    out = tmp_path / "superpowers-plan.md"
+    adapt_plan(plan, out)
+    repair = tmp_path / "superpowers-plan.md.repair.md"
+    assert repair.exists()
+    assert "Spec References" in repair.read_text(encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------
 # Stale source: file does not exist
 # ---------------------------------------------------------------------------
 

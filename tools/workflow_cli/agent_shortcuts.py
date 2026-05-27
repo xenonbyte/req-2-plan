@@ -257,16 +257,21 @@ def _cmd_adapt(ns: argparse.Namespace, base_path: Path) -> None:
 
     work_id = pointer["selected_work_id"]
     run_path = base_path / ".req-to-plan" / work_id / "run.md"
-    if run_path.exists():
-        from tools.workflow_cli.state import RunStateManager
-        try:
-            mgr = RunStateManager(run_path.parent)
-            record = mgr.load()
-            if not is_terminal(record.status):
-                print(f"blocked: run_not_closed\nwork_id: {work_id}\nnext: r2p-continue\n")
-                sys.exit(1)
-        except Exception as e:
-            print(f"warning: could not load run state for {work_id!r}: {e}", file=sys.stderr)
+    if not run_path.exists():
+        print(f"blocked: source_run_not_found\nwork_id: {work_id}\n")
+        sys.exit(7)
+
+    from tools.workflow_cli.state import RunStateManager
+    try:
+        mgr = RunStateManager(run_path.parent)
+        record = mgr.load()
+    except Exception as e:
+        print(f"blocked: run_not_terminal\nwork_id: {work_id}\nreason: {e}\n")
+        sys.exit(1)
+
+    if not is_terminal(record.status):
+        print(f"blocked: run_not_closed\nwork_id: {work_id}\nnext: r2p-continue\n")
+        sys.exit(1)
 
     plan_path = base_path / ".req-to-plan" / work_id / "07-plan.md"
     output_path = base_path / ".req-to-plan" / work_id / f"{ns.executor}-plan.md"
