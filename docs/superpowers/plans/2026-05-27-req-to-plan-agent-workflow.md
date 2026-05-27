@@ -1108,6 +1108,19 @@ class TestArtifactManager(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.mgr.update("03-requirement-brief.md", "---\nversion: 2\nstatus: draft\n---\n# Replacement\n")
 
+    def test_write_stage_artifact_creates_versioned_replacement_for_approved_artifact(self):
+        self.mgr.create("03-requirement-brief.md", "---\nversion: 1\nstatus: approved\n---\n# Approved\n")
+        path, filename, version, replaced = self.mgr.write_stage_artifact(
+            "03-requirement-brief.md",
+            "---\nversion: 1\nstatus: draft\n---\n# Replacement\n",
+        )
+        self.assertEqual(filename, "03-requirement-brief.v2.md")
+        self.assertEqual(version, 2)
+        self.assertEqual(replaced, "03-requirement-brief.md")
+        self.assertTrue(path.exists())
+        self.assertIn("status: approved", self.mgr.load("03-requirement-brief.md"))
+        self.assertIn("version: 2", self.mgr.load("03-requirement-brief.v2.md"))
+
     def test_exists_checks_file(self):
         self.assertFalse(self.mgr.exists("07-plan.md"))
         self.mgr.create("07-plan.md", "plan")
@@ -1221,6 +1234,34 @@ class ArtifactManager:
                 )
         p.write_text(content, encoding="utf-8")
         return p
+
+    def _versioned_filename(self, filename: str, version: int) -> str:
+        path = Path(filename)
+        return path.with_name(f"{path.stem}.v{version}{path.suffix}").as_posix()
+
+    def write_stage_artifact(self, filename: str, content: str) -> tuple[Path, str, int, str | None]:
+        fm, body = parse_frontmatter(content)
+        if not self.exists(filename):
+            version = int(fm.get("version", "1"))
+            return self.create(filename, content), filename, version, None
+
+        current = self.load(filename)
+        current_fm, _ = parse_frontmatter(current)
+        if current_fm.get("status") != "approved":
+            version = int(fm.get("version", "1"))
+            return self.update(filename, content), filename, version, None
+
+        current_version = int(current_fm.get("version", "1"))
+        requested_version = int(fm.get("version", "0") or "0")
+        replacement_version = max(current_version + 1, requested_version)
+        replacement_filename = self._versioned_filename(filename, replacement_version)
+        while self.exists(replacement_filename):
+            replacement_version += 1
+            replacement_filename = self._versioned_filename(filename, replacement_version)
+        fm["version"] = str(replacement_version)
+        fm["status"] = fm.get("status", "draft")
+        replacement_content = write_frontmatter(fm, body)
+        return self.create(replacement_filename, replacement_content), replacement_filename, replacement_version, filename
 
     def list_reviews(self, stage: str) -> list[str]:
         reviews_dir = self.root / "reviews"
@@ -1615,6 +1656,18 @@ class StdoutCapture:
         sys.stdout = self._old
 
 
+class StdinInput:
+    def __init__(self, content: str):
+        self.content = content
+
+    def __enter__(self):
+        self._old = sys.stdin
+        sys.stdin = io.StringIO(self.content)
+
+    def __exit__(self, exc_type, exc, tb):
+        sys.stdin = self._old
+
+
 class TestCliParser(unittest.TestCase):
     def test_parser_accepts_registered_flat_commands(self):
         parser = build_parser()
@@ -1724,6 +1777,112 @@ status: ready
             self.assertIn("gate-complete", data["next_allowed_command"])
             self.assertEqual(RunStateManager(root).load().status, RunStatus.ACTIVE_STAGE_DRAFT)
 
+    def test_run_resume_sets_next_stage_and_status_next_points_to_entry_gate(self):
+        with tempfile.TemporaryDirectory() as td:
+            artifact_base = Path(td)
+            root = artifact_base / "WF-20260527-cli-resume"
+            root.mkdir(parents=True)
+            record = create_run_record(WorkId("WF-20260527-cli-resume"))
+            record.current_stage = Stage.RAW_REQUIREMENT
+            record.status = RunStatus.CHECKPOINT_APPROVED
+            RunStateManager(root).save(record)
+
+            with StdoutCapture() as out:
+                rc = main([
+                    "run-resume",
+                    "--work-id", "WF-20260527-cli-resume",
+                    "--artifact-root", str(artifact_base),
+                    "--json",
+                ])
+            data = json.loads(out.getvalue())
+            self.assertEqual(rc, 0)
+            self.assertEqual(data["command_result"], "next_stage")
+            self.assertEqual(data["current_stage"], "requirement_brief")
+            saved = RunStateManager(root).load()
+            self.assertEqual(saved.status, RunStatus.NEXT_STAGE)
+            self.assertEqual(saved.current_stage, Stage.REQUIREMENT_BRIEF)
+
+            with StdoutCapture() as out:
+                rc = main([
+                    "status-next",
+                    "--work-id", "WF-20260527-cli-resume",
+                    "--artifact-root", str(artifact_base),
+                    "--json",
+                ])
+            data = json.loads(out.getvalue())
+            self.assertEqual(rc, 0)
+            self.assertIn("gate-entry", data["next_allowed_command"])
+            self.assertIn("--stage requirement_brief", data["next_allowed_command"])
+
+    def test_stage_produce_gap_repair_creates_versioned_replacement_for_approved_artifact(self):
+        with tempfile.TemporaryDirectory() as td:
+            artifact_base = Path(td)
+            root = artifact_base / "WF-20260527-cli-gap"
+            root.mkdir(parents=True)
+            record = create_run_record(WorkId("WF-20260527-cli-gap"))
+            record.current_stage = Stage.REQUIREMENT_BRIEF
+            record.status = RunStatus.UPSTREAM_GAP_ROUTING
+            RunStateManager(root).save(record)
+            ArtifactManager(root).create(
+                "03-requirement-brief.md",
+                "---\nversion: 1\nstatus: approved\n---\n# Approved\n",
+            )
+            replacement = """---
+artifact_id: REQUIREMENT-BRIEF-001
+version: 1
+status: draft
+---
+## Goal
+Clarify the repaired requirement.
+
+## Upstream References
+| Artifact | Reference | Status |
+|---|---|---|
+| Raw Requirement | 00-raw-requirement.md | available |
+"""
+
+            with StdinInput(replacement), StdoutCapture() as out:
+                rc = main([
+                    "stage-produce",
+                    "--work-id", "WF-20260527-cli-gap",
+                    "--artifact-root", str(artifact_base),
+                    "--stage", "requirement_brief",
+                    "--json",
+                ])
+            data = json.loads(out.getvalue())
+            self.assertEqual(rc, 0)
+            self.assertEqual(data["active_artifact"], "03-requirement-brief.v2.md@v2")
+            self.assertTrue((root / "03-requirement-brief.v2.md").exists())
+            self.assertIn("status: approved", ArtifactManager(root).load("03-requirement-brief.md"))
+            saved = RunStateManager(root).load()
+            self.assertEqual(saved.active_artifacts[0].artifact, "03-requirement-brief.v2.md")
+            self.assertEqual(saved.stale_artifacts[0].artifact, "03-requirement-brief.md")
+
+            with StdoutCapture() as out:
+                rc = main([
+                    "stage-ready",
+                    "--work-id", "WF-20260527-cli-gap",
+                    "--artifact-root", str(artifact_base),
+                    "--stage", "requirement_brief",
+                    "--json",
+                ])
+            data = json.loads(out.getvalue())
+            self.assertEqual(rc, 0)
+            self.assertEqual(data["active_artifact"], "03-requirement-brief.v2.md@v2")
+            self.assertIn("status: ready", ArtifactManager(root).load("03-requirement-brief.v2.md"))
+
+            with StdoutCapture() as out:
+                rc = main([
+                    "gate-quality",
+                    "--work-id", "WF-20260527-cli-gap",
+                    "--artifact-root", str(artifact_base),
+                    "--stage", "requirement_brief",
+                    "--json",
+                ])
+            data = json.loads(out.getvalue())
+            self.assertEqual(rc, 0)
+            self.assertEqual(data["command_result"], "structural_pass")
+
 
 if __name__ == "__main__":
     unittest.main()
@@ -1755,7 +1914,7 @@ from tools.workflow_cli.models import (
 )
 from tools.workflow_cli.state import (
     RunStateManager, create_run_record, update_run_status,
-    add_checkpoint, upsert_active_artifact,
+    add_checkpoint, get_active_artifact, upsert_active_artifact,
     update_resume_context, record_stale_artifact,
 )
 from tools.workflow_cli.artifact import ArtifactManager, parse_frontmatter, write_frontmatter
@@ -1793,6 +1952,11 @@ def _read_stdin() -> str:
     if sys.stdin.isatty():
         return ""
     return sys.stdin.read().strip()
+
+
+def _stage_artifact_filename(record: RunRecord, stage: Stage) -> str:
+    active = get_active_artifact(record, stage)
+    return active.artifact if active else STAGE_ARTIFACT_MAP.get(stage, "")
 
 
 def cmd_run_start(args: argparse.Namespace) -> int:
@@ -1850,15 +2014,16 @@ def cmd_run_resume(args: argparse.Namespace) -> int:
                 next_allowed_command=f"python3 -m tools.workflow_cli run-close --work-id {str(record.work_id)}",
                 json_mode=args.json,
             )
+        next_stage = NEXT_STAGE_MAP.get(record.current_stage, record.current_stage)
         record.status = RunStatus.NEXT_STAGE
+        record.current_stage = next_stage
         record = update_resume_context(
             record,
             last_operation="run_resume",
             next_operation="run_stage_entry_gate",
-            active_item=NEXT_STAGE_MAP.get(record.current_stage, Stage.CLOSED).value,
+            active_item=next_stage.value,
         )
         mgr.save(record)
-        next_stage = NEXT_STAGE_MAP.get(record.current_stage, record.current_stage)
         return print_result(
             "CMD-RUN-RESUME", "next_stage",
             run_path=str(artifact_root / "run.md"),
@@ -1972,21 +2137,32 @@ def cmd_stage_produce(args: argparse.Namespace) -> int:
         return print_result("CMD-STAGE-PRODUCE", "no_content", stops=["No artifact content provided via stdin"], json_mode=args.json, exit_code=2)
 
     am = ArtifactManager(artifact_root)
-    am.update(filename, content)
+    path, active_filename, version, replaced = am.write_stage_artifact(filename, content)
 
-    fm, _ = parse_frontmatter(content)
-    version = int(fm.get("version", "1"))
-    record = upsert_active_artifact(record, stage, filename, version, fm.get("status", "draft"))
+    fm, _ = parse_frontmatter(am.load(active_filename))
+    record = upsert_active_artifact(record, stage, active_filename, version, fm.get("status", "draft"))
+    if replaced:
+        record = record_stale_artifact(
+            record,
+            replaced,
+            "approved artifact superseded by upstream repair",
+            active_filename,
+            "review replacement and rerun gates",
+        )
     record.current_stage = stage
     record = update_resume_context(record, active_item=stage.value, next_operation="produce_stage_artifact")
     mgr.save(record)
+
+    writes = [{"path": str(path), "kind": "artifact_replacement" if replaced else "artifact_update"}]
+    if replaced:
+        writes.append({"path": str(artifact_root / "run.md"), "kind": "run_update"})
 
     return print_result(
         "CMD-STAGE-PRODUCE", "active_stage_draft",
         run_path=str(artifact_root / "run.md"),
         current_stage=stage.value,
-        active_artifact=f"{filename}@v{version}",
-        writes=[{"path": str(artifact_root / filename), "kind": "artifact_update"}],
+        active_artifact=f"{active_filename}@v{version}",
+        writes=writes,
         next_allowed_command=f"python3 -m tools.workflow_cli stage-ready --work-id {str(record.work_id)} --stage {stage.value}",
         json_mode=args.json,
     )
@@ -1998,7 +2174,7 @@ def cmd_stage_ready(args: argparse.Namespace) -> int:
     _check_command_allowed(record, "CMD-STAGE-READY")
 
     stage = Stage(args.stage)
-    filename = STAGE_ARTIFACT_MAP.get(stage, "")
+    filename = _stage_artifact_filename(record, stage)
     am = ArtifactManager(artifact_root)
     if not am.exists(filename):
         return print_result("CMD-STAGE-READY", "no_artifact", stops=[f"No artifact for stage: {stage.value}"], json_mode=args.json, exit_code=2)
@@ -2064,7 +2240,7 @@ def cmd_gate_quality(args: argparse.Namespace) -> int:
     _check_command_allowed(record, "CMD-GATE-QUALITY")
 
     stage = Stage(args.stage)
-    filename = STAGE_ARTIFACT_MAP.get(stage, "")
+    filename = _stage_artifact_filename(record, stage)
     am = ArtifactManager(artifact_root)
     if not am.exists(filename):
         return print_result("CMD-GATE-QUALITY", "no_artifact", stops=[f"No artifact for stage: {stage.value}"], json_mode=args.json, exit_code=2)
@@ -2116,7 +2292,7 @@ def cmd_gate_complete(args: argparse.Namespace) -> int:
         )
 
     stage = Stage(args.stage)
-    filename = STAGE_ARTIFACT_MAP.get(stage, "")
+    filename = _stage_artifact_filename(record, stage)
     am = ArtifactManager(artifact_root)
     if not am.exists(filename):
         return print_result("CMD-GATE-COMPLETE", "no_artifact", stops=[f"No artifact for stage: {stage.value}"], json_mode=args.json, exit_code=2)
@@ -2199,7 +2375,7 @@ def cmd_checkpoint_decide(args: argparse.Namespace) -> int:
     decision = args.decision  # approved, changes_requested, blocked, upstream_gap_detected, route_upstream
 
     if decision == "approved":
-        filename = STAGE_ARTIFACT_MAP.get(stage, "")
+        filename = _stage_artifact_filename(record, stage)
         am = ArtifactManager(artifact_root)
         content = am.load(filename)
         fm, body = parse_frontmatter(content)
@@ -2479,6 +2655,8 @@ def _next_command_for_state(record: RunRecord) -> str:
         return f"python3 -m tools.workflow_cli review-merge --work-id {wid} --stage {stage}"
     if status == RunStatus.CHECKPOINT_APPROVED:
         return f"python3 -m tools.workflow_cli run-close --work-id {wid}" if record.current_stage == Stage.PLAN else f"python3 -m tools.workflow_cli run-resume --work-id {wid}"
+    if status == RunStatus.NEXT_STAGE:
+        return f"python3 -m tools.workflow_cli gate-entry --work-id {wid} --stage {stage}"
     if status == RunStatus.UPSTREAM_GAP_ROUTING:
         return f"python3 -m tools.workflow_cli gap-route --work-id {wid}"
     return f"python3 -m tools.workflow_cli status-next --work-id {wid}"
