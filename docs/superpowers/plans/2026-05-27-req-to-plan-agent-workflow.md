@@ -2,11 +2,15 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build a Python CLI state machine + Agent skill that implements the 5-stage requirement-to-PLAN workflow defined in `docs/*.md`, with post-PLAN Superpowers plan adaptation.
+**Goal:** Build a Python CLI state machine + Agent skill that implements the 6-stage pipeline (raw_requirement intake + 5 transformation stages: Requirement Brief → Risk Discovery → DESIGN → SPEC → PLAN) defined in `docs/*.md`, with post-PLAN Superpowers plan adaptation.
 
 **Architecture:** Python CLI (`tools/workflow_cli/`) manages run state, artifact lifecycle, and structured gate validation via filesystem. Claude Code Agent skill (`req-to-plan`) loads workflow docs, generates semantic artifact content, and calls CLI for state persistence. Post-PLAN, CLI adapts the neutral PLAN into a Superpowers-executable plan.
 
-**Tech Stack:** Python 3 stdlib only (argparse, json, pathlib, unittest, dataclasses), Markdown files for artifact storage.
+**Tech Stack:** Python 3.10+ stdlib only (argparse, json, pathlib, unittest, dataclasses), Markdown files for artifact storage.
+
+**Prerequisites:**
+- All workflow documents under `docs/` must exist (README.md, workflow-invariants.md, workflow-execution-guide.md, requirement-brief-workflow.md, risk-question-discovery-workflow.md, design-workflow.md, spec-workflow.md, plan-workflow.md). These define the stage contracts that the Agent skill reads to generate artifact content and judge quality gates.
+- Python 3.10+ installed (required for `X | Y` union type syntax used throughout the CLI code).
 
 ---
 
@@ -20,7 +24,7 @@ tools/workflow_cli/
 ├── state.py                  # run.md read/write, state transition validation
 ├── artifact.py               # artifact frontmatter, version, stale/superseded
 ├── gates.py                  # structured gate checks
-├── cli.py                    # argparse routing, all 26 commands
+├── cli.py                    # argparse routing, all 22 commands
 ├── output.py                 # JSON/human output formatting
 ├── adapters/
 │   ├── __init__.py           # adapter registry
@@ -36,7 +40,6 @@ tests/
 ├── test_cli.py
 ├── test_output.py
 ├── test_adapters_superpowers.py
-└── test_agent_shortcuts.py
 
 .claude/
 └── skills/
@@ -280,7 +283,7 @@ CHECKPOINT_REVIEW_STAGES: Set[RunStatus] = {
 ALLOWED_COMMANDS_BY_RUN_STATE: Dict[RunStatus, Set[str]] = {
     RunStatus.NOT_STARTED: {"CMD-RUN-START"},
     RunStatus.ACTIVE_STAGE_DRAFT: {
-        "CMD-STAGE-LOAD", "CMD-STAGE-PRODUCE", "CMD-STAGE-UPDATE", "CMD-STAGE-READY",
+        "CMD-STAGE-LOAD", "CMD-STAGE-PRODUCE", "CMD-STAGE-READY",
         "CMD-GATE-ENTRY", "CMD-GATE-QUALITY",
         "CMD-CONFIRM-RECORD", "CMD-CONFIRM-REJECT", "CMD-CONFIRM-LINK",
         "CMD-SUBAGENT-DISPATCH", "CMD-SUBAGENT-MERGE",
@@ -291,7 +294,7 @@ ALLOWED_COMMANDS_BY_RUN_STATE: Dict[RunStatus, Set[str]] = {
         "CMD-GAP-RECORD", "CMD-GAP-ROUTE",
     },
     RunStatus.QUALITY_GATE_FAILED: {
-        "CMD-STAGE-PRODUCE", "CMD-STAGE-UPDATE", "CMD-STAGE-READY",
+        "CMD-STAGE-PRODUCE", "CMD-STAGE-READY",
         "CMD-GATE-QUALITY",
         "CMD-CONFIRM-RECORD", "CMD-CONFIRM-REJECT",
         "CMD-SUBAGENT-DISPATCH", "CMD-SUBAGENT-MERGE",
@@ -308,14 +311,14 @@ ALLOWED_COMMANDS_BY_RUN_STATE: Dict[RunStatus, Set[str]] = {
         "CMD-GAP-RECORD", "CMD-GAP-ROUTE",
     },
     RunStatus.CHECKPOINT_CHANGES_REQUESTED: {
-        "CMD-STAGE-PRODUCE", "CMD-STAGE-UPDATE", "CMD-STAGE-READY",
+        "CMD-STAGE-PRODUCE", "CMD-STAGE-READY",
         "CMD-GATE-QUALITY",
         "CMD-CONFIRM-RECORD", "CMD-CONFIRM-REJECT",
         "CMD-GAP-RECORD", "CMD-GAP-ROUTE",
     },
     RunStatus.UPSTREAM_GAP_ROUTING: {
         "CMD-GAP-ROUTE", "CMD-GAP-REIMPORT",
-        "CMD-STAGE-LOAD", "CMD-STAGE-PRODUCE", "CMD-STAGE-UPDATE", "CMD-STAGE-READY",
+        "CMD-STAGE-LOAD", "CMD-STAGE-PRODUCE", "CMD-STAGE-READY",
         "CMD-GATE-QUALITY", "CMD-CHECKPOINT-DECIDE",
         "CMD-ARTIFACT-MARK-STALE",
     },
@@ -629,7 +632,7 @@ Expected: FAIL with ImportError
 # tools/workflow_cli/state.py
 from __future__ import annotations
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone
 import re
 
 from tools.workflow_cli.models import (
@@ -669,7 +672,7 @@ def add_checkpoint(
         stage=stage,
         artifact=artifact,
         version=version,
-        approved_at=datetime.now().isoformat(),
+        approved_at=datetime.now(timezone.utc).isoformat(),
         downstream_authorization=downstream_authorization,
     )
     record.approved_checkpoints.append(cp)
@@ -1302,8 +1305,9 @@ status: ready
 | Raw Requirement | 00-raw-requirement.md | available |
 | DESIGN | 05-design.md | approved |
 """
-        issues = check_quality_gate_structural(content, Stage.SPEC)
-        self.assertEqual(len(issues), 0)
+        result = check_quality_gate_structural(content, Stage.SPEC)
+        self.assertTrue(result.passed)
+        self.assertEqual(len(result.issues), 0)
 
     def test_structural_check_detects_missing_upstream_references(self):
         content = """---
@@ -1313,13 +1317,15 @@ version: 1
 # DESIGN
 No upstream refs section.
 """
-        issues = check_quality_gate_structural(content, Stage.DESIGN)
-        self.assertTrue(any("Upstream References" in i for i in issues))
+        result = check_quality_gate_structural(content, Stage.DESIGN)
+        self.assertFalse(result.passed)
+        self.assertTrue(any("Upstream References" in i for i in result.issues))
 
     def test_structural_check_detects_missing_frontmatter(self):
         content = "# No frontmatter here"
-        issues = check_quality_gate_structural(content, Stage.SPEC)
-        self.assertTrue(any("frontmatter" in i.lower() for i in issues))
+        result = check_quality_gate_structural(content, Stage.SPEC)
+        self.assertFalse(result.passed)
+        self.assertTrue(any("frontmatter" in i.lower() for i in result.issues))
 
     def test_structural_check_detects_placeholder_status(self):
         content = """---
@@ -1331,8 +1337,9 @@ status: ready | blocked
 |---|---|---|
 | DESIGN | 05-design.md | approved |
 """
-        issues = check_quality_gate_structural(content, Stage.SPEC)
-        self.assertTrue(any("placeholder" in i.lower() for i in issues))
+        result = check_quality_gate_structural(content, Stage.SPEC)
+        self.assertFalse(result.passed)
+        self.assertTrue(any("placeholder" in i.lower() for i in result.issues))
 
 if __name__ == "__main__":
     unittest.main()
@@ -1395,7 +1402,7 @@ class QualityGateResult:
     issues: list[str] = field(default_factory=list)
 
 
-def check_quality_gate_structural(content: str, stage: Stage) -> list[str]:
+def check_quality_gate_structural(content: str, stage: Stage) -> QualityGateResult:
     issues: list[str] = []
 
     fm, body = parse_frontmatter(content)
@@ -1420,7 +1427,7 @@ def check_quality_gate_structural(content: str, stage: Stage) -> list[str]:
         if "## Closure" not in body and "closure" not in body.lower():
             issues.append("Missing coverage closure for upstream inputs")
 
-    return issues
+    return QualityGateResult(passed=len(issues) == 0, issues=issues)
 ```
 
 - [ ] **Step 4: Run tests to verify they pass**
@@ -1583,15 +1590,15 @@ from pathlib import Path
 from datetime import datetime
 
 from tools.workflow_cli.models import (
-    RunStatus, Stage, WorkId, ALLOWED_COMMANDS_BY_RUN_STATE,
+    RunStatus, Stage, WorkId, RunRecord, UserConfirmation,
     STAGE_ARTIFACT_MAP, NEXT_STAGE_MAP, is_command_allowed,
 )
 from tools.workflow_cli.state import (
     RunStateManager, create_run_record, update_run_status,
     add_checkpoint, upsert_active_artifact,
-    update_resume_context, parse_run_record,
+    update_resume_context, record_stale_artifact,
 )
-from tools.workflow_cli.artifact import ArtifactManager, parse_frontmatter, write_frontmatter, bump_version
+from tools.workflow_cli.artifact import ArtifactManager, parse_frontmatter, write_frontmatter
 from tools.workflow_cli.gates import check_entry_gate, check_quality_gate_structural
 from tools.workflow_cli.output import print_result
 
@@ -1773,6 +1780,12 @@ def cmd_stage_load(args: argparse.Namespace) -> int:
     template = f"---\nartifact_id: {stage.value.upper()}-001\nversion: 1\nstatus: draft\n---\n# {stage.value.replace('_', ' ').title()}\n"
     am.create(filename, template)
     record = upsert_active_artifact(record, stage, filename, 1, "draft")
+    record = update_resume_context(
+        record,
+        last_operation="stage_artifact_loaded",
+        next_operation="produce_stage_artifact",
+        active_item=stage.value,
+    )
     mgr.save(record)
     return print_result(
         "CMD-STAGE-LOAD", "created",
@@ -1897,16 +1910,16 @@ def cmd_gate_quality(args: argparse.Namespace) -> int:
         return print_result("CMD-GATE-QUALITY", "no_artifact", stops=[f"No artifact for stage: {stage.value}"], json_mode=args.json, exit_code=2)
 
     content = am.load(filename)
-    issues = check_quality_gate_structural(content, stage)
+    gate_result = check_quality_gate_structural(content, stage)
 
-    if issues:
+    if not gate_result.passed:
         record.status = RunStatus.QUALITY_GATE_FAILED
         mgr.save(record)
         return print_result(
             "CMD-GATE-QUALITY", "quality_gate_failed",
             run_path=str(artifact_root / "run.md"),
             run_state_after="quality_gate_failed",
-            stops=issues,
+            stops=gate_result.issues,
             json_mode=args.json,
             exit_code=1,
         )
@@ -2031,10 +2044,26 @@ def cmd_confirm_record(args: argparse.Namespace) -> int:
     if not args.confirm:
         return print_result("CMD-CONFIRM-RECORD", "confirmation_required", stops=["--confirm required"], json_mode=args.json, exit_code=5)
 
+    stage = Stage(args.stage) if args.stage else record.current_stage
+    confirmation_text = args.decision or args.item or "confirmed"
+    record.user_confirmations.append(UserConfirmation(
+        confirmation=confirmation_text,
+        stage=stage,
+        source=args.source or "user",
+        recorded_in=f"{STAGE_ARTIFACT_MAP.get(stage, 'unknown')}",
+    ))
+    record = update_resume_context(
+        record,
+        last_operation="user_confirmation_recorded",
+        active_item=f"{stage.value} confirmation: {confirmation_text[:60]}",
+    )
+    mgr.save(record)
+
     return print_result(
         "CMD-CONFIRM-RECORD", "confirmation_recorded",
         run_path=str(artifact_root / "run.md"),
-        current_stage=args.stage,
+        current_stage=stage.value,
+        writes=[{"path": str(artifact_root / "run.md"), "kind": "run_update"}],
         json_mode=args.json,
     )
 
@@ -2065,9 +2094,22 @@ def cmd_gap_route(args: argparse.Namespace) -> int:
     if not args.confirm:
         return print_result("CMD-GAP-ROUTE", "confirmation_required", stops=["--confirm required"], json_mode=args.json, exit_code=5)
 
+    owner_stage = Stage(args.stage) if args.stage else Stage.REQUIREMENT_BRIEF
+    record.status = RunStatus.ACTIVE_STAGE_DRAFT
+    record.current_stage = owner_stage
+    record = update_resume_context(
+        record,
+        last_operation="gap_routed_to_owner",
+        next_operation="produce_stage_artifact",
+        active_item=owner_stage.value,
+    )
+    mgr.save(record)
     return print_result(
         "CMD-GAP-ROUTE", "active_stage_draft",
         run_path=str(artifact_root / "run.md"),
+        run_state_after="active_stage_draft",
+        current_stage=owner_stage.value,
+        writes=[{"path": str(artifact_root / "run.md"), "kind": "run_update"}],
         json_mode=args.json,
     )
 
@@ -2077,9 +2119,23 @@ def cmd_gap_reimport(args: argparse.Namespace) -> int:
     mgr, record = _load_run_state(artifact_root)
     _check_command_allowed(record, "CMD-GAP-REIMPORT")
 
+    route_id = args.route or ""
+    if route_id:
+        from tools.workflow_cli.state import close_route
+        record = close_route(record, route_id)
+    record.status = RunStatus.ACTIVE_STAGE_DRAFT
+    record = update_resume_context(
+        record,
+        last_operation="gap_reimported",
+        next_operation="run_quality_gate",
+        active_item=record.current_stage.value,
+    )
+    mgr.save(record)
     return print_result(
         "CMD-GAP-REIMPORT", "active_stage_draft",
         run_path=str(artifact_root / "run.md"),
+        run_state_after="active_stage_draft",
+        writes=[{"path": str(artifact_root / "run.md"), "kind": "run_update"}],
         json_mode=args.json,
     )
 
@@ -2092,9 +2148,16 @@ def cmd_artifact_mark_stale(args: argparse.Namespace) -> int:
     if not args.confirm:
         return print_result("CMD-ARTIFACT-MARK-STALE", "confirmation_required", stops=["--confirm required"], json_mode=args.json, exit_code=5)
 
+    artifact_name = getattr(args, "artifact", "")
+    reason = getattr(args, "reason", "upstream artifact changed")
+    replaced_by = getattr(args, "replaced_by", "")
+    record = record_stale_artifact(record, artifact_name, reason, replaced_by, "re-import upstream")
+    mgr.save(record)
+
     return print_result(
         "CMD-ARTIFACT-MARK-STALE", "stale_recorded",
         run_path=str(artifact_root / "run.md"),
+        writes=[{"path": str(artifact_root / "run.md"), "kind": "run_update"}],
         json_mode=args.json,
     )
 
@@ -2228,7 +2291,6 @@ def build_parser() -> argparse.ArgumentParser:
     p_run_start = sub.add_parser("run-start", help="Start a workflow run")
     _add_common_args(p_run_start)
     p_run_start.add_argument("--source", help="Requirement source")
-    p_run_start.add_argument("--work-id", required=True, help="Workflow run ID")
 
     p_run_resume = sub.add_parser("run-resume", help="Resume a workflow run")
     _add_common_args(p_run_resume)
@@ -2237,7 +2299,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_common_args(p_run_close)
 
     # stage
-    for cmd_name in ["stage-load", "stage-produce", "stage-update", "stage-ready"]:
+    for cmd_name in ["stage-load", "stage-produce", "stage-ready"]:
         p = sub.add_parser(cmd_name, help=f"{cmd_name} command")
         _add_common_args(p)
         p.add_argument("--stage", required=True, help="Stage name")
@@ -2279,6 +2341,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_ams = sub.add_parser("artifact-mark-stale", help="Mark artifact stale")
     _add_common_args(p_ams)
+    p_ams.add_argument("--artifact", default="", help="Artifact name to mark stale")
+    p_ams.add_argument("--reason", default="upstream artifact changed", help="Reason for marking stale")
+    p_ams.add_argument("--replaced-by", default="", help="Replacement artifact reference")
 
     # status
     for cmd_name in ["status-run", "status-stage", "status-next", "status-routes", "status-artifacts"]:
@@ -2712,7 +2777,7 @@ cd /Users/xubo/x-skills/req-to-plan && git add tools/workflow_cli/adapters/ test
 
 **Files:**
 - Create: `tools/workflow_cli/agent_shortcuts.py`
-- Create: `tests/test_agent_shortcuts.py`
+- Create: `tests/test_agent_shortcuts.py` (placeholder — test content deferred to implementation)
 - Create: `tools/coyeme-workflow-start`
 - Create: `tools/coyeme-workflow-continue`
 - Create: `tools/coyeme-workflow-status`
@@ -2771,9 +2836,8 @@ def _write_pointer(repo_root: Path, work_id: str) -> Path:
 
 
 def _now_iso() -> str:
-    from datetime import datetime, timezone, timedelta
-    tz = timezone(timedelta(hours=8))
-    return datetime.now(tz).isoformat()
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).isoformat()
 
 
 def _scan_open_runs(repo_root: Path) -> list[str]:
@@ -3108,7 +3172,7 @@ Expected: "agent_shortcuts module loaded successfully"
 - [ ] **Step 4: Commit**
 
 ```bash
-cd /Users/xubo/x-skills/req-to-plan && git add tools/workflow_cli/agent_shortcuts.py tools/coyeme-workflow-* tests/test_agent_shortcuts.py && git commit -m "feat: add agent shortcuts and wrapper scripts"
+cd /Users/xubo/x-skills/req-to-plan && git add tools/workflow_cli/agent_shortcuts.py tools/coyeme-workflow-* && git commit -m "feat: add agent shortcuts and wrapper scripts"
 ```
 
 ---
@@ -3123,7 +3187,7 @@ cd /Users/xubo/x-skills/req-to-plan && git add tools/workflow_cli/agent_shortcut
 ```markdown
 # Requirement-to-PLAN Agent Workflow
 
-Drive the 5-stage requirement-to-PLAN pipeline. You are the semantic engine: you read workflow docs, generate artifact content, judge Quality Gates, and decide checkpoints. The CLI handles state management and structured validation.
+Drive the 6-stage requirement-to-PLAN pipeline (raw_requirement intake + 5 transformation stages). You are the semantic engine: you read workflow docs, generate artifact content, judge Quality Gates, and decide checkpoints. The CLI handles state management and structured validation.
 
 ## When to Use
 
@@ -3378,8 +3442,8 @@ Add login rate limiting.
         mgr.save(record)
 
         # 7. Quality gate structural check
-        issues = check_quality_gate_structural(req_brief, Stage.REQUIREMENT_BRIEF)
-        self.assertEqual(len(issues), 0, f"Unexpected issues: {issues}")
+        result = check_quality_gate_structural(req_brief, Stage.REQUIREMENT_BRIEF)
+        self.assertTrue(result.passed, f"Unexpected issues: {result.issues}")
 
     def test_superpowers_adaptation_end_to_end(self):
         plan_content = """---
@@ -3455,7 +3519,7 @@ cd /Users/xubo/x-skills/req-to-plan && git add tests/test_integration.py && git 
 ```markdown
 # req-to-plan
 
-Requirement-to-PLAN Agent workflow. Converts raw requirements into executor-neutral implementation plans through a 5-stage pipeline, then adapts PLANs to Superpowers format for execution.
+Requirement-to-PLAN Agent workflow. Converts raw requirements into executor-neutral implementation plans through a 6-stage pipeline (raw_requirement intake + 5 transformation stages), then adapts PLANs to Superpowers format for execution.
 
 ## Project Structure
 
@@ -3512,11 +3576,11 @@ cd /Users/xubo/x-skills/req-to-plan && git add CLAUDE.md && git commit -m "docs:
 
 **1. Spec coverage check:**
 - ✅ CLI state machine (state.py, artifact.py, gates.py, cli.py, output.py)
-- ✅ Agent skill (req-to-plan.md) driving the 5-stage workflow
+- ✅ Agent skill (req-to-plan.md) driving the 6-stage workflow (raw_requirement + 5 transformation stages)
 - ✅ Superpowers adapter (adapters/superpowers.py)
 - ✅ Agent shortcuts (agent_shortcuts.py + wrapper scripts)
 - ✅ Structured gate validation (gates.py)
-- ✅ All 26 CLI commands covered in cli.py
+- ✅ All 22 CLI commands (plus 2 review-only gateways) covered in cli.py
 - ✅ Integration test validating full workflow
 - ✅ CLAUDE.md project instructions
 
