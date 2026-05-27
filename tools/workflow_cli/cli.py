@@ -1,0 +1,803 @@
+"""
+req-to-plan workflow CLI — internal Agent command router.
+
+Usage:
+    python3 -m tools.workflow_cli [--base-path <dir>] <command> [options]
+"""
+from __future__ import annotations
+
+import argparse
+import sys
+from pathlib import Path
+
+from tools.workflow_cli.models import (
+    RunStatus,
+    Stage,
+    TierBase,
+    TierModifier,
+    WorkId,
+    STAGE_ARTIFACT_MAP,
+)
+from tools.workflow_cli.state import (
+    RunStateManager,
+    create_run_record,
+    update_run_status,
+    upsert_active_artifact,
+    update_resume_context,
+)
+from tools.workflow_cli.artifact import ArtifactManager, write_artifact, read_artifact
+from tools.workflow_cli.gates import check_entry_gate, check_quality_gate, check_forced_subagent_review
+from tools.workflow_cli.output import (
+    format_success,
+    format_error,
+    format_gate_result,
+    print_and_exit,
+    EXIT_OK,
+    EXIT_CLI_ERR,
+    EXIT_GATE_FAIL,
+    EXIT_REVIEW_REQ,
+    EXIT_CONFLICT,
+    EXIT_NOT_FOUND,
+)
+from tools.workflow_cli.tier import estimate_tier, scan_keywords
+
+
+# ---------------------------------------------------------------------------
+# Path helpers
+# ---------------------------------------------------------------------------
+
+
+def _get_run_dir(work_id: str, base_path: Path | None = None) -> Path:
+    root = base_path or Path.cwd()
+    return root / ".req-to-plan" / work_id
+
+
+def _load_run(work_id: str, base_path: Path | None = None):
+    """Load RunRecord; exit with EXIT_NOT_FOUND if not found."""
+    run_dir = _get_run_dir(work_id, base_path)
+    mgr = RunStateManager(run_dir)
+    try:
+        return mgr.load(), mgr, run_dir
+    except FileNotFoundError:
+        print_and_exit(
+            format_error(f"Run not found: {work_id}", exit_code=EXIT_NOT_FOUND),
+            EXIT_NOT_FOUND,
+        )
+
+
+def _validate_work_id(raw: str) -> WorkId:
+    """Parse WorkId or exit with CLI error."""
+    try:
+        return WorkId(raw)
+    except ValueError as e:
+        print_and_exit(format_error(str(e), exit_code=EXIT_CLI_ERR), EXIT_CLI_ERR)
+
+
+def _parse_stage(raw: str) -> Stage:
+    """Parse Stage enum or exit with CLI error."""
+    try:
+        return Stage(raw)
+    except ValueError:
+        valid = [s.value for s in Stage]
+        print_and_exit(
+            format_error(f"Unknown stage {raw!r}. Valid: {valid}", exit_code=EXIT_CLI_ERR),
+            EXIT_CLI_ERR,
+        )
+
+
+def _parse_tier_base(raw: str) -> TierBase:
+    """Parse TierBase enum or exit with CLI error."""
+    try:
+        return TierBase(raw)
+    except ValueError:
+        valid = [b.value for b in TierBase]
+        print_and_exit(
+            format_error(f"Unknown tier base {raw!r}. Valid: {valid}", exit_code=EXIT_CLI_ERR),
+            EXIT_CLI_ERR,
+        )
+
+
+def _parse_modifiers(raw: str | None) -> frozenset[TierModifier]:
+    """Parse comma-separated modifier list or return empty set."""
+    if not raw:
+        return frozenset()
+    mods: list[TierModifier] = []
+    for part in raw.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            mods.append(TierModifier(part))
+        except ValueError:
+            valid = [m.value for m in TierModifier]
+            print_and_exit(
+                format_error(f"Unknown modifier {part!r}. Valid: {valid}", exit_code=EXIT_CLI_ERR),
+                EXIT_CLI_ERR,
+            )
+    return frozenset(mods)
+
+
+# ---------------------------------------------------------------------------
+# Run lifecycle commands
+# ---------------------------------------------------------------------------
+
+
+def _cmd_run_start(args):
+    work_id = _validate_work_id(args.work_id)
+    run_dir = _get_run_dir(work_id, args.base_path)
+    mgr = RunStateManager(run_dir)
+
+    # Create run record
+    record = create_run_record(work_id)
+
+    # Write raw requirement artifact
+    run_dir.mkdir(parents=True, exist_ok=True)
+    write_artifact(run_dir, Stage.RAW_REQUIREMENT, args.requirement, version=1, status="draft")
+
+    # Tier estimation
+    repo_path = Path(args.repo_path) if args.repo_path else None
+    tier_estimate, evidence = estimate_tier(args.requirement, repo_path=repo_path)
+    record.tier_estimate = tier_estimate
+
+    # Update active artifacts in record
+    artifact_file = STAGE_ARTIFACT_MAP[Stage.RAW_REQUIREMENT]
+    upsert_active_artifact(record, Stage.RAW_REQUIREMENT, artifact_file, 1, "draft")
+
+    # Write intake brief (01-intake-brief.md) with evidence block
+    brief_lines = [
+        "# Intake Brief",
+        "",
+        f"work_id: {work_id}",
+        f"requirement: {args.requirement}",
+        "",
+        "## Tier Estimate",
+        f"base: {tier_estimate.base.value}",
+        f"modifiers: {', '.join(sorted(m.value for m in tier_estimate.modifiers))}",
+        "",
+        "## Evidence Block",
+        f"keywords_hit: {evidence.keywords_hit or []}",
+        f"repo_baseline_summary: {evidence.repo_baseline_summary}",
+        f"linked_context: {evidence.linked_context}",
+        f"scope_signals: {evidence.scope_signals or []}",
+        f"escalation_candidates: {evidence.escalation_candidates or []}",
+        f"confirm_status: {evidence.confirm_status}",
+    ]
+    (run_dir / "01-intake-brief.md").write_text("\n".join(brief_lines), encoding="utf-8")
+
+    # Save run record
+    mgr.save(record)
+
+    print_and_exit(
+        format_success(
+            {
+                "work_id": str(work_id),
+                "tier_floor": tier_estimate.base.value,
+                "modifiers": sorted(m.value for m in tier_estimate.modifiers),
+                "run_dir": str(run_dir),
+            },
+            message=f"Run started: {work_id}",
+        ),
+        EXIT_OK,
+    )
+
+
+def _cmd_run_resume(args):
+    record, mgr, run_dir = _load_run(args.work_id, args.base_path)
+    rc = record.resume_context
+    print_and_exit(
+        format_success(
+            {
+                "work_id": record.work_id,
+                "status": record.status.value,
+                "current_stage": record.current_stage.value,
+                "last_operation": rc.last_completed_operation,
+                "next_operation": rc.next_allowed_operation,
+                "active_item": rc.active_item,
+                "resume_reason": rc.resume_reason,
+            },
+            message="Resume context",
+        ),
+        EXIT_OK,
+    )
+
+
+def _cmd_run_close(args):
+    record, mgr, run_dir = _load_run(args.work_id, args.base_path)
+    if record.status != RunStatus.CHECKPOINT_APPROVED:
+        print_and_exit(
+            format_error(
+                f"Cannot close run in status {record.status.value!r}; "
+                "must be in checkpoint_approved",
+                exit_code=EXIT_CONFLICT,
+            ),
+            EXIT_CONFLICT,
+        )
+    record.status = RunStatus.CLOSED_AT_PLAN_CHECKPOINT
+    mgr.save(record)
+    print_and_exit(
+        format_success({"work_id": str(record.work_id), "status": record.status.value}, message="Run closed"),
+        EXIT_OK,
+    )
+
+
+def _cmd_run_reopen(args):
+    source_id = args.from_id
+    target_stage = _parse_stage(args.stage)
+
+    # Load source run
+    source_dir = _get_run_dir(source_id, args.base_path)
+    source_mgr = RunStateManager(source_dir)
+    try:
+        source_record = source_mgr.load()
+    except FileNotFoundError:
+        print_and_exit(
+            format_error(f"Source run not found: {source_id}", exit_code=EXIT_NOT_FOUND),
+            EXIT_NOT_FOUND,
+        )
+
+    if source_record.status != RunStatus.CLOSED_AT_PLAN_CHECKPOINT:
+        print_and_exit(
+            format_error(
+                f"Source run {source_id!r} is not CLOSED_AT_PLAN_CHECKPOINT "
+                f"(status={source_record.status.value!r})",
+                exit_code=EXIT_CONFLICT,
+            ),
+            EXIT_CONFLICT,
+        )
+
+    # Determine new work_id suffix: -r1, -r2, etc.
+    base = source_id
+    suffix = 1
+    # Remove existing -rN suffix from base if present
+    import re
+    m = re.match(r"^(WF-\d{8}-.+?)-r(\d+)$", source_id)
+    if m:
+        base = m.group(1)
+        suffix = int(m.group(2)) + 1
+
+    new_work_id_str = f"{base}-r{suffix}"
+    try:
+        new_work_id = WorkId(new_work_id_str)
+    except ValueError as e:
+        print_and_exit(format_error(str(e), exit_code=EXIT_CLI_ERR), EXIT_CLI_ERR)
+
+    new_run_dir = _get_run_dir(new_work_id_str, args.base_path)
+    new_run_dir.mkdir(parents=True, exist_ok=True)
+
+    # Copy artifacts up to (not including) target_stage
+    from tools.workflow_cli.models import STAGE_ORDER
+    import shutil
+    for stage in STAGE_ORDER:
+        if stage == target_stage:
+            break
+        artifact_file = STAGE_ARTIFACT_MAP.get(stage)
+        if artifact_file:
+            src_path = source_dir / artifact_file
+            if src_path.exists():
+                shutil.copy2(src_path, new_run_dir / artifact_file)
+
+    # Create new run record
+    new_record = create_run_record(new_work_id)
+    new_record.tier_estimate = source_record.tier_estimate
+    new_record.tier_locked = source_record.tier_locked
+    new_record.reopen_lineage = f"reopened_from: {source_id}@plan_checkpoint reason: {args.reason}"
+    new_record.current_stage = target_stage
+
+    # Copy approved checkpoints before target stage
+    for cp in source_record.approved_checkpoints:
+        cp_stage_idx = STAGE_ORDER.index(cp.stage) if cp.stage in STAGE_ORDER else -1
+        target_idx = STAGE_ORDER.index(target_stage) if target_stage in STAGE_ORDER else 999
+        if cp_stage_idx < target_idx:
+            new_record.approved_checkpoints.append(cp)
+
+    new_mgr = RunStateManager(new_run_dir)
+    new_mgr.save(new_record)
+
+    print_and_exit(
+        format_success(
+            {
+                "new_work_id": str(new_work_id),
+                "source_work_id": source_id,
+                "target_stage": target_stage.value,
+                "run_dir": str(new_run_dir),
+            },
+            message=f"Run reopened as {new_work_id}",
+        ),
+        EXIT_OK,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Tier commands
+# ---------------------------------------------------------------------------
+
+
+def _cmd_tier_estimate(args):
+    repo_path = Path(args.repo_path) if args.repo_path else None
+    tier, evidence = estimate_tier(args.text, repo_path=repo_path)
+    print_and_exit(
+        format_success(
+            {
+                "tier_base": tier.base.value,
+                "modifiers": sorted(m.value for m in tier.modifiers),
+                "keywords_hit": evidence.keywords_hit or [],
+                "repo_summary": evidence.repo_baseline_summary,
+                "confirm_status": evidence.confirm_status,
+            },
+            message=f"Tier estimate: {tier.base.value}",
+        ),
+        EXIT_OK,
+    )
+
+
+def _cmd_tier_lock(args):
+    record, mgr, run_dir = _load_run(args.work_id, args.base_path)
+
+    base = _parse_tier_base(args.base)
+    modifiers = _parse_modifiers(args.modifiers)
+
+    if record.tier_estimate is None:
+        # If no estimate, create a minimal one
+        from tools.workflow_cli.models import TierEstimate
+        record.tier_estimate = TierEstimate(base=TierBase.LIGHT, modifiers=frozenset())
+
+    if args.override_floor:
+        if not args.confirm:
+            print_and_exit(
+                format_error(
+                    "Overriding floor requires --confirm flag as well",
+                    exit_code=EXIT_CLI_ERR,
+                ),
+                EXIT_CLI_ERR,
+            )
+        from tools.workflow_cli.models import TierEstimate
+        record.tier_locked = TierEstimate(base=base, modifiers=modifiers)
+    else:
+        try:
+            record.tier_locked = record.tier_estimate.lock(base, modifiers)
+        except ValueError as e:
+            print_and_exit(format_error(str(e), exit_code=EXIT_CLI_ERR), EXIT_CLI_ERR)
+
+    mgr.save(record)
+    print_and_exit(
+        format_success(
+            {
+                "work_id": str(record.work_id),
+                "tier_base": record.tier_locked.base.value,
+                "modifiers": sorted(m.value for m in record.tier_locked.modifiers),
+            },
+            message="Tier locked",
+        ),
+        EXIT_OK,
+    )
+
+
+def _cmd_tier_escalate(args):
+    record, mgr, run_dir = _load_run(args.work_id, args.base_path)
+
+    try:
+        modifier = TierModifier(args.modifier)
+    except ValueError:
+        valid = [m.value for m in TierModifier]
+        print_and_exit(
+            format_error(f"Unknown modifier {args.modifier!r}. Valid: {valid}", exit_code=EXIT_CLI_ERR),
+            EXIT_CLI_ERR,
+        )
+
+    if record.tier_locked is None:
+        print_and_exit(
+            format_error("Tier is not locked; run tier-lock first", exit_code=EXIT_CLI_ERR),
+            EXIT_CLI_ERR,
+        )
+
+    record.tier_locked = record.tier_locked.escalate(modifier)
+
+    # Revoke affected bundle authorizations that cover high-tier stages
+    from tools.workflow_cli.models import _FORCED_REVIEW_MODIFIERS
+    high_modifiers = {TierModifier.MIGRATION, TierModifier.SAFETY, TierModifier.CROSS_PROJECT}
+    from datetime import datetime, timezone
+    if modifier in high_modifiers:
+        revoke_ts = datetime.now(timezone.utc).isoformat()
+        from tools.workflow_cli.models import STAGE_REQUIRED_UPSTREAM_CHECKPOINTS
+        affected_stages = {Stage.DESIGN, Stage.SPEC, Stage.PLAN}
+        for ba in record.bundle_authorizations:
+            if ba.stages & affected_stages and ba.revoked_at is None:
+                ba.revoked_at = revoke_ts
+
+    mgr.save(record)
+    print_and_exit(
+        format_success(
+            {
+                "work_id": str(record.work_id),
+                "tier_base": record.tier_locked.base.value,
+                "modifiers": sorted(m.value for m in record.tier_locked.modifiers),
+                "added_modifier": modifier.value,
+            },
+            message=f"Tier escalated with modifier: {modifier.value}",
+        ),
+        EXIT_OK,
+    )
+
+
+def _cmd_tier_status(args):
+    record, mgr, run_dir = _load_run(args.work_id, args.base_path)
+
+    est = record.tier_estimate
+    locked = record.tier_locked
+
+    data = {
+        "work_id": str(record.work_id),
+        "tier_estimate": (
+            {"base": est.base.value, "modifiers": sorted(m.value for m in est.modifiers)}
+            if est else "none"
+        ),
+        "tier_locked": (
+            {"base": locked.base.value, "modifiers": sorted(m.value for m in locked.modifiers)}
+            if locked else "unlocked"
+        ),
+    }
+    print_and_exit(format_success(data, message="Tier status"), EXIT_OK)
+
+
+# ---------------------------------------------------------------------------
+# Gate commands
+# ---------------------------------------------------------------------------
+
+
+def _cmd_gate_entry(args):
+    record, mgr, run_dir = _load_run(args.work_id, args.base_path)
+    stage = _parse_stage(args.stage)
+
+    result = check_entry_gate(
+        run_dir,
+        stage,
+        record.approved_checkpoints,
+        record.bundle_authorizations,
+    )
+    output = format_gate_result(result, gate_type="entry-gate")
+    exit_code = EXIT_OK if result.passed else EXIT_GATE_FAIL
+    print_and_exit(output, exit_code)
+
+
+def _cmd_gate_quality(args):
+    record, mgr, run_dir = _load_run(args.work_id, args.base_path)
+    stage = _parse_stage(args.stage)
+
+    # Read artifact content
+    try:
+        content = read_artifact(run_dir, stage)
+    except FileNotFoundError:
+        print_and_exit(
+            format_error(
+                f"Artifact not found for stage {stage.value!r}",
+                exit_code=EXIT_NOT_FOUND,
+            ),
+            EXIT_NOT_FOUND,
+        )
+
+    # Check quality gate
+    result = check_quality_gate(
+        run_dir,
+        stage,
+        record.tier_locked,
+        record.approved_checkpoints,
+        content,
+    )
+
+    if not result.passed:
+        print_and_exit(format_gate_result(result, gate_type="quality-gate"), result.exit_code)
+
+    # Check forced subagent review
+    reviews_dir = run_dir / "reviews"
+    review_result = check_forced_subagent_review(stage, record.tier_locked, reviews_dir)
+    if not review_result.passed:
+        print_and_exit(
+            format_gate_result(review_result, gate_type="subagent-review"),
+            EXIT_REVIEW_REQ,
+        )
+
+    print_and_exit(format_gate_result(result, gate_type="quality-gate"), EXIT_OK)
+
+
+# ---------------------------------------------------------------------------
+# Status commands
+# ---------------------------------------------------------------------------
+
+
+def _cmd_status_run(args):
+    record, mgr, run_dir = _load_run(args.work_id, args.base_path)
+
+    # Summarise open routes
+    open_routes = [r.route_id for r in record.open_routes if r.status == "open"]
+
+    print_and_exit(
+        format_success(
+            {
+                "work_id": str(record.work_id),
+                "status": record.status.value,
+                "current_stage": record.current_stage.value,
+                "tier_locked": (
+                    record.tier_locked.base.value if record.tier_locked else "unlocked"
+                ),
+                "open_routes": open_routes,
+                "approved_checkpoints": [cp.stage.value for cp in record.approved_checkpoints],
+            },
+            message="Run status",
+        ),
+        EXIT_OK,
+    )
+
+
+def _cmd_status_next(args):
+    record, mgr, run_dir = _load_run(args.work_id, args.base_path)
+    rc = record.resume_context
+    print_and_exit(
+        format_success(
+            {
+                "work_id": str(record.work_id),
+                "next_allowed_operation": rc.next_allowed_operation,
+                "active_item": rc.active_item,
+                "last_completed_operation": rc.last_completed_operation,
+            },
+            message="Next operation",
+        ),
+        EXIT_OK,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Stage commands
+# ---------------------------------------------------------------------------
+
+
+def _resolve_content(args) -> str:
+    """Resolve content from --content or --content-file option."""
+    if args.content:
+        return args.content
+    if args.content_file:
+        path = Path(args.content_file)
+        if not path.exists():
+            print_and_exit(
+                format_error(f"Content file not found: {path}", exit_code=EXIT_NOT_FOUND),
+                EXIT_NOT_FOUND,
+            )
+        return path.read_text(encoding="utf-8")
+    print_and_exit(
+        format_error("Either --content or --content-file is required", exit_code=EXIT_CLI_ERR),
+        EXIT_CLI_ERR,
+    )
+
+
+def _cmd_stage_produce(args):
+    record, mgr, run_dir = _load_run(args.work_id, args.base_path)
+    stage = _parse_stage(args.stage)
+    content = _resolve_content(args)
+
+    am = ArtifactManager(run_dir)
+    path = am.stage_produce(stage, content)
+
+    # Update run record active artifacts
+    artifact_file = STAGE_ARTIFACT_MAP[stage]
+    upsert_active_artifact(record, stage, artifact_file, 1, "draft")
+    update_resume_context(record, last_operation=f"produce_{stage.value}")
+    mgr.save(record)
+
+    print_and_exit(
+        format_success(
+            {"work_id": str(record.work_id), "stage": stage.value, "artifact": str(path)},
+            message=f"Artifact produced for stage: {stage.value}",
+        ),
+        EXIT_OK,
+    )
+
+
+def _cmd_stage_update(args):
+    record, mgr, run_dir = _load_run(args.work_id, args.base_path)
+    stage = _parse_stage(args.stage)
+    content = _resolve_content(args)
+
+    am = ArtifactManager(run_dir)
+    path = am.stage_update(stage, content)
+
+    # Update run record
+    from tools.workflow_cli.artifact import get_artifact_version
+    new_version = get_artifact_version(run_dir, stage)
+    artifact_file = STAGE_ARTIFACT_MAP[stage]
+    upsert_active_artifact(record, stage, artifact_file, new_version, "draft")
+    update_resume_context(record, last_operation=f"update_{stage.value}")
+    mgr.save(record)
+
+    print_and_exit(
+        format_success(
+            {
+                "work_id": str(record.work_id),
+                "stage": stage.value,
+                "artifact": str(path),
+                "version": new_version,
+            },
+            message=f"Artifact updated for stage: {stage.value}",
+        ),
+        EXIT_OK,
+    )
+
+
+def _cmd_stage_ready(args):
+    record, mgr, run_dir = _load_run(args.work_id, args.base_path)
+    stage = _parse_stage(args.stage)
+
+    am = ArtifactManager(run_dir)
+    try:
+        am.stage_ready(stage)
+    except FileNotFoundError:
+        print_and_exit(
+            format_error(
+                f"Artifact not found for stage {stage.value!r}; produce it first",
+                exit_code=EXIT_NOT_FOUND,
+            ),
+            EXIT_NOT_FOUND,
+        )
+
+    # Update run record
+    from tools.workflow_cli.artifact import get_artifact_version
+    version = get_artifact_version(run_dir, stage)
+    artifact_file = STAGE_ARTIFACT_MAP[stage]
+    upsert_active_artifact(record, stage, artifact_file, version, "ready")
+    update_resume_context(record, last_operation=f"ready_{stage.value}")
+    mgr.save(record)
+
+    print_and_exit(
+        format_success(
+            {"work_id": str(record.work_id), "stage": stage.value},
+            message=f"Stage marked ready: {stage.value}",
+        ),
+        EXIT_OK,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Subparser registration
+# ---------------------------------------------------------------------------
+
+
+def _register_run_commands(subparsers):
+    # run-start
+    p = subparsers.add_parser("run-start", help="Start a new workflow run")
+    p.add_argument("--work-id", required=True, help="Workflow ID (WF-YYYYMMDD-slug)")
+    p.add_argument("--requirement", required=True, help="Raw requirement text")
+    p.add_argument("--repo-path", default=None, help="Path to repository for baseline scan")
+    p.set_defaults(func=_cmd_run_start)
+
+    # run-resume
+    p = subparsers.add_parser("run-resume", help="Resume a workflow run")
+    p.add_argument("--work-id", required=True)
+    p.set_defaults(func=_cmd_run_resume)
+
+    # run-close
+    p = subparsers.add_parser("run-close", help="Close a workflow run")
+    p.add_argument("--work-id", required=True)
+    p.set_defaults(func=_cmd_run_close)
+
+    # run-reopen
+    p = subparsers.add_parser("run-reopen", help="Reopen a closed workflow run")
+    p.add_argument("--from", dest="from_id", required=True, help="Source work-id to reopen from")
+    p.add_argument("--stage", required=True, help="Target stage to reopen at")
+    p.add_argument("--reason", required=True, help="Reason for reopening")
+    p.set_defaults(func=_cmd_run_reopen)
+
+
+def _register_tier_commands(subparsers):
+    # tier-estimate
+    p = subparsers.add_parser("tier-estimate", help="Estimate tier for requirement text")
+    p.add_argument("--text", required=True, help="Requirement text to estimate")
+    p.add_argument("--repo-path", default=None, help="Path to repository for baseline scan")
+    p.set_defaults(func=_cmd_tier_estimate)
+
+    # tier-lock
+    p = subparsers.add_parser("tier-lock", help="Lock tier for a run")
+    p.add_argument("--work-id", required=True)
+    p.add_argument("--base", required=True, choices=["light", "standard"])
+    p.add_argument("--modifiers", default=None, help="Comma-separated modifiers")
+    p.add_argument("--override-floor", action="store_true", help="Allow locking below floor")
+    p.add_argument("--confirm", action="store_true", help="Required confirmation for override-floor")
+    p.set_defaults(func=_cmd_tier_lock)
+
+    # tier-escalate
+    p = subparsers.add_parser("tier-escalate", help="Add a modifier to locked tier")
+    p.add_argument("--work-id", required=True)
+    p.add_argument(
+        "--modifier",
+        required=True,
+        choices=[m.value for m in TierModifier],
+        help="Modifier to add",
+    )
+    p.set_defaults(func=_cmd_tier_escalate)
+
+    # tier-status
+    p = subparsers.add_parser("tier-status", help="Print tier estimate and lock status")
+    p.add_argument("--work-id", required=True)
+    p.set_defaults(func=_cmd_tier_status)
+
+
+def _register_gate_commands(subparsers):
+    # gate-entry
+    p = subparsers.add_parser("gate-entry", help="Check entry gate for a stage")
+    p.add_argument("--work-id", required=True)
+    p.add_argument("--stage", required=True)
+    p.set_defaults(func=_cmd_gate_entry)
+
+    # gate-quality
+    p = subparsers.add_parser("gate-quality", help="Check quality gate for a stage")
+    p.add_argument("--work-id", required=True)
+    p.add_argument("--stage", required=True)
+    p.set_defaults(func=_cmd_gate_quality)
+
+
+def _register_status_commands(subparsers):
+    # status-run
+    p = subparsers.add_parser("status-run", help="Print run state, stage, tier, open routes")
+    p.add_argument("--work-id", required=True)
+    p.set_defaults(func=_cmd_status_run)
+
+    # status-next
+    p = subparsers.add_parser("status-next", help="Print next allowed operation from resume context")
+    p.add_argument("--work-id", required=True)
+    p.set_defaults(func=_cmd_status_next)
+
+
+def _register_stage_commands(subparsers):
+    def _add_content_args(p):
+        grp = p.add_mutually_exclusive_group()
+        grp.add_argument("--content", default=None, help="Artifact content (inline)")
+        grp.add_argument("--content-file", default=None, help="Path to file containing content")
+
+    # stage-produce
+    p = subparsers.add_parser("stage-produce", help="Write initial draft of a stage artifact")
+    p.add_argument("--work-id", required=True)
+    p.add_argument("--stage", required=True)
+    _add_content_args(p)
+    p.set_defaults(func=_cmd_stage_produce)
+
+    # stage-update
+    p = subparsers.add_parser("stage-update", help="Increment version and update stage artifact")
+    p.add_argument("--work-id", required=True)
+    p.add_argument("--stage", required=True)
+    _add_content_args(p)
+    p.set_defaults(func=_cmd_stage_update)
+
+    # stage-ready
+    p = subparsers.add_parser("stage-ready", help="Mark a stage artifact as ready")
+    p.add_argument("--work-id", required=True)
+    p.add_argument("--stage", required=True)
+    p.set_defaults(func=_cmd_stage_ready)
+
+
+# ---------------------------------------------------------------------------
+# main
+# ---------------------------------------------------------------------------
+
+
+def main(args=None):
+    parser = argparse.ArgumentParser(
+        prog="workflow",
+        description="req-to-plan CLI — internal Agent commands",
+    )
+    parser.add_argument(
+        "--base-path",
+        type=Path,
+        default=None,
+        help="Override base path for .req-to-plan/ directory (for testing)",
+    )
+
+    subparsers = parser.add_subparsers(dest="command", required=True)
+    _register_run_commands(subparsers)
+    _register_tier_commands(subparsers)
+    _register_gate_commands(subparsers)
+    _register_status_commands(subparsers)
+    _register_stage_commands(subparsers)
+
+    parsed = parser.parse_args(args)
+    parsed.func(parsed)
+
+
+if __name__ == "__main__":
+    main()
