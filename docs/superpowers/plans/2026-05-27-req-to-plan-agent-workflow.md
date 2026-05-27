@@ -1554,7 +1554,7 @@ class TestOutput(unittest.TestCase):
             result_status="active_stage_draft",
             run_path=".req-to-plan/WF-001/run.md",
             current_stage="design",
-            next_allowed_command="workflow gate quality --work-id WF-001 --stage design",
+            next_allowed_command="python3 -m tools.workflow_cli gate-quality --work-id WF-001 --stage design",
         )
         sys.stdout = sys.__stdout__
         output = buf.getvalue()
@@ -1569,17 +1569,124 @@ if __name__ == "__main__":
     unittest.main()
 ```
 
-- [ ] **Step 3: Run output tests**
+- [ ] **Step 3: Write CLI tests**
 
-Run: `cd /Users/xubo/x-skills/req-to-plan && python3 -m unittest tests.test_output -v`
-Expected: FAIL with ImportError (output.py not created yet)
+```python
+# tests/test_cli.py
+import unittest
+import tempfile
+import json
+import io
+import sys
+from pathlib import Path
 
-- [ ] **Step 4: Verify output tests pass**
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from tools.workflow_cli.cli import build_parser, main
+from tools.workflow_cli.state import RunStateManager, create_run_record
+from tools.workflow_cli.artifact import ArtifactManager
+from tools.workflow_cli.models import WorkId, Stage, RunStatus
+
+
+class StdoutCapture:
+    def __enter__(self):
+        self._old = sys.stdout
+        self.buffer = io.StringIO()
+        sys.stdout = self.buffer
+        return self.buffer
+
+    def __exit__(self, exc_type, exc, tb):
+        sys.stdout = self._old
+
+
+class TestCliParser(unittest.TestCase):
+    def test_parser_accepts_registered_flat_commands(self):
+        parser = build_parser()
+        commands = [
+            ["run-start", "--work-id", "WF-20260527-cli-test"],
+            ["stage-produce", "--work-id", "WF-20260527-cli-test", "--stage", "raw_requirement"],
+            ["gate-quality", "--work-id", "WF-20260527-cli-test", "--stage", "design"],
+            ["checkpoint-decide", "--work-id", "WF-20260527-cli-test", "--stage", "plan", "--decision", "approved"],
+            ["executor-adapt", "--work-id", "WF-20260527-cli-test", "--executor", "superpowers"],
+        ]
+        for argv in commands:
+            with self.subTest(argv=argv):
+                args = parser.parse_args(argv)
+                self.assertEqual(args.command, argv[0])
+
+    def test_dry_run_json_reports_no_writes(self):
+        with tempfile.TemporaryDirectory() as td, StdoutCapture() as out:
+            rc = main([
+                "status-run",
+                "--work-id", "WF-20260527-cli-test",
+                "--artifact-root", td,
+                "--dry-run",
+                "--json",
+            ])
+        data = json.loads(out.getvalue())
+        self.assertEqual(rc, 0)
+        self.assertEqual(data["status"], "dry_run")
+        self.assertEqual(data["planned_writes"], [])
+
+    def test_run_start_creates_run_and_raw_artifacts(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "WF-20260527-cli-start"
+            with StdoutCapture() as out:
+                rc = main([
+                    "run-start",
+                    "--work-id", "WF-20260527-cli-start",
+                    "--artifact-root", str(root),
+                    "--source", "Add login rate limiting.",
+                    "--json",
+                ])
+            data = json.loads(out.getvalue())
+            self.assertEqual(rc, 0)
+            self.assertEqual(data["command_result"], "active_stage_draft")
+            self.assertIn("stage-produce", data["next_allowed_command"])
+            self.assertTrue((root / "run.md").exists())
+            self.assertTrue((root / "00-raw-requirement.md").exists())
+            self.assertTrue((root / "01-intake-brief.md").exists())
+
+    def test_gate_quality_failure_updates_run_state(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "WF-20260527-cli-gate"
+            root.mkdir(parents=True)
+            record = create_run_record(WorkId("WF-20260527-cli-gate"))
+            record.current_stage = Stage.DESIGN
+            record.status = RunStatus.ACTIVE_STAGE_DRAFT
+            RunStateManager(root).save(record)
+            ArtifactManager(root).create("05-design.md", "# Missing frontmatter\n")
+
+            with StdoutCapture() as out:
+                rc = main([
+                    "gate-quality",
+                    "--work-id", "WF-20260527-cli-gate",
+                    "--artifact-root", str(root),
+                    "--stage", "design",
+                    "--json",
+                ])
+            data = json.loads(out.getvalue())
+            self.assertEqual(rc, 1)
+            self.assertEqual(data["command_result"], "quality_gate_failed")
+            self.assertTrue(any("frontmatter" in stop.lower() for stop in data["stops"]))
+            self.assertEqual(RunStateManager(root).load().status, RunStatus.QUALITY_GATE_FAILED)
+
+
+if __name__ == "__main__":
+    unittest.main()
+```
+
+- [ ] **Step 4: Run output tests**
 
 Run: `cd /Users/xubo/x-skills/req-to-plan && python3 -m unittest tests.test_output -v`
 Expected: All tests PASS
 
-- [ ] **Step 5: Write cli.py (comprehensive command router)**
+- [ ] **Step 5: Run CLI tests before implementation**
+
+Run: `cd /Users/xubo/x-skills/req-to-plan && python3 -m unittest tests.test_cli -v`
+Expected: FAIL with ImportError (cli.py not created yet)
+
+- [ ] **Step 6: Write cli.py (comprehensive command router)**
 
 ```python
 # tools/workflow_cli/cli.py
@@ -1642,7 +1749,7 @@ def cmd_run_start(args: argparse.Namespace) -> int:
         return print_result(
             "CMD-RUN-START", "duplicate_active_run",
             run_path=str(artifact_root / "run.md"),
-            next_allowed_command=f"workflow status run --work-id {args.work_id}",
+            next_allowed_command=f"python3 -m tools.workflow_cli status-run --work-id {args.work_id}",
             stops=["Run already exists"],
             json_mode=args.json,
             exit_code=6,
@@ -1665,7 +1772,7 @@ def cmd_run_start(args: argparse.Namespace) -> int:
         run_state_after="active_stage_draft",
         current_stage=record.current_stage.value,
         writes=[{"path": str(artifact_root / "run.md"), "kind": "run_update"}],
-        next_allowed_command=f"workflow stage produce --work-id {args.work_id} --stage raw_requirement",
+        next_allowed_command=f"python3 -m tools.workflow_cli stage-produce --work-id {args.work_id} --stage raw_requirement",
         json_mode=args.json,
     )
 
@@ -1687,7 +1794,7 @@ def cmd_run_resume(args: argparse.Namespace) -> int:
                 "CMD-RUN-RESUME", "ready_to_close",
                 run_path=str(artifact_root / "run.md"),
                 current_stage=record.current_stage.value,
-                next_allowed_command=f"workflow run close --work-id {str(record.work_id)}",
+                next_allowed_command=f"python3 -m tools.workflow_cli run-close --work-id {str(record.work_id)}",
                 json_mode=args.json,
             )
         record.status = RunStatus.NEXT_STAGE
@@ -1704,7 +1811,7 @@ def cmd_run_resume(args: argparse.Namespace) -> int:
             run_path=str(artifact_root / "run.md"),
             run_state_after="next_stage",
             current_stage=next_stage.value,
-            next_allowed_command=f"workflow gate entry --work-id {str(record.work_id)} --stage {next_stage.value}",
+            next_allowed_command=f"python3 -m tools.workflow_cli gate-entry --work-id {str(record.work_id)} --stage {next_stage.value}",
             json_mode=args.json,
         )
 
@@ -1827,7 +1934,7 @@ def cmd_stage_produce(args: argparse.Namespace) -> int:
         current_stage=stage.value,
         active_artifact=f"{filename}@v{version}",
         writes=[{"path": str(artifact_root / filename), "kind": "artifact_update"}],
-        next_allowed_command=f"workflow stage ready --work-id {str(record.work_id)} --stage {stage.value}",
+        next_allowed_command=f"python3 -m tools.workflow_cli stage-ready --work-id {str(record.work_id)} --stage {stage.value}",
         json_mode=args.json,
     )
 
@@ -1859,7 +1966,7 @@ def cmd_stage_ready(args: argparse.Namespace) -> int:
         run_path=str(artifact_root / "run.md"),
         current_stage=stage.value,
         active_artifact=f"{filename}@v{version}",
-        next_allowed_command=f"workflow gate quality --work-id {str(record.work_id)} --stage {stage.value}",
+        next_allowed_command=f"python3 -m tools.workflow_cli gate-quality --work-id {str(record.work_id)} --stage {stage.value}",
         json_mode=args.json,
     )
 
@@ -1881,7 +1988,7 @@ def cmd_gate_entry(args: argparse.Namespace) -> int:
             run_path=str(artifact_root / "run.md"),
             run_state_after="active_stage_draft",
             current_stage=stage.value,
-            next_allowed_command=f"workflow stage produce --work-id {str(record.work_id)} --stage {stage.value}",
+            next_allowed_command=f"python3 -m tools.workflow_cli stage-produce --work-id {str(record.work_id)} --stage {stage.value}",
             json_mode=args.json,
         )
     else:
@@ -1933,7 +2040,7 @@ def cmd_gate_quality(args: argparse.Namespace) -> int:
         run_state_before="active_stage_draft",
         run_state_after="ready_for_checkpoint_review",
         current_stage=stage.value,
-        next_allowed_command=f"workflow review checkpoint --work-id {str(record.work_id)} --stage {stage.value}",
+        next_allowed_command=f"python3 -m tools.workflow_cli review-checkpoint --work-id {str(record.work_id)} --stage {stage.value}",
         json_mode=args.json,
     )
 
@@ -1952,7 +2059,7 @@ def cmd_review_checkpoint(args: argparse.Namespace) -> int:
         run_path=str(artifact_root / "run.md"),
         run_state_after="checkpoint_review",
         current_stage=stage.value,
-        next_allowed_command=f"workflow review merge --work-id {str(record.work_id)} --stage {stage.value}",
+        next_allowed_command=f"python3 -m tools.workflow_cli review-merge --work-id {str(record.work_id)} --stage {stage.value}",
         json_mode=args.json,
     )
 
@@ -1967,7 +2074,7 @@ def cmd_review_merge(args: argparse.Namespace) -> int:
         "CMD-REVIEW-MERGE", "review_findings_merged",
         run_path=str(artifact_root / "run.md"),
         current_stage=stage.value,
-        next_allowed_command=f"workflow checkpoint decide --work-id {str(record.work_id)} --stage {stage.value} --decision approved --confirm",
+        next_allowed_command=f"python3 -m tools.workflow_cli checkpoint-decide --work-id {str(record.work_id)} --stage {stage.value} --decision approved --confirm",
         json_mode=args.json,
     )
 
@@ -2008,7 +2115,7 @@ def cmd_checkpoint_decide(args: argparse.Namespace) -> int:
         )
         mgr.save(record)
 
-        next_cmd = f"workflow run close --work-id {str(record.work_id)}" if stage == Stage.PLAN else f"workflow run resume --work-id {str(record.work_id)}"
+        next_cmd = f"python3 -m tools.workflow_cli run-close --work-id {str(record.work_id)}" if stage == Stage.PLAN else f"python3 -m tools.workflow_cli run-resume --work-id {str(record.work_id)}"
         return print_result(
             "CMD-CHECKPOINT-DECIDE", "approved",
             run_path=str(artifact_root / "run.md"),
@@ -2256,22 +2363,22 @@ def _next_command_for_state(record: RunRecord) -> str:
     stage = record.current_stage.value
     status = record.status
     if status == RunStatus.NOT_STARTED:
-        return f"workflow run start --work-id {wid}"
+        return f"python3 -m tools.workflow_cli run-start --work-id {wid}"
     if status == RunStatus.ACTIVE_STAGE_DRAFT:
-        return f"workflow stage produce --work-id {wid} --stage {stage}"
+        return f"python3 -m tools.workflow_cli stage-produce --work-id {wid} --stage {stage}"
     if status == RunStatus.ENTRY_GATE_FAILED:
-        return f"workflow gate entry --work-id {wid} --stage {stage}"
+        return f"python3 -m tools.workflow_cli gate-entry --work-id {wid} --stage {stage}"
     if status == RunStatus.QUALITY_GATE_FAILED:
-        return f"workflow gate quality --work-id {wid} --stage {stage}"
+        return f"python3 -m tools.workflow_cli gate-quality --work-id {wid} --stage {stage}"
     if status == RunStatus.READY_FOR_CHECKPOINT_REVIEW:
-        return f"workflow review checkpoint --work-id {wid} --stage {stage}"
+        return f"python3 -m tools.workflow_cli review-checkpoint --work-id {wid} --stage {stage}"
     if status == RunStatus.CHECKPOINT_REVIEW:
-        return f"workflow review merge --work-id {wid} --stage {stage}"
+        return f"python3 -m tools.workflow_cli review-merge --work-id {wid} --stage {stage}"
     if status == RunStatus.CHECKPOINT_APPROVED:
-        return f"workflow run close --work-id {wid}" if record.current_stage == Stage.PLAN else f"workflow run resume --work-id {wid}"
+        return f"python3 -m tools.workflow_cli run-close --work-id {wid}" if record.current_stage == Stage.PLAN else f"python3 -m tools.workflow_cli run-resume --work-id {wid}"
     if status == RunStatus.UPSTREAM_GAP_ROUTING:
-        return f"workflow gap route --work-id {wid}"
-    return f"workflow status next --work-id {wid}"
+        return f"python3 -m tools.workflow_cli gap-route --work-id {wid}"
+    return f"python3 -m tools.workflow_cli status-next --work-id {wid}"
 
 
 def _add_common_args(parser: argparse.ArgumentParser) -> None:
@@ -2424,15 +2531,15 @@ if __name__ == "__main__":
     sys.exit(main())
 ```
 
-- [ ] **Step 6: Run all tests**
+- [ ] **Step 7: Run all tests**
 
-Run: `cd /Users/xubo/x-skills/req-to-plan && python3 -m unittest tests.test_output tests.test_models tests.test_state tests.test_artifact tests.test_gates -v`
+Run: `cd /Users/xubo/x-skills/req-to-plan && python3 -m unittest tests.test_output tests.test_cli tests.test_models tests.test_state tests.test_artifact tests.test_gates -v`
 Expected: All tests PASS
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
-cd /Users/xubo/x-skills/req-to-plan && git add tools/workflow_cli/output.py tools/workflow_cli/cli.py tests/test_output.py && git commit -m "feat: add output formatter and CLI command router"
+cd /Users/xubo/x-skills/req-to-plan && git add tools/workflow_cli/output.py tools/workflow_cli/cli.py tests/test_output.py tests/test_cli.py && git commit -m "feat: add output formatter and CLI command router"
 ```
 
 ---
@@ -2705,7 +2812,7 @@ def convert_to_superpowers(tasks: list[dict], plan_title: str) -> str:
         "",
         f"**Goal:** Execute {len(tasks)} tasks from the approved executor-neutral PLAN.",
         "",
-        "**Source PLAN:** Derived from approved .req-to-plan artifact via `workflow executor adapt --executor superpowers`.",
+        "**Source PLAN:** Derived from approved .req-to-plan artifact via `python3 -m tools.workflow_cli executor-adapt --executor superpowers`.",
         "",
         "---",
         "",
@@ -2777,7 +2884,6 @@ cd /Users/xubo/x-skills/req-to-plan && git add tools/workflow_cli/adapters/ test
 
 **Files:**
 - Create: `tools/workflow_cli/agent_shortcuts.py`
-- Create: `tests/test_agent_shortcuts.py` (placeholder — test content deferred to implementation)
 - Create: `tools/coyeme-workflow-start`
 - Create: `tools/coyeme-workflow-continue`
 - Create: `tools/coyeme-workflow-status`
@@ -3217,12 +3323,12 @@ Invoke this skill when the user runs any `coyeme-workflow-*` command or asks to 
 
    | Status | Action |
    |--------|--------|
-   | `active_stage_draft` | Produce stage artifact content using the stage workflow template, then call `workflow stage ready` |
+   | `active_stage_draft` | Produce stage artifact content using the stage workflow template, then call `python3 -m tools.workflow_cli stage-ready` |
    | `entry_gate_failed` | Fix upstream issue, rerun entry gate, or route upstream |
    | `quality_gate_failed` | Fix structural issues, then rerun quality gate → if structural checks pass but semantic issues remain, fix them and rerun |
    | `ready_for_checkpoint_review` | Run checkpoint review (dispatch subagent review if scope warrants), produce review findings |
    | `checkpoint_review` | Merge findings, ask user for required confirmations |
-   | `checkpoint_approved` | Call `workflow run resume` to advance to next stage |
+   | `checkpoint_approved` | Call `python3 -m tools.workflow_cli run-resume` to advance to next stage |
    | `next_stage` | Run entry gate for the next stage |
    | `upstream_gap_routing` | Identify owner stage, route gap, repair upstream, re-import |
 
@@ -3230,10 +3336,10 @@ Invoke this skill when the user runs any `coyeme-workflow-*` command or asks to 
    - Read the stage workflow document's template
    - Read approved upstream artifacts from `.req-to-plan/<work-id>/`
    - Generate artifact content following the template exactly
-   - Pipe content to CLI via stdin: `echo "$content" | python3 -m tools.workflow_cli stage produce --stage <stage> --work-id <id> --json`
+   - Pipe content to CLI via stdin: `echo "$content" | python3 -m tools.workflow_cli stage-produce --stage <stage> --work-id <id> --json`
 
 7. For Quality Gate:
-   - First run structural check via CLI: `python3 -m tools.workflow_cli gate quality --stage <stage> --work-id <id> --json`
+   - First run structural check via CLI: `python3 -m tools.workflow_cli gate-quality --stage <stage> --work-id <id> --json`
    - Then run semantic check yourself using the Quality Gate checklist from the stage workflow document
    - If both pass, the stage is `ready_for_checkpoint_review`
 
@@ -3241,7 +3347,7 @@ Invoke this skill when the user runs any `coyeme-workflow-*` command or asks to 
    - Run subagent reviews for migration/rewrite/integration/cross-project/safety-sensitive work
    - Merge findings
    - Present user with confirmation questions (acceptance criteria, design choices, risk acceptance)
-   - After user confirms, call: `python3 -m tools.workflow_cli checkpoint decide --stage <stage> --work-id <id> --decision approved --confirm --json`
+   - After user confirms, call: `python3 -m tools.workflow_cli checkpoint-decide --stage <stage> --work-id <id> --decision approved --confirm --json`
 
 9. After PLAN Checkpoint approval:
    - Suggest: "PLAN approved. Run `coyeme-workflow-adapt --executor superpowers` to generate the Superpowers execution plan."
@@ -3358,7 +3464,7 @@ class TestWorkflowIntegration(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
-        self.artifact_root = self.root / "WF-FULL-INTEGRATION-TEST"
+        self.artifact_root = self.root / "WF-20260527-full-integration-test"
         self.artifact_root.mkdir(parents=True)
 
     def tearDown(self):
@@ -3382,7 +3488,7 @@ status: {status}
 
     def test_full_workflow_state_transitions(self):
         # 1. Create run
-        wid = WorkId("WF-FULL-INTEGRATION-TEST")
+        wid = WorkId("WF-20260527-full-integration-test")
         record = create_run_record(wid)
         record.current_stage = Stage.RAW_REQUIREMENT
         mgr = RunStateManager(self.artifact_root)
