@@ -431,6 +431,10 @@ Suggested template:
 |---|---|---|---|
 ```
 
+### Tier-Aware Sub-steps
+
+PLAN sub-steps (Contract-to-Task Mapping, Risk Discovery Plan Input Traceability, TDD Decomposition, Execution Sequencing, Verification Plan, Rollback / Safety Plan, Stop / Escalation Conditions) are required or optional per tier. Optional sub-steps must either be present or marked `N/A: <reason>` consistent with the locked tier. See [Workflow Complexity Tier Rule](workflow-invariants.md#workflow-complexity-tier-rule) for the full per-tier table.
+
 ## PLAN Quality Gate
 
 Purpose: decide whether PLAN is internally complete enough to enter checkpoint review.
@@ -452,6 +456,7 @@ Pass conditions:
 - Stop / Escalation Conditions are explicit.
 - Risk Discovery Plan Inputs are traceable through DESIGN, SPEC, and PLAN coverage.
 - No upstream gap is being guessed into PLAN.
+- Optional sub-steps are either present or marked `N/A: <reason>` consistent with the locked tier per [Workflow Complexity Tier Rule](workflow-invariants.md#workflow-complexity-tier-rule).
 
 Fail result:
 

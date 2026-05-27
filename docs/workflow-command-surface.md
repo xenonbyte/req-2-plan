@@ -102,7 +102,8 @@ The command intent catalog below is the semantic index. The full operation-level
 
 | Group | Purpose |
 |---|---|
-| Run Lifecycle | Start, resume, and close a workflow run. |
+| Run Lifecycle | Start, resume, reopen, and close a workflow run. |
+| Tier | Estimate, lock, escalate, and inspect the workflow complexity tier; bundle eligible checkpoints. |
 | Stage Artifact | Load, create, produce, or update stage artifacts. |
 | Gate / Checkpoint | Run entry gates, Quality Gates, checkpoint reviews, and checkpoint decisions. |
 | User Confirmation | Record, reject, clarify, and link user-owned confirmations. |
@@ -126,6 +127,17 @@ Column meanings:
 | `CMD-RUN-START` | Start Workflow Run | `start_workflow_run`, `load_or_create_artifact` | Raw requirement or durable source reference; work ID context. | Conditional | May create a new run; stop on duplicate active run, missing requirement, or unknown source provenance. | Create artifact root, `run.md`, and initial requirement/intake artifact; result `active_stage_draft`. |
 | `CMD-RUN-RESUME` | Resume Workflow Run | `resume_from_checkpoint`, `load_or_create_artifact` | Work ID or run record path; `Resume Context` when present. | Conditional | `context_refresh` may load required reread targets, refresh `Resume Context`, and report missing/ambiguous targets, open routes, or stale/superseded inputs without advancing stage. `ordinary_resume` may resume a clear run target only when the matrix allows ordinary `CMD-RUN-RESUME` and no open route remains. Stop on ambiguous target, missing reread target, active item conflict, any open route including a repaired route that still requires `CMD-GAP-REIMPORT`, stale/superseded input, or conflicting versions. | `context_refresh` may update `run.md` only for `Resume Context` or missing-target status. `ordinary_resume` may update `run.md` and load/create next-stage draft after approval and no open route. Result `active_stage_draft`, `next_stage`, or `upstream_gap_routing`. |
 | `CMD-RUN-CLOSE` | Close Workflow Run | `close_workflow_run` | Approved PLAN Checkpoint and run record. | No | May close only after approved PLAN and no open route; stop on stale/superseded final references. | Update `run.md` only; result `closed_at_plan_checkpoint`. |
+| `CMD-RUN-REOPEN` | Reopen Workflow Run | `reopen_workflow_run` | Source `closed_at_plan_checkpoint` work ID or run path, target start stage, reopen reason. | Required | May copy source artifacts up to target start stage into a new `<source-work-id>-rN` run; stop on missing source, source not closed, invalid stage name, or unresolved prior reopen. | Create new `run.md` with lineage reference and copied prior-stage artifacts; result `active_stage_draft` for the reopened run. |
+
+### Tier
+
+| Command Intent | Operation Intents | Canonical Operations | Inputs | Confirmation | Authority / stops | Writes / result |
+|---|---|---|---|---|---|---|
+| `CMD-TIER-ESTIMATE` | Estimate Tier | `estimate_tier` | Raw requirement, baseline scan, link expansion, keyword scan output. | No | May record Evidence Block; stop on missing baseline scan, unresolved link expansion, or incomplete Evidence Block fields. | Write Tier Estimation Evidence Block to active draft and `run.md`; result `tier_estimate_recorded`. |
+| `CMD-TIER-LOCK` | Lock Tier | `lock_tier` | TierEstimate with complete Evidence Block, user confirmation, optional `override_floor` reason. | Required | May lock the tier and enable full tier-aware Quality Gate checks; stop on missing estimate, incomplete Evidence Block, below-Floor request without `override_floor`, or Requirement Brief `stage-produce` already executed. | Write Tier Lock to `run.md` and Requirement Brief draft; result `tier_locked`. |
+| `CMD-TIER-ESCALATE` | Escalate Tier | `escalate_tier` | Existing Tier Lock, new modifier, triggering signal or reason, current stage. | Conditional | May append a modifier and revoke affected bundled checkpoints; stop on missing lock, duplicate modifier, terminal run, or unresolved revocation target. | Update Tier Lock and append escalation log; revoked bundle stages return to `checkpoint_review`; result `tier_escalated`. |
+| `CMD-TIER-STATUS` | Show Tier Status | `inspect_workflow_run` | Work ID or run record path. | No | Read only; stop if `run.md` is missing or tier records are inconsistent. | No writes; result current tier estimate, lock, modifiers, escalations, and bundle authorization status. |
+| `CMD-CHECKPOINT-BUNDLE` | Authorize Bundled Checkpoints | `authorize_bundled_checkpoints` | Bundled stage list, each stage's ready artifact and merged findings, required user confirmation. | Required | May approve eligible bundled stages in one decision; stop on any modifier, ineligible stage set, missing Quality Gate `ready`, unmerged findings, or applicable Forced Subagent Review condition. | Update Approved Checkpoints rows, write BundleAuthorization to `run.md`, mark bundled artifacts approved; result `bundle_authorized`. |
 
 ### Stage Artifact
 
@@ -134,7 +146,7 @@ Column meanings:
 | `CMD-STAGE-LOAD` | Load Or Create Stage Artifact | `load_or_create_artifact` | Work ID, target stage, upstream references, artifact lifecycle rules. | Conditional | May load/create target draft; stop on missing upstream approval, stale/superseded input, or unresolved route. | Create/update target draft and `run.md`; result `active_stage_draft`. |
 | `CMD-STAGE-PRODUCE` | Produce Stage Artifact | `produce_stage_artifact` | Stage workflow, approved upstream artifacts, current stage draft. | Conditional | May write current-stage owned sections; stop on upstream decision need or user confirmation need. | Update current draft; result `active_stage_draft`, `blocked`, or `upstream_gap_detected`. |
 | `CMD-STAGE-UPDATE` | Update Stage Artifact | `produce_stage_artifact` | Current draft, requested change, reason. | Conditional | May update unapproved draft or create new version; stop on approved-input conflict or ownership boundary change. | Update draft or create version; result `active_stage_draft`, `changes_requested`, or `superseded`. |
-| `CMD-STAGE-READY` | Produce Stage Artifact | `mark_stage_artifact_ready` | Current active draft artifact and stage readiness assertion. | Conditional | May mark only the current active draft artifact explicitly ready for Quality Gate evaluation; stop on wrong stage, missing active artifact, non-draft row status, blocking explicit artifact status, stale input, or non-owner open route. | Update artifact frontmatter and `run.md` Resume Context; result `stage_ready_recorded`. |
+| `CMD-STAGE-READY` | Mark Stage Artifact Ready | `mark_stage_artifact_ready` | Current active draft artifact and stage readiness assertion. | Conditional | May mark only the current active draft artifact explicitly ready for Quality Gate evaluation; stop on wrong stage, missing active artifact, non-draft row status, blocking explicit artifact status, stale input, or non-owner open route. | Update artifact frontmatter and `run.md` Resume Context; result `stage_ready_recorded`. |
 
 ### Gate / Checkpoint
 
@@ -183,7 +195,13 @@ Column meanings:
 
 ## Run State Command Eligibility Matrix
 
-Inspection command intents (`CMD-STATUS-*`) are allowed in any state when their required inputs exist. They must remain read-only and must return an inconsistency instead of choosing or running a write command.
+Inspection command intents (`CMD-STATUS-*`) and `CMD-TIER-STATUS` are allowed in any state when their required inputs exist. They must remain read-only and must return an inconsistency instead of choosing or running a write command.
+
+`CMD-TIER-ESTIMATE`, `CMD-TIER-LOCK`, and `CMD-TIER-ESCALATE` are allowed in any non-terminal run state (`active_stage_draft`, `entry_gate_failed`, `quality_gate_failed`, `ready_for_checkpoint_review`, `checkpoint_review`, `checkpoint_changes_requested`, `upstream_gap_routing`, `checkpoint_approved`, `next_stage`). They are refused in `not_started`, `closed_at_plan_checkpoint`, and inconsistent or unknown states. `CMD-TIER-LOCK` is additionally refused once `requirement_brief` has executed `stage-produce`; the operator must reopen the run if a lock change is required after that point.
+
+`CMD-CHECKPOINT-BUNDLE` is allowed only in `checkpoint_review`. It is refused in any other state.
+
+`CMD-RUN-REOPEN` is allowed only in `closed_at_plan_checkpoint`. It does not change the source run's state and creates a new run record for the reopened lineage.
 
 Context-refresh exception: `CMD-RUN-RESUME` may run before ordinary matrix refusal when an existing readable, nonterminal run cannot prove loaded active context because of compaction, interruption, handoff, manual resume, or missing `Resume Context`. In this mode it may only load required reread targets, refresh `Resume Context`, report missing/ambiguous targets, and surface open routes or stale/superseded inputs. It must not advance to a next stage, create a next-stage draft, close a route, approve a checkpoint, or write stage artifact content unless the current run state also allows ordinary `CMD-RUN-RESUME` in the matrix. If the run is `not_started`, `closed_at_plan_checkpoint`, inconsistent, or unknown after reading `run.md`, this exception must stop or return read-only status instead of writing.
 
@@ -196,12 +214,12 @@ The matrix below lists ordinary write-capable command intents allowed by run sta
 | `entry_gate_failed` | `CMD-GATE-ENTRY`, `CMD-CONFIRM-RECORD`, `CMD-CONFIRM-REJECT`, `CMD-GAP-RECORD`, `CMD-GAP-ROUTE` | Stop artifact production unless the entry failure is repaired or routed to the owner stage. |
 | `quality_gate_failed` | `CMD-STAGE-PRODUCE`, `CMD-STAGE-UPDATE`, `CMD-STAGE-READY`, `CMD-GATE-QUALITY`, `CMD-CONFIRM-RECORD`, `CMD-CONFIRM-REJECT`, `CMD-SUBAGENT-DISPATCH`, `CMD-SUBAGENT-MERGE`, `CMD-GAP-RECORD`, `CMD-GAP-ROUTE` | Stop checkpoint review and checkpoint decision until Quality Gate returns `ready`. |
 | `ready_for_checkpoint_review` | `CMD-REVIEW-CHECKPOINT`, `CMD-SUBAGENT-REVIEW`, `CMD-GAP-RECORD` | Stop checkpoint decision until review findings are written and merged. |
-| `checkpoint_review` | `CMD-REVIEW-CHECKPOINT` or `CMD-SUBAGENT-REVIEW` only for required review sources registered before review began, `CMD-REVIEW-MERGE`, `CMD-CONFIRM-RECORD`, `CMD-CONFIRM-REJECT`, `CMD-CONFIRM-LINK`, `CMD-CHECKPOINT-DECIDE` only after all review findings are merged and required confirmations for the requested decision are recorded, `CMD-GAP-RECORD`, `CMD-GAP-ROUTE` | Stop new unregistered review dispatch; allow confirmation evidence to be recorded while waiting for checkpoint decision; stop checkpoint decision until all review findings are written and merged. Stop `approved` decisions when any unresolved route or required change remains; allow `changes_requested`, `blocked`, `upstream_gap_detected`, or `route_upstream` decisions to record the corresponding non-approval result. |
+| `checkpoint_review` | `CMD-REVIEW-CHECKPOINT` or `CMD-SUBAGENT-REVIEW` only for required review sources registered before review began, `CMD-REVIEW-MERGE`, `CMD-CONFIRM-RECORD`, `CMD-CONFIRM-REJECT`, `CMD-CONFIRM-LINK`, `CMD-CHECKPOINT-DECIDE` only after all review findings are merged and required confirmations for the requested decision are recorded, `CMD-CHECKPOINT-BUNDLE` only for eligible no-modifier tiers with each bundled stage's Quality Gate `ready` and findings merged, `CMD-GAP-RECORD`, `CMD-GAP-ROUTE`, `CMD-TIER-ESTIMATE`, `CMD-TIER-LOCK`, `CMD-TIER-ESCALATE` | Stop new unregistered review dispatch; allow confirmation evidence to be recorded while waiting for checkpoint decision; stop checkpoint decision until all review findings are written and merged. Stop `approved` decisions when any unresolved route or required change remains; allow `changes_requested`, `blocked`, `upstream_gap_detected`, or `route_upstream` decisions to record the corresponding non-approval result. Stop `CMD-CHECKPOINT-BUNDLE` when any modifier is present or the requested stage set is not bundle-eligible. |
 | `checkpoint_changes_requested` | `CMD-STAGE-PRODUCE`, `CMD-STAGE-UPDATE`, `CMD-STAGE-READY`, `CMD-GATE-QUALITY`, `CMD-CONFIRM-RECORD`, `CMD-CONFIRM-REJECT`, `CMD-GAP-RECORD`, `CMD-GAP-ROUTE` | Stop checkpoint decision until requested changes are made and Quality Gate reruns. |
 | `upstream_gap_routing` | `CMD-GAP-ROUTE`, `CMD-GAP-REIMPORT` when an open route already has an approved repaired owner checkpoint, `CMD-STAGE-LOAD`, `CMD-STAGE-PRODUCE`, `CMD-STAGE-UPDATE`, `CMD-STAGE-READY`, `CMD-GATE-QUALITY`, `CMD-CHECKPOINT-DECIDE` only for the open route's owner-stage repair checkpoint, `CMD-ARTIFACT-MARK-STALE` | Stop affected downstream Quality Gate, review, and checkpoint approval until the owner-stage repair passes Quality Gate and Main/User Checkpoint, then re-import is complete. Do not use this state's `CMD-CHECKPOINT-DECIDE` allowance to approve the affected downstream stage before `CMD-GAP-REIMPORT` completes and downstream gate/review/checkpoint rerun. |
 | `checkpoint_approved` | `CMD-RUN-RESUME` only when no open route remains, `CMD-GAP-REIMPORT` when an open route was repaired by the just-approved owner stage, `CMD-RUN-CLOSE` for approved PLAN only | Stop ordinary resume when any open route remains; if the route owner checkpoint is approved, run re-import before selecting a next stage; stop re-import unless an open route exists and the approved checkpoint belongs to that route owner; stop close unless PLAN Checkpoint is approved and no route remains. |
 | `next_stage` | `CMD-STAGE-LOAD`, `CMD-GATE-ENTRY`, `CMD-RUN-RESUME` | Stop production until the target stage entry gate passes. |
-| `closed_at_plan_checkpoint` | None | Stop all write-capable workflow commands; only inspection is allowed. |
+| `closed_at_plan_checkpoint` | `CMD-RUN-REOPEN` | Stop all other write-capable workflow commands; inspection and `CMD-RUN-REOPEN` (which creates a new run without modifying the closed source) are allowed. |
 | inconsistent or unknown | None | Stop all write-capable commands and require operator repair or explicit route clarification. |
 
 State eligibility is necessary but not sufficient. A command intent must also satisfy its catalog row and the mapped operation contract in `workflow-operation-surface.md`.
@@ -247,9 +265,16 @@ Every operation intent in `workflow-operation-surface.md` must be covered by a c
 | Start Workflow Run | `CMD-RUN-START` | Covered |
 | Resume Workflow Run | `CMD-RUN-RESUME` | Covered |
 | Close Workflow Run | `CMD-RUN-CLOSE` | Covered |
+| Reopen Workflow Run | `CMD-RUN-REOPEN` | Covered |
+| Estimate Tier | `CMD-TIER-ESTIMATE` | Covered |
+| Lock Tier | `CMD-TIER-LOCK` | Covered |
+| Escalate Tier | `CMD-TIER-ESCALATE` | Covered |
+| Authorize Bundled Checkpoints | `CMD-CHECKPOINT-BUNDLE` | Covered |
+| Show Tier Status | `CMD-TIER-STATUS` | Covered |
 | Load Or Create Stage Artifact | `CMD-STAGE-LOAD` | Covered |
 | Produce Stage Artifact | `CMD-STAGE-PRODUCE` | Covered |
 | Update Stage Artifact | `CMD-STAGE-UPDATE` | Covered |
+| Mark Stage Artifact Ready | `CMD-STAGE-READY` | Covered |
 | Run Entry Gate | `CMD-GATE-ENTRY` | Covered |
 | Run Quality Gate | `CMD-GATE-QUALITY` | Covered |
 | Run Checkpoint Review | `CMD-REVIEW-CHECKPOINT` | Covered |

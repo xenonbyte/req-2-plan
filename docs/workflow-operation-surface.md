@@ -58,7 +58,8 @@ Carrier designs must not:
 
 | Group | Purpose |
 |---|---|
-| Run Lifecycle Operations | Start, resume, and close a workflow run. |
+| Run Lifecycle Operations | Start, resume, reopen, and close a workflow run. |
+| Tier Operations | Estimate, lock, escalate the workflow complexity tier; bundle eligible checkpoints. |
 | Stage Operations | Load, create, produce, or update stage artifacts. |
 | Gate / Checkpoint Operations | Run entry gates, Quality Gates, checkpoint reviews, and Main/User checkpoint approval. |
 | User Confirmation Operations | Record user-owned confirmations, rejections, and clarification requests. |
@@ -129,7 +130,7 @@ Raw requirement text or a durable source reference, plus a `work_id` or enough c
 No active run exists for the same work ID, or the user explicitly chooses to create a new run instead of resuming.
 
 **Allowed Artifact Writes**
-Create `docs/artifacts/<work-id>/run.md` and initial raw requirement or intake artifact.
+Create `.req-to-plan/<work-id>/run.md` and initial raw requirement or intake artifact.
 
 **run.md Updates**
 Set status to `active_stage_draft`, current stage to `raw_requirement` or `requirement_brief`, and record active artifacts.
@@ -204,6 +205,153 @@ Do not start implementation or executor-specific adaptation.
 **Result / Output**
 `closed_at_plan_checkpoint`
 
+### Reopen Workflow Run
+
+**Canonical Operations**
+`reopen_workflow_run`
+
+**Required Inputs**
+Source `closed_at_plan_checkpoint` work ID or run record path, target start stage (`requirement_brief`, `risk_discovery`, `design`, `spec`, or `plan`), and reopen reason.
+
+**Preconditions**
+Source run is `closed_at_plan_checkpoint`, source PLAN Checkpoint remains approved, target start stage is reachable in the canonical chain, and no in-progress reopen for the same source exists.
+
+**Allowed Artifact Writes**
+Create `.req-to-plan/<source-work-id>-rN/run.md` and copy source-run artifacts up to (but not including) the target start stage into the new run path. The source run's `run.md` and approved artifacts must not be modified.
+
+**run.md Updates**
+Write a new `run.md` for the reopened run with status `active_stage_draft`, current stage set to the target start stage, and a lineage reference (`reopened_from: <source-work-id>@<source-checkpoint>`). The source `run.md` is read-only during this operation.
+
+**User Confirmation Required**
+Required. Reopen is a deliberate fork; the operator must confirm the source work ID, target stage, and reason.
+
+**Stop Conditions**
+Source run not found, source run not `closed_at_plan_checkpoint`, invalid target stage name, target stage falls outside the canonical chain, or an existing `<source-work-id>-rN` run is unresolved.
+
+**Forbidden Behavior**
+Do not modify the source run's `run.md`. Do not delete source artifacts. Do not auto-approve the new run's first-stage checkpoint. Do not switch the workspace active pointer without explicit instruction.
+
+**Result / Output**
+`active_stage_draft` for the new `<source-work-id>-rN` run.
+
+## Tier Operations
+
+### Estimate Tier
+
+**Canonical Operations**
+`estimate_tier`
+
+**Required Inputs**
+Raw requirement text or durable source reference, repo baseline scan result, link expansion result, and keyword scan output.
+
+**Preconditions**
+Run record exists, raw requirement is loaded, and baseline scan plus link expansion have completed. Tier has not yet been locked, or operator explicitly requests re-estimation before lock.
+
+**Allowed Artifact Writes**
+Write or refresh the Tier Estimation Evidence Block in the active Intake Brief or Requirement Brief draft and in `run.md`.
+
+**run.md Updates**
+Record `tier_estimate` with base, modifiers, floor, keyword hits, repo baseline summary, linked context, scope signals, escalation candidates, and confirm status `pending`.
+
+**User Confirmation Required**
+No. Estimation is mechanical; lock requires confirmation.
+
+**Stop Conditions**
+Missing raw requirement, baseline scan incomplete, link expansion unresolved (`requires_auth` or `unreachable`), or Evidence Block fields cannot be populated.
+
+**Forbidden Behavior**
+Do not lock the tier. Do not enable full tier-aware Quality Gate checks. Do not silently downgrade modifier signals.
+
+**Result / Output**
+`tier_estimate_recorded` with Evidence Block; run state unchanged.
+
+### Lock Tier
+
+**Canonical Operations**
+`lock_tier`
+
+**Required Inputs**
+Current TierEstimate with complete Evidence Block, user confirmation, and optional `--override-floor` reason.
+
+**Preconditions**
+A TierEstimate exists, no Tier Lock exists yet, and Requirement Brief stage has not yet run `stage-produce`. If the requested lock is below the Floor, `override_floor` reason is required.
+
+**Allowed Artifact Writes**
+Write Tier Lock block to `run.md` and append a Tier Lock entry to the Requirement Brief draft.
+
+**run.md Updates**
+Set `tier_lock` with base, modifiers, locked_at timestamp, override_floor reason when applicable, and confirm source. Mark `tier_estimate.confirm_status = confirmed`.
+
+**User Confirmation Required**
+Required. Lock is a user-owned decision and must record the confirmation source.
+
+**Stop Conditions**
+No TierEstimate, Evidence Block incomplete, requested base/modifiers below Floor without `--override-floor` plus `--confirm`, or Requirement Brief `stage-produce` already executed.
+
+**Forbidden Behavior**
+Do not silently override the Floor. Do not drop modifiers. Do not lock with a stale Evidence Block.
+
+**Result / Output**
+`tier_locked`; run state unchanged. Subsequent `gate-quality` runs apply full tier-aware section checks.
+
+### Escalate Tier
+
+**Canonical Operations**
+`escalate_tier`
+
+**Required Inputs**
+Existing Tier Lock, new modifier from the canonical set, triggering signal or operator reason, and current stage.
+
+**Preconditions**
+Tier Lock exists, requested modifier is not already in the lock, run state is non-terminal, and the new modifier is supported by an observed signal or operator-recorded reason.
+
+**Allowed Artifact Writes**
+Append the new modifier to the Tier Lock block in `run.md` and add an escalation log entry. Mark affected Bundled Checkpoints as revoked when applicable.
+
+**run.md Updates**
+Update `tier_lock.modifiers`, append `tier_escalations[]` with modifier, triggered_in stage, reason, recorded_at. If a Bundled Checkpoint covers a stage whose section requirements change, mark that bundled checkpoint `revoked` and revert affected stage states to `checkpoint_review`.
+
+**User Confirmation Required**
+Required when escalation revokes an approved Bundled Checkpoint or changes a previously confirmed tier-derived decision.
+
+**Stop Conditions**
+No Tier Lock exists, modifier already present, terminal run state, or revocation target cannot be resolved unambiguously.
+
+**Forbidden Behavior**
+Do not remove an existing modifier. Do not silently re-approve a revoked bundled checkpoint. Do not bypass downstream re-import after revocation.
+
+**Result / Output**
+`tier_escalated`; run state may change to `checkpoint_review` for revoked bundled stages.
+
+### Authorize Bundled Checkpoints
+
+**Canonical Operations**
+`authorize_bundled_checkpoints`
+
+**Required Inputs**
+List of bundled stage names (`requirement_brief`, `risk_discovery`, optionally `design` for light + no modifier), each stage's ready artifact and merged review findings, and required user confirmation.
+
+**Preconditions**
+Tier Lock has no modifier and stage set matches `workflow-invariants.md#workflow-complexity-tier-rule` bundle eligibility (`light + no modifier`: requirement_brief + risk_discovery + design; `standard + no modifier`: requirement_brief + risk_discovery). Every bundled stage has Quality Gate `ready` and merged checkpoint review findings, with required confirmations recorded for the highest-authority stage in the bundle.
+
+**Allowed Artifact Writes**
+Write BundleAuthorization to `run.md`, append an Approved Checkpoints row for each bundled stage, and mark each bundled stage's artifact as `approved`.
+
+**run.md Updates**
+Record `bundle_authorization` with bundled_stages, approved_at, confirm source, and revocable flag. Set run status to `checkpoint_approved` for the last bundled stage and update downstream authorization records.
+
+**User Confirmation Required**
+Required. Bundle approval is a single user-owned decision spanning multiple stages.
+
+**Stop Conditions**
+Tier has any modifier, requested bundle does not match eligibility, any bundled stage lacks Quality Gate `ready` or merged findings, or any forced subagent review condition applies (see `workflow-invariants.md#forced-subagent-review-rule`).
+
+**Forbidden Behavior**
+Do not bundle when any modifier is present. Do not skip individual stage Quality Gates. Do not approve a bundle that contains a stage with an unresolved upstream gap.
+
+**Result / Output**
+`bundle_authorized`; multiple stages become `approved` in a single audit record. Tier escalation may later revoke the bundle.
+
 ## Stage Operations
 
 ### Load Or Create Stage Artifact
@@ -263,6 +411,35 @@ Do not change upstream artifact content from a downstream stage.
 
 **Result / Output**
 `active_stage_draft`, `blocked`, or `upstream_gap_detected`
+
+### Mark Stage Artifact Ready
+
+**Canonical Operations**
+`mark_stage_artifact_ready`
+
+**Required Inputs**
+Current active draft artifact, stage workflow ready criteria, and the author's readiness assertion.
+
+**Preconditions**
+The current active draft artifact exists for the current stage, has no blocking explicit artifact status, has no non-owner open route, and the stage workflow's ready criteria are reasonably satisfied per author assertion.
+
+**Allowed Artifact Writes**
+Update the current active draft artifact's frontmatter or `## Status` section to `ready`. Refresh `run.md` Resume Context.
+
+**run.md Updates**
+Refresh `Resume Context` with last completed operation, next allowed operation, and active item. Do not change run status to `ready_for_checkpoint_review`; that transition belongs to `run_quality_gate`.
+
+**User Confirmation Required**
+Required only when marking ready would override or supersede a previously approved row or change a user-confirmed decision.
+
+**Stop Conditions**
+Wrong stage, missing active artifact, non-draft active artifact row, blocking explicit artifact status, stale imported upstream input, or non-owner open route.
+
+**Forbidden Behavior**
+Do not pass Quality Gate, run checkpoint review, or approve a checkpoint. Do not mark an approved or superseded artifact ready.
+
+**Result / Output**
+`stage_ready_recorded`; the run state remains the same and is changed by a subsequent `run_quality_gate` call.
 
 ### Update Stage Artifact
 
@@ -420,7 +597,7 @@ Do not approve downstream handoff, silently drop review findings, or resolve dir
 Ready artifact, merged checkpoint findings, and required user confirmations.
 
 **Preconditions**
-Quality Gate is `ready` and checkpoint findings are merged.
+Quality Gate is `ready` and checkpoint findings are merged. The Forced Subagent Review Rule in `workflow-invariants.md#workflow-complexity-tier-rule` applies: when the locked tier carries any modifier in `{ migration, safety, cross_project }` and the current stage is in `{ design, spec, plan }`, an `approved` decision is refused unless a `reviews/<stage>-checkpoint-review-*.md` or `reviews/<stage>-subagent-review-*.md` file exists for the current stage and active artifact version. Non-approval decisions remain allowed.
 
 **Allowed Artifact Writes**
 Update checkpoint section in the stage artifact and update `run.md`.
@@ -853,6 +1030,35 @@ Do not close routes during inspection.
 
 **Result / Output**
 List of open routes, owner stages, and required actions.
+
+### Show Tier Status
+
+**Canonical Operations**
+`inspect_workflow_run`
+
+**Required Inputs**
+Work ID or run record path.
+
+**Preconditions**
+Run record exists.
+
+**Allowed Artifact Writes**
+None.
+
+**run.md Updates**
+None.
+
+**User Confirmation Required**
+No.
+
+**Stop Conditions**
+Run record missing or tier records (TierEstimate, Tier Lock, escalations, bundle authorizations) are inconsistent.
+
+**Forbidden Behavior**
+Do not modify artifacts. Do not lock or escalate the tier as a side effect.
+
+**Result / Output**
+Current TierEstimate, Tier Lock, escalations, and bundle authorization status.
 
 ### Show Artifact Versions
 

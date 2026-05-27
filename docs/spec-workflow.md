@@ -311,6 +311,10 @@ Risk Discovery Plan Input -> DESIGN Plan Input -> SPEC-PLAN-* -> PLAN coverage
 
 SPEC must not write the final PLAN.
 
+### Tier-Aware Contract Categories
+
+SPEC contract categories (Functional Requirements, Interfaces, Data / State, Error Behavior, Permissions / Safety, Compatibility, Observability, Acceptance Scenarios, Edge Cases) are required or optional per tier. Optional categories must either be present or marked `N/A: <reason>` consistent with the locked tier; Coverage Closure never relaxes. See [Workflow Complexity Tier Rule](workflow-invariants.md#workflow-complexity-tier-rule) for the full per-tier table.
+
 ## Spec Quality Gate
 
 Purpose: decide whether SPEC is internally complete enough to enter checkpoint review.
@@ -331,6 +335,7 @@ Pass conditions:
 - No implementation task or executor format is specified.
 - Remaining assumptions are explicit and non-blocking.
 - Risk Discovery Plan Inputs carried through DESIGN are represented as traceable `SPEC-PLAN-*` items where relevant.
+- Optional contract categories are either present or marked `N/A: <reason>` consistent with the locked tier per [Workflow Complexity Tier Rule](workflow-invariants.md#workflow-complexity-tier-rule).
 
 Fail result:
 

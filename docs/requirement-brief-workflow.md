@@ -141,7 +141,20 @@ Missing information that may affect requirement definition.
 
 ## Raw Notes
 Important original phrases from the user's request.
+
+## Tier Estimation
+The Evidence Block produced by `CMD-TIER-ESTIMATE` at `run-start`. Subfields:
+
+- `keywords_hit`: modifier-triggering keywords matched against the request and links.
+- `repo_baseline_summary`: loc, module_count, is_monorepo, language set, and detected entry points.
+- `linked_context`: link expansion result with `reachable`, `requires_auth`, or `unreachable` per URL.
+- `scope_signals`: counts of repos, modules, and surfaces named in the request.
+- `escalation_candidates`: modifier candidates surfaced by the scan but not yet locked.
+- `floor`: computed Tier Floor (base plus modifiers).
+- `confirm_status`: `pending` until the user confirms via `tier-lock`, then `confirmed`.
 ```
+
+> See [Workflow Complexity Tier Rule](workflow-invariants.md#workflow-complexity-tier-rule) for the section-requirements-by-tier table.
 
 ## Step 3: Requirement Discovery Loop
 
@@ -483,6 +496,7 @@ Checks:
 - Open inputs do not include questions that block requirement definition.
 - Any requirement-definition blocker sets status to `blocked`.
 - Raw notes preserve traceability to the original intent.
+- Tier Estimation Evidence Block is present and complete; user confirmation is recorded via `tier-lock` before `stage-produce` runs for `requirement_brief`. See [Workflow Complexity Tier Rule](workflow-invariants.md#workflow-complexity-tier-rule) for the section-requirements-by-tier table.
 
 Template:
 
@@ -524,6 +538,7 @@ Quality Gate failure routing:
 | Execution, verification, rollback, safety, migration, compatibility, or plan-shaping concern is hidden inside assumptions or deferred topics | Requirement Discovery Loop / Requirement Brief v1 | Move it to `Downstream Attention` for Risk Discovery classification. |
 | Technical direction is unclassified | Intake Brief v0 / Requirement Discovery Loop | Classify as hard constraint, preference, proposed solution, or unknown. |
 | Deferred topics contain design/spec/plan work | Requirement Brief v1 | Move those topics to `Deferred` without deciding them. |
+| Tier estimate is missing or below Floor | Intake Brief v0 | Re-run the tier estimator and surface the Evidence Block; lock at or above Floor or supply `--override-floor` with reason. |
 
 ## Step 6: Requirement Brief Checkpoint
 

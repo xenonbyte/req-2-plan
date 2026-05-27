@@ -36,7 +36,7 @@ A workflow run is one durable attempt to convert a raw requirement into an appro
 Recommended run record:
 
 ```text
-docs/artifacts/<work-id>/run.md
+.req-to-plan/<work-id>/run.md
 ```
 
 Run record fields:
@@ -128,6 +128,16 @@ State meanings:
 
 Only `checkpoint_approved` authorizes formal downstream handoff. `ready` and `ready_for_checkpoint_review` mean the current artifact can be reviewed; they do not authorize the next stage by themselves.
 
+## Tier Lifecycle
+
+Tier is governed by `workflow-invariants.md#workflow-complexity-tier-rule`. This section defines when each tier event happens during a run.
+
+- Tier is estimated at `run-start`, immediately after repo baseline scan and link expansion. The Evidence Block produced by `estimate_tier` is written to `run.md` before the operator interacts with the Intake Brief.
+- Tier is locked between `run-start` and the Requirement Brief stage entry gate. The Agent surfaces the Evidence Block to the user; the user confirms via `tier-lock` (or `lock_tier` semantically) before any `stage-produce` runs for `requirement_brief`. A `stage-produce` call against `requirement_brief` without a recorded Tier Lock is refused.
+- Tier is escalated as needed during any subsequent stage via `tier-escalate`. Each escalation appends a modifier, revokes affected bundled checkpoints, and is audit-logged in `run.md`.
+- Tier is frozen at run close. `close_workflow_run` records the final tier as immutable run metadata; downstream reopen runs receive a new tier estimation and lock.
+- Tier lock is required before `gate-quality` runs with full tier-aware section checks. Without a Tier Lock, `gate-quality` runs only an Upstream-References minimal check and emits a stop suggesting `tier-lock`. The minimal check never substitutes for the full Quality Gate; downstream checkpoint review and approval remain blocked until the full gate has been satisfied against a locked tier.
+
 ## Context Resume Contract
 
 `Resume Context` is a lightweight resume index. It is not a memory system and is not a source of truth.
@@ -180,6 +190,7 @@ These operations are semantic. They are not command names.
 | `load_or_create_artifact` | Open the current stage artifact or create its draft. | Work ID, stage, upstream references. | Draft artifact with header and upstream references. |
 | `run_stage_entry_gate` | Confirm the stage may start from approved upstream input. | Required upstream checkpoints and references. | `pass`, `blocked`, `return_to_*`, or `upstream_gap_detected`. |
 | `produce_stage_artifact` | Draft or update the current stage artifact. | Stage workflow document and approved upstream artifacts. | Draft artifact content. This does not by itself mark the artifact ready. |
+| `mark_stage_artifact_ready` | Record an explicit author readiness assertion on the current active draft artifact so Quality Gate evaluation can run. | Current active draft artifact and stage readiness assertion. | Updated artifact frontmatter or status block plus `run.md` Resume Context refresh. Does not pass Quality Gate or approve any checkpoint. |
 | `run_quality_gate` | Check whether the stage artifact is internally complete. | Current artifact. | `ready`, `blocked`, `return_to_*`, or `upstream_gap_detected`. |
 | `run_checkpoint_review` | Review a ready artifact before downstream authorization. | Ready artifact and optional subagent reviews. | Review findings and recommendation. |
 | `merge_checkpoint_review_findings` | Merge checkpoint review findings without granting checkpoint approval. | Review findings, optional checkpoint-review subagent findings, ready artifact, and conflict rules. | Merged review summary, preserved conflicts, required confirmations, required changes, or routing actions. |
@@ -191,6 +202,11 @@ These operations are semantic. They are not command names.
 | `merge_subagent_findings` | Merge subagent findings without granting checkpoint approval. | Subagent outputs and current stage artifact. | Merged findings, preserved conflicts, and routing actions. |
 | `inspect_workflow_run` | Read run state, artifact versions, open routes, and next allowed operation without writing artifacts. | Run record and artifact root. | Read-only status report. |
 | `close_workflow_run` | End the workflow after PLAN approval. | Approved PLAN Checkpoint. | Run state `closed_at_plan_checkpoint`. |
+| `estimate_tier` | Run tier estimation (L1-L5 layers) before tier lock. | Raw requirement, link expansion result, repo baseline scan, and keyword scan output. | TierEstimate including the Evidence Block; fails if the Evidence Block is incomplete. |
+| `lock_tier` | Lock tier after user confirms the Evidence Block. | TierEstimate, user confirmation, and optional `--override-floor` reason. | Writes Tier Lock to `run.md`; required before `gate-quality` runs with full tier-aware section checks. |
+| `escalate_tier` | Add a modifier to a locked tier. | Locked tier, new modifier signal or operator request, and reason. | Appends the modifier, revokes affected bundled checkpoints, and logs the escalation in `run.md`. |
+| `authorize_bundled_checkpoints` | Bundle-approve multiple eligible checkpoint stages at once. | Tier with no modifier (or `light` + no modifier through DESIGN), Quality Gate `ready` on each bundled stage, and required user confirmation. | Writes BundleAuthorization in `run.md`; only allowed for eligible tier+modifier combos. |
+| `reopen_workflow_run` | Copy a closed run to a new `<id>-rN` run from a specified stage. | Source `closed_at_plan_checkpoint` run, target start stage, and reopen reason. | Source run stays frozen; new run inherits a lineage reference and starts at the requested stage. |
 
 ## Stage Execution Loop
 
@@ -224,7 +240,7 @@ Execution rules:
 
 - Create or update `run.md` when the run starts, pauses, routes upstream, resumes, approves a checkpoint, or closes.
 - Refresh `Resume Context` when the active item changes, a run pauses, a route opens, a checkpoint is approved, or a different agent/session resumes the run.
-- Keep stage artifacts under `docs/artifacts/<work-id>/` unless a repository-local convention overrides it.
+- Keep stage artifacts under `.req-to-plan/<work-id>/` unless a repository-local convention overrides it.
 - Draft artifacts may be edited in place before checkpoint approval.
 - A stage artifact can express gate status with frontmatter `status: ready`, a `## Status` section whose first line is `ready`, or a bullet `- Status: ready`. Placeholder choices such as `ready | blocked` are not a status.
 - Approved artifacts must not be overwritten.

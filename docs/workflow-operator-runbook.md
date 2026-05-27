@@ -16,22 +16,100 @@ This runbook documents operator actions. The CLI records state transitions, vali
 
 - Run from the repository root or set `PYTHONPATH` to the repository root.
 - Use `python3 -m tools.workflow_cli`.
-- Keep workflow artifacts under `docs/artifacts/<work-id>/` unless a temporary or test artifact root is supplied with `--artifact-root`.
+- Keep workflow artifacts under `.req-to-plan/<work-id>/` unless a temporary or test artifact root is supplied with `--artifact-root`.
 - Treat `run.md` as the source of truth for current stage, active artifact, open routes, stale markers, and resume context.
 - Do not edit approved artifacts in place. Create a new version or a repair/superseding workflow when approved input changes.
 
-## Start A Run
+## One-Time Setup: Install Agent Integration
 
-Command: `workflow run start`.
+The lifecycle binary `r2p` (no hyphen between `r2p` and the subcommand) registers the requirement-to-PLAN agent integration on a host. Run install once per platform before using the dashed `r2p-*` shortcuts.
 
 ```bash
-env PYTHONDONTWRITEBYTECODE=1 python3 -m tools.workflow_cli run start \
+r2p install --platform claude,codex,gemini
+```
+
+Verify installation:
+
+```bash
+r2p installed
+```
+
+Cleanup:
+
+```bash
+r2p uninstall --platform <name>
+```
+
+See `workflow-install-surface.md` for per-platform paths, manifest format, and safety rules.
+
+## Start A Run
+
+Command: `workflow run-start`.
+
+```bash
+env PYTHONDONTWRITEBYTECODE=1 python3 -m tools.workflow_cli run-start \
   --work-id <work-id> \
   --source <requirement.md> \
   --json
 ```
 
 If the command returns `duplicate_active_run` or `duplicate_closed_run`, inspect the existing run before using `--confirm`.
+
+## Tier Workflow
+
+The CLI estimates the tier at `run-start` and writes a Tier Estimation Evidence Block to `run.md`. Lock the tier before any stage produce runs for `requirement_brief`. See `workflow-invariants.md#workflow-complexity-tier-rule` for the canonical Tier Model.
+
+Read the estimate:
+
+```bash
+env PYTHONDONTWRITEBYTECODE=1 python3 -m tools.workflow_cli tier-status \
+  --work-id <work-id> \
+  --json
+```
+
+Lock the tier after confirming the Evidence Block with the user:
+
+```bash
+env PYTHONDONTWRITEBYTECODE=1 python3 -m tools.workflow_cli tier-lock \
+  --work-id <work-id> \
+  --decision "<base+modifiers>" \
+  --confirm \
+  --json
+```
+
+Escalate when Risk Discovery or DESIGN surfaces a new modifier (for example, a migration trigger appears mid-discovery):
+
+```bash
+env PYTHONDONTWRITEBYTECODE=1 python3 -m tools.workflow_cli tier-escalate \
+  --work-id <work-id> \
+  --decision migration \
+  --reason "discovery surfaced migration-visible behavior" \
+  --confirm \
+  --json
+```
+
+When the tier is `light` (or `standard`) with no modifier, bundle eligible checkpoints in a single approval. The CLI refuses bundling when any modifier is present.
+
+```bash
+env PYTHONDONTWRITEBYTECODE=1 python3 -m tools.workflow_cli checkpoint-bundle \
+  --work-id <work-id> \
+  --stage requirement_brief \
+  --stage risk_discovery \
+  --confirm \
+  --json
+```
+
+Floor override is discouraged. The CLI refuses a below-Floor lock unless `--override-floor` plus `--confirm` plus a reason is supplied; the override is audit-logged in `run.md`:
+
+```bash
+env PYTHONDONTWRITEBYTECODE=1 python3 -m tools.workflow_cli tier-lock \
+  --work-id <work-id> \
+  --decision light \
+  --override-floor \
+  --reason "<why this is safe>" \
+  --confirm \
+  --json
+```
 
 ## Stage Loop
 
@@ -51,7 +129,7 @@ plan
 For every stage after `raw_requirement`, first run the entry gate:
 
 ```bash
-env PYTHONDONTWRITEBYTECODE=1 python3 -m tools.workflow_cli gate entry \
+env PYTHONDONTWRITEBYTECODE=1 python3 -m tools.workflow_cli gate-entry \
   --work-id <work-id> \
   --stage <stage> \
   --json
@@ -60,7 +138,7 @@ env PYTHONDONTWRITEBYTECODE=1 python3 -m tools.workflow_cli gate entry \
 Produce or update the artifact according to the owning stage workflow:
 
 ```bash
-env PYTHONDONTWRITEBYTECODE=1 python3 -m tools.workflow_cli stage produce \
+env PYTHONDONTWRITEBYTECODE=1 python3 -m tools.workflow_cli stage-produce \
   --work-id <work-id> \
   --stage <stage> \
   --json < <stage-artifact-body.md>
@@ -69,13 +147,13 @@ env PYTHONDONTWRITEBYTECODE=1 python3 -m tools.workflow_cli stage produce \
 Mark the current active draft artifact ready for Quality Gate evaluation:
 
 ```bash
-env PYTHONDONTWRITEBYTECODE=1 python3 -m tools.workflow_cli stage ready \
+env PYTHONDONTWRITEBYTECODE=1 python3 -m tools.workflow_cli stage-ready \
   --work-id <work-id> \
   --stage <stage> \
   --json
 ```
 
-Use `workflow stage ready` for this operation. This marks the current active draft artifact explicitly ready for Quality Gate evaluation. It records the author's readiness assertion only. It does not pass the Quality Gate, move the active artifact row to `ready`, run checkpoint review, or approve downstream handoff.
+Use `workflow stage-ready` for this operation. This marks the current active draft artifact explicitly ready for Quality Gate evaluation. It records the author's readiness assertion only. It does not pass the Quality Gate, move the active artifact row to `ready`, run checkpoint review, or approve downstream handoff.
 
 Manual explicit status formats remain valid when inspecting or authoring artifacts directly:
 
@@ -99,7 +177,7 @@ Do not leave placeholder choices such as `ready | blocked`; the Quality Gate tre
 Then run the Quality Gate:
 
 ```bash
-env PYTHONDONTWRITEBYTECODE=1 python3 -m tools.workflow_cli gate quality \
+env PYTHONDONTWRITEBYTECODE=1 python3 -m tools.workflow_cli gate-quality \
   --work-id <work-id> \
   --stage <stage> \
   --json
@@ -108,17 +186,17 @@ env PYTHONDONTWRITEBYTECODE=1 python3 -m tools.workflow_cli gate quality \
 Checkpoint review has three operator-visible steps:
 
 ```bash
-env PYTHONDONTWRITEBYTECODE=1 python3 -m tools.workflow_cli review checkpoint \
+env PYTHONDONTWRITEBYTECODE=1 python3 -m tools.workflow_cli review-checkpoint \
   --work-id <work-id> \
   --stage <stage> \
   --json
 
-env PYTHONDONTWRITEBYTECODE=1 python3 -m tools.workflow_cli review merge \
+env PYTHONDONTWRITEBYTECODE=1 python3 -m tools.workflow_cli review-merge \
   --work-id <work-id> \
   --stage <stage> \
   --json
 
-env PYTHONDONTWRITEBYTECODE=1 python3 -m tools.workflow_cli confirm record \
+env PYTHONDONTWRITEBYTECODE=1 python3 -m tools.workflow_cli confirm-record \
   --work-id <work-id> \
   --stage <stage> \
   --item <artifact@version#checkpoint> \
@@ -132,10 +210,10 @@ env PYTHONDONTWRITEBYTECODE=1 python3 -m tools.workflow_cli confirm record \
 
 Approve the checkpoint only after findings are merged and the required confirmation is recorded:
 
-Command: `workflow checkpoint decide`.
+Command: `workflow checkpoint-decide`.
 
 ```bash
-env PYTHONDONTWRITEBYTECODE=1 python3 -m tools.workflow_cli checkpoint decide \
+env PYTHONDONTWRITEBYTECODE=1 python3 -m tools.workflow_cli checkpoint-decide \
   --work-id <work-id> \
   --stage <stage> \
   --decision approved \
@@ -146,7 +224,7 @@ env PYTHONDONTWRITEBYTECODE=1 python3 -m tools.workflow_cli checkpoint decide \
 For non-PLAN stages, resume to create or select the next-stage draft:
 
 ```bash
-env PYTHONDONTWRITEBYTECODE=1 python3 -m tools.workflow_cli run resume \
+env PYTHONDONTWRITEBYTECODE=1 python3 -m tools.workflow_cli run-resume \
   --work-id <work-id> \
   --json
 ```
@@ -156,23 +234,24 @@ env PYTHONDONTWRITEBYTECODE=1 python3 -m tools.workflow_cli run resume \
 For agent-oriented operation, the repository also exposes:
 
 ```text
-coyeme-workflow-start "<raw requirement>"
-coyeme-workflow-continue
-coyeme-workflow-status [--all]
-coyeme-workflow-switch --work-id <work-id>
-coyeme-workflow-adapt --executor superpowers
+r2p-start "<raw requirement>"
+r2p-continue
+r2p-status [--all]
+r2p-switch --work-id <work-id>
+r2p-adapt --executor superpowers
+r2p-reopen --from <work-id> --stage <stage> --reason "<short>"
 ```
 
-These shortcuts are intentionally small. `coyeme-workflow-continue` may perform safe `run resume` or `run close` delegation, but it stops and prints the next internal `workflow ...` command when stage content, Quality Gate readiness, review merge, confirmation, checkpoint decision, route repair, or re-import work is required.
+These shortcuts are intentionally small. `r2p-continue` may perform safe `run resume` or `run close` delegation, but it stops and prints the next internal `workflow ...` command when stage content, Quality Gate readiness, review merge, confirmation, checkpoint decision, route repair, or re-import work is required.
 
 ## Close The Run
 
 After the PLAN checkpoint is approved, close the requirement-to-PLAN workflow:
 
-Command: `workflow run close`.
+Command: `workflow run-close`.
 
 ```bash
-env PYTHONDONTWRITEBYTECODE=1 python3 -m tools.workflow_cli run close \
+env PYTHONDONTWRITEBYTECODE=1 python3 -m tools.workflow_cli run-close \
   --work-id <work-id> \
   --json
 ```
@@ -186,16 +265,39 @@ open_routes: []
 stale_artifacts: []
 ```
 
+## Reopen After Closure
+
+A closed `closed_at_plan_checkpoint` run is frozen. To continue from a closed run (for example, the requirement changed and the approved PLAN needs revision), reopen it into a new lineage run instead of editing the closed source.
+
+Agent shortcut:
+
+```bash
+r2p-reopen --from <work-id> --stage <stage>
+```
+
+Internal command:
+
+```bash
+env PYTHONDONTWRITEBYTECODE=1 python3 -m tools.workflow_cli run-reopen \
+  --work-id <source-work-id> \
+  --stage <stage> \
+  --reason "<short>" \
+  --confirm \
+  --json
+```
+
+The reopen creates `.req-to-plan/<source-work-id>-rN/` with a new `run.md` whose lineage references the source. The source run stays `closed_at_plan_checkpoint` and its approved artifacts are not modified. Stages preceding `<stage>` are copied; the target stage is left empty so the operator can produce a new version.
+
 ## Adapt The Approved PLAN
 
 Executor adaptation is optional and post-PLAN. It is not part of the requirement-to-PLAN `CMD-*` state machine.
 
-Command: `workflow executor adapt`.
+Command: `workflow executor-adapt`.
 
 ```bash
-env PYTHONDONTWRITEBYTECODE=1 python3 -m tools.workflow_cli executor adapt \
+env PYTHONDONTWRITEBYTECODE=1 python3 -m tools.workflow_cli executor-adapt \
   --work-id <work-id> \
-  --plan docs/artifacts/<work-id>/07-plan.md@v1#PLAN-Checkpoint \
+  --plan .req-to-plan/<work-id>/07-plan.md@v1#PLAN-Checkpoint \
   --executor superpowers \
   --adapter-rule superpowers-v1 \
   --output docs/superpowers/plans/<date>-<work-id>.md \
@@ -217,10 +319,10 @@ The adapter must not mutate the approved source run or execute PLAN tasks.
 Use status commands before guessing:
 
 ```bash
-env PYTHONDONTWRITEBYTECODE=1 python3 -m tools.workflow_cli status next --work-id <work-id> --json
-env PYTHONDONTWRITEBYTECODE=1 python3 -m tools.workflow_cli status run --work-id <work-id> --json
-env PYTHONDONTWRITEBYTECODE=1 python3 -m tools.workflow_cli status routes --work-id <work-id> --json
-env PYTHONDONTWRITEBYTECODE=1 python3 -m tools.workflow_cli status artifacts --work-id <work-id> --json
+env PYTHONDONTWRITEBYTECODE=1 python3 -m tools.workflow_cli status-next --work-id <work-id> --json
+env PYTHONDONTWRITEBYTECODE=1 python3 -m tools.workflow_cli status-run --work-id <work-id> --json
+env PYTHONDONTWRITEBYTECODE=1 python3 -m tools.workflow_cli status-routes --work-id <work-id> --json
+env PYTHONDONTWRITEBYTECODE=1 python3 -m tools.workflow_cli status-artifacts --work-id <work-id> --json
 ```
 
 Common stops:
@@ -228,7 +330,7 @@ Common stops:
 | Stop | Operator action |
 |---|---|
 | `missing_upstream_checkpoint` | Approve the prior stage before loading or gating this stage. |
-| `review_findings_unmerged` | Run `workflow review merge` for the current stage. |
+| `review_findings_unmerged` | Run `workflow review-merge` for the current stage. |
 | `checkpoint_confirmation_missing` | Record or link the required confirmation, then decide again. |
 | `open_route` | Route, repair, and re-import before downstream work continues. |
 | `stale_artifact` | Re-import repaired input or start a repair/superseding workflow. |
@@ -237,31 +339,25 @@ Common stops:
 
 ## Live End-To-End Check
 
-Latest local smoke:
+After implementing the workflow per `docs/superpowers/plans/2026-05-27-req-to-plan-agent-workflow.md`, run the integration test suite (`tests/test_integration.py`) which covers five canonical scenarios:
 
-| Field | Result |
+| Scenario | Asserts |
 |---|---|
-| Date | 2026-05-26 |
-| Work ID | `WF-FULL-E2E-20260526` |
-| Artifact root | `/private/tmp/coyeme-workflow-full-e2e.xoTHx8/docs/artifacts/WF-FULL-E2E-20260526` |
-| Stage path | `raw_requirement -> requirement_brief -> risk_discovery -> design -> spec -> plan` |
-| Close result | `closed_at_plan_checkpoint` |
-| Adapter result | `derived_plan_written` |
-| Derived plan check | Contains `superpowers:subagent-driven-development` and `PLAN-TASK-001`. |
+| Light path (no modifier) | `closed_at_plan_checkpoint` reached via `checkpoint-bundle` for `requirement_brief + risk_discovery [+ design]` |
+| Migration path (e.g. `"把项目改成 rust 实现"`) | Tier floor enforces `+migration +cross_project`; bundle refused; subagent review required at DESIGN/SPEC/PLAN |
+| Escalation path | New modifier added mid-run via `tier-escalate`; bundled checkpoints revoked |
+| Reopen path | `run-reopen --from <closed-id> --stage <stage>` creates `<id>-rN` new run with lineage |
+| Adapter contract | `executor-adapt --executor superpowers` writes derived plan with adapter rule version |
 
-This smoke validates CLI state flow and adapter handoff. It does not prove that real stage artifact content is semantically sufficient; stage Quality Gates and checkpoint reviewers own that judgment.
+Record the smoke run date and host-agnostic artifact paths here after running:
 
-## Dogfood Validation Notes
+```text
+Date:               <YYYY-MM-DD>
+Integration tests:  <pass/fail counts>
+Adversarial smoke:  ./tools/r2p-start "把项目改成 rust 实现"
+                    → tier floor includes {migration, cross_project}
+Light smoke:        ./tools/r2p-start "按钮颜色改成红色"
+                    → tier floor = light if repo baseline is small and no keywords hit
+```
 
-Latest two-round dogfood in `/Users/xubo/x-studio/test`:
-
-| Round | Work ID | Result |
-|---|---|---|
-| New small requirement | `WF-20260527-create-a-tiny-python-tas` | Reached `closed_at_plan_checkpoint`, adapted to Superpowers, executed to passing tests. |
-| Upgrade / modification | `WF-20260527-upgrade-the-existing-tas` | Reached `closed_at_plan_checkpoint`, adapted to Superpowers, executed to passing tests. |
-
-Observed operator friction:
-
-- Stage artifact semantic content was authored explicitly; the CLI did not generate Requirement Brief, Risk Discovery, DESIGN, SPEC, or PLAN prose.
-- Artifact readiness was made explicit in the artifact before `workflow gate quality`.
-- `coyeme-workflow-continue` helped with safe resume/close boundaries but intentionally stopped before stage authoring, gate readiness, review merge, confirmation, and checkpoint decision work.
+This section is intentionally empty until the workflow is implemented and tested locally.

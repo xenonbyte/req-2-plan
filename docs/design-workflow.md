@@ -147,7 +147,7 @@ Levels may be combined, such as:
 migration_design + safety_design
 ```
 
-Design Scope Gate derives design levels from Risk Discovery `RISK-DES-*` Design Triggers, Requirement Brief scope, and known source/context facts.
+Design Scope Gate derives design levels from Risk Discovery `RISK-DES-*` Design Triggers, Requirement Brief scope, the locked Tier Modifier set, and known source/context facts.
 
 Decision framework:
 
@@ -155,17 +155,20 @@ Decision framework:
 |---|---|
 | Low-risk local change with obvious approach, no migration, no public boundary change | `light_design` |
 | Normal feature or module-level change with limited blast radius | `standard_design` |
-| Module ownership, architecture boundary, public interface, event/file/API boundary, or cross-module relationship changes | `architecture_design` |
-| Migration, rewrite, replacement, integration, cross-project work, or behavior-equivalence requirement | `migration_design` |
-| Data mutation, destructive operation, permission/privacy concern, production state, safety boundary, or irreversible operation | `safety_design` |
-| External API, MCP, CLI, third-party service, package/runtime dependency, or critical dependency behavior | `dependency_design` |
+| Module ownership, architecture boundary, public interface, event/file/API boundary, or cross-module relationship changes; or `cross_project` modifier on the locked tier | `architecture_design` |
+| Migration, rewrite, replacement, integration, cross-project work, behavior-equivalence requirement; or `migration` modifier on the locked tier | `migration_design` |
+| Data mutation, destructive operation, permission/privacy concern, production state, safety boundary, irreversible operation; or `safety` modifier on the locked tier | `safety_design` |
+| External API, MCP, CLI, third-party service, package/runtime dependency, critical dependency behavior; or `dependency` modifier on the locked tier | `dependency_design` |
 
 Selection rules:
 
 - If multiple triggers apply, combine all required levels.
+- The Design Scope Gate unions tier-derived levels (from the locked Tier Modifier set) with `RISK-DES-*`-derived levels. Tier never replaces a level required by an explicit risk trigger, and a `RISK-DES-*` trigger never replaces a level required by a tier modifier.
 - If Risk Discovery has any `RISK-DES-*` Design Trigger, the Design Scope Gate must map it to at least one required design level or explicitly reject it with reason.
-- `light_design` is allowed only when no migration, architecture, safety, dependency, or compatibility trigger is present.
+- `light_design` is allowed only when the tier base is `light` with no modifier and no `RISK-DES-*` migration, architecture, safety, dependency, or compatibility trigger is present.
 - `standard_design` is the default when the change is not light but no specialized level is required.
+
+See [Workflow Complexity Tier Rule](workflow-invariants.md#workflow-complexity-tier-rule) for the full tier-component to design_level table.
 
 Design Scope Gate output:
 

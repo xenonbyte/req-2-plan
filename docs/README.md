@@ -8,6 +8,8 @@ For very small low-risk work, use the same order with lightweight artifacts. Do 
 
 ## Start Here
 
+Run `r2p install --platform <your-platform>` once per platform to register the agent integration. See `workflow-install-surface.md` for the lifecycle binary.
+
 1. Capture the raw requirement and produce a stable Requirement Brief.
 2. Run Risk & Question Discovery to find blockers, assumptions, risks, discussion points, and downstream inputs.
 3. Run DESIGN to choose one technical approach and resolve design blockers.
@@ -20,7 +22,8 @@ Use `workflow-execution-guide.md` when operating a workflow run, resuming from a
 Use `workflow-operation-surface.md` when designing or reviewing operation entry semantics for commands, tools, skills, APIs, or UI actions.
 Use `workflow-command-surface.md` when mapping operation semantics into carrier-neutral command intents before designing concrete command syntax.
 Use `workflow-cli-adapter.md` when designing a concrete CLI carrier for those command intents.
-Use `workflow-agent-command-adapter.md` when exposing the workflow to agents as the compact project shortcuts `coyeme-workflow-start`, `coyeme-workflow-continue`, `coyeme-workflow-status`, `coyeme-workflow-switch`, and `coyeme-workflow-adapt`.
+Use `workflow-agent-command-adapter.md` when exposing the workflow to agents as the compact project shortcuts `r2p-start`, `r2p-continue`, `r2p-status`, `r2p-switch`, and `r2p-adapt`.
+Use `workflow-post-plan-adapter-surface.md` when designing post-PLAN executor adaptation entry points (`CMD-EXEC-*`).
 Use `workflow-operator-runbook.md` when operating the local CLI end to end from raw requirement through PLAN closure.
 
 ## Document Map
@@ -32,7 +35,9 @@ Use `workflow-operator-runbook.md` when operating the local CLI end to end from 
 | Design operation entry semantics before choosing CLI, slash command, MCP, API, skill, or UI carriers | `workflow-operation-surface.md` |
 | Map operation semantics into carrier-neutral command intents before designing concrete CLI, slash command, MCP, API, skill, or UI syntax | `workflow-command-surface.md` |
 | Design concrete CLI command names, flags, output, dry-run, confirmation, and exit semantics | `workflow-cli-adapter.md` |
-| Expose the workflow to agents as `coyeme-workflow-*` project shortcuts | `workflow-agent-command-adapter.md` |
+| Expose the workflow to agents as `r2p-*` project shortcuts | `workflow-agent-command-adapter.md` |
+| Design post-PLAN executor adaptation command intents (`CMD-EXEC-*`) | `workflow-post-plan-adapter-surface.md` |
+| Install, uninstall, verify, or audit the `r2p` lifecycle binary on a host | `workflow-install-surface.md` |
 | Cross-stage rules, artifact lifecycle, upstream routing, shared definitions, and concept index | `workflow-invariants.md` |
 | Requirement capture, discovery, assumptions, source provenance, acceptance, and scope inventory | `requirement-brief-workflow.md` |
 | Blocking questions, assumptions, risk priority, design triggers, spec inputs, and plan inputs | `risk-question-discovery-workflow.md` |
@@ -45,7 +50,7 @@ Use `workflow-operator-runbook.md` when operating the local CLI end to end from 
 Store workflow artifacts under:
 
 ```text
-docs/artifacts/<work-id>/
+.req-to-plan/<work-id>/
 ```
 
 Default files:

@@ -48,52 +48,66 @@ Use one top-level command namespace:
 workflow <group> <action> [flags]
 ```
 
+The reference implementation (`tools/workflow_cli`) realizes this namespace as flat hyphenated subcommands invoked through `python3 -m tools.workflow_cli`:
+
+```text
+python3 -m tools.workflow_cli <group>-<action> [flags]
+```
+
+For example, `workflow run-start` is invoked as `python3 -m tools.workflow_cli run-start`. The hyphenated form is the canonical concrete syntax; any future top-level `workflow` binary must accept the same hyphenated subcommand names so the contract is single.
+
 Groups:
 
 | Group | Purpose |
 |---|---|
-| `run` | Start, resume, and close a workflow run. |
+| `run` | Start, resume, reopen, and close a workflow run. |
+| `tier` | Estimate, lock, escalate, and inspect the workflow complexity tier. |
 | `stage` | Load, produce, or update stage artifacts. |
 | `gate` | Run entry and Quality Gates. |
 | `review` | Run and merge checkpoint reviews. |
-| `checkpoint` | Record Main/User checkpoint decisions. |
+| `checkpoint` | Record Main/User checkpoint decisions or bundle eligible checkpoints. |
 | `confirm` | Record, reject, or link user confirmations. |
 | `subagent` | Dispatch, merge, or review subagent findings. |
 | `gap` | Record, route, or re-import upstream gaps. |
 | `artifact` | Mark downstream artifacts stale or superseded. |
 | `status` | Inspect run state without writing. |
+| `executor` | Post-PLAN executor adaptation (`CMD-EXEC-*`). Outside the requirement-to-PLAN `CMD-*` state machine. |
 
 ## Project Shortcut Wrappers
 
 This repository also exposes optional project-level shortcut wrappers:
 
 ```text
-coyeme-workflow-start [--separate] "<raw requirement>"
-coyeme-workflow-continue
-coyeme-workflow-status [--all]
-coyeme-workflow-switch --work-id <id>
+r2p-start [--separate] "<raw requirement>"
+r2p-continue
+r2p-status [--all]
+r2p-switch --work-id <id>
+r2p-adapt --executor <name>
+r2p-reopen --from <work-id> --stage <stage>
 ```
 
-These wrappers are concrete carrier aliases for the shortcut surface defined in `docs/workflow-agent-command-adapter.md`. They do not create new requirement-to-PLAN `CMD-*` intents and do not add workflow authority.
+These wrappers are concrete carrier aliases for the shortcut surface defined in `docs/workflow-agent-command-adapter.md`. Four of these (`start`, `continue`, `status`, `switch`) compose existing requirement-to-PLAN `CMD-*` intents; `r2p-adapt` maps to post-PLAN `CMD-EXEC-ADAPT` in `docs/workflow-post-plan-adapter-surface.md`; `r2p-reopen` maps to `CMD-RUN-REOPEN`. None of these wrappers add workflow authority.
 
 Implementation binding:
 
 | Wrapper | Concrete delegation |
 |---|---|
-| `tools/coyeme-workflow-start` | `python3 -m tools.workflow_cli.agent_shortcuts start` |
-| `tools/coyeme-workflow-continue` | `python3 -m tools.workflow_cli.agent_shortcuts continue` |
-| `tools/coyeme-workflow-status` | `python3 -m tools.workflow_cli.agent_shortcuts status` |
-| `tools/coyeme-workflow-switch` | `python3 -m tools.workflow_cli.agent_shortcuts switch` |
+| `tools/r2p-start` | `python3 -m tools.workflow_cli.agent_shortcuts start` |
+| `tools/r2p-continue` | `python3 -m tools.workflow_cli.agent_shortcuts continue` |
+| `tools/r2p-status` | `python3 -m tools.workflow_cli.agent_shortcuts status` |
+| `tools/r2p-switch` | `python3 -m tools.workflow_cli.agent_shortcuts switch` |
+| `tools/r2p-adapt` | `python3 -m tools.workflow_cli.agent_shortcuts adapt` |
+| `tools/r2p-reopen` | `python3 -m tools.workflow_cli.agent_shortcuts reopen` |
 
 Each wrapper resolves the repository root from its own script path, prepends that root to PYTHONPATH, then invokes python3 with a python fallback.
 
 The active pointer path is:
 
 ```text
-docs/artifacts/.workflow-active
+.req-to-plan/.workflow-active
 ```
 
-The wrappers must preserve the concrete CLI's gates, checkpoint, route, stale artifact, and confirmation stops. `coyeme-workflow-continue` performs only safe single-step delegation and must stop rather than synthesize stage artifact content.
+The wrappers must preserve the concrete CLI's gates, checkpoint, route, stale artifact, and confirmation stops. `r2p-continue` performs only safe single-step delegation and must stop rather than synthesize stage artifact content.
 
 ## Global Flags
 
@@ -131,7 +145,7 @@ Path resolution:
 
 - Resolve the run record before resolving stage artifacts.
 - If `--run` is supplied, use that exact `run.md`.
-- If `--work-id` is supplied and `--run` is omitted, set artifact root to `--artifact-root` when supplied; otherwise use `docs/artifacts/<work-id>/`, then use `<artifact-root>/run.md`.
+- If `--work-id` is supplied and `--run` is omitted, set artifact root to `--artifact-root` when supplied; otherwise use `.req-to-plan/<work-id>/`, then use `<artifact-root>/run.md`.
 - If `--run` is supplied and `--artifact-root` is omitted, derive artifact root from the root recorded in `run.md` when present; otherwise use the directory containing `run.md`.
 - If `--work-id` and `--run` are both supplied, they must refer to the same work ID or the CLI must stop.
 - A run record selected through `--work-id` must contain the same work ID after it is read, even when `--artifact-root` overrides the default location.
@@ -178,14 +192,14 @@ JSON output uses this shape:
 {
   "command_result": "ready",
   "command_intent": "CMD-GATE-QUALITY",
-  "run": "docs/artifacts/WF-001/run.md",
+  "run": ".req-to-plan/WF-001/run.md",
   "run_state_before": "active_stage_draft",
   "run_state_after": "ready_for_checkpoint_review",
   "current_stage": "spec",
-  "active_artifact": "docs/artifacts/WF-001/06-spec.md@v2",
+  "active_artifact": ".req-to-plan/WF-001/06-spec.md@v2",
   "writes": [
     {
-      "path": "docs/artifacts/WF-001/run.md",
+      "path": ".req-to-plan/WF-001/run.md",
       "kind": "run_update"
     }
   ],
@@ -194,7 +208,7 @@ JSON output uses this shape:
   "required_user_confirmation": null,
   "open_routes": [],
   "stale_artifacts": [],
-  "next_allowed_command": "workflow review checkpoint --work-id WF-001 --stage spec"
+  "next_allowed_command": "workflow review-checkpoint --work-id WF-001 --stage spec"
 }
 ```
 
@@ -249,30 +263,41 @@ If a required input is not provided as a flag, the CLI may derive it only from `
 
 | CLI command | Command intent | Required CLI inputs | Notes |
 |---|---|---|---|
-| `workflow run start` | `CMD-RUN-START` | `--work-id`, plus `--source` or requirement text from stdin | Creates artifact root, `run.md`, and initial intake artifact. |
-| `workflow run resume` | `CMD-RUN-RESUME` | `--work-id` or `--run` | Loads `Resume Context`; stops on any open route that requires re-import. |
-| `workflow run close` | `CMD-RUN-CLOSE` | `--work-id` or `--run` | Closes only after approved PLAN checkpoint and no open route. |
+| `workflow run-start` | `CMD-RUN-START` | `--work-id`, plus `--source` or requirement text from stdin | Creates artifact root, `run.md`, and initial intake artifact. |
+| `workflow run-resume` | `CMD-RUN-RESUME` | `--work-id` or `--run` | Loads `Resume Context`; stops on any open route that requires re-import. |
+| `workflow run-close` | `CMD-RUN-CLOSE` | `--work-id` or `--run` | Closes only after approved PLAN checkpoint and no open route. |
+| `workflow run-reopen` | `CMD-RUN-REOPEN` | `--work-id` or `--run` for the source closed run, `--stage`, `--reason`, `--confirm` | Copies the closed source run to a new `<source-work-id>-rN` run starting from `--stage`; the source `run.md` and approved artifacts are not modified. |
+
+### Tier
+
+| CLI command | Command intent | Required CLI inputs | Notes |
+|---|---|---|---|
+| `workflow tier-estimate` | `CMD-TIER-ESTIMATE` | `--work-id` or `--run` | Runs the L1-L5 tier estimation and writes the Evidence Block; does not lock the tier. |
+| `workflow tier-lock` | `CMD-TIER-LOCK` | `--work-id` or `--run`, `--decision`, `--confirm`, plus `--reason` when `--override-floor` is supplied | Locks the tier; refused once `requirement_brief` has executed `stage-produce`. |
+| `workflow tier-escalate` | `CMD-TIER-ESCALATE` | `--work-id` or `--run`, `--decision` (the modifier to add), `--reason`, `--confirm` when the escalation revokes an approved bundled checkpoint | Adds a modifier and revokes affected bundled checkpoints. |
+| `workflow tier-status` | `CMD-TIER-STATUS` | `--work-id` or `--run` | Read-only; shows current TierEstimate, Tier Lock, escalations, and bundle authorization status. |
 
 ### Stage
 
 | CLI command | Command intent | Required CLI inputs | Notes |
 |---|---|---|---|
-| `workflow stage load` | `CMD-STAGE-LOAD` | `--work-id` or `--run`, `--stage`, plus `--confirm` when creating a new version from an approved artifact | Loads or creates the target stage draft. |
-| `workflow stage produce` | `CMD-STAGE-PRODUCE` | `--work-id` or `--run`, `--stage` | Produces current-stage owned content only. |
-| `workflow stage update` | `CMD-STAGE-UPDATE` | `--work-id` or `--run`, `--stage`, `--change`, `--reason`, plus `--confirm` when updating an approved artifact or changing a user-confirmed decision | Updates an unapproved draft or creates a new version when allowed. |
-| `workflow stage ready` | `CMD-STAGE-READY` | `--work-id` or `--run`, `--stage` | Marks the current active draft artifact explicitly ready for Quality Gate evaluation; it does not pass the gate or approve a checkpoint. |
+| `workflow stage-load` | `CMD-STAGE-LOAD` | `--work-id` or `--run`, `--stage`, plus `--confirm` when creating a new version from an approved artifact | Loads or creates the target stage draft. |
+| `workflow stage-produce` | `CMD-STAGE-PRODUCE` | `--work-id` or `--run`, `--stage` | Produces current-stage owned content only. |
+| `workflow stage-update` | `CMD-STAGE-UPDATE` | `--work-id` or `--run`, `--stage`, `--change`, `--reason`, plus `--confirm` when updating an approved artifact or changing a user-confirmed decision | Updates an unapproved draft or creates a new version when allowed. |
+| `workflow stage-ready` | `CMD-STAGE-READY` | `--work-id` or `--run`, `--stage` | Marks the current active draft artifact explicitly ready for Quality Gate evaluation; it does not pass the gate or approve a checkpoint. |
 
-`workflow stage ready` reports command intent "`CMD-STAGE-READY`" in human-readable output.
+`workflow stage-ready` reports command intent "`CMD-STAGE-READY`" in human-readable output.
 
 ### Gate, Review, And Checkpoint
 
 | CLI command | Command intent | Required CLI inputs | Notes |
 |---|---|---|---|
-| `workflow gate entry` | `CMD-GATE-ENTRY` | `--work-id` or `--run`, `--stage` | Runs the stage entry gate. |
-| `workflow gate quality` | `CMD-GATE-QUALITY` | `--work-id` or `--run`, `--stage` | Runs the current stage Quality Gate. |
-| `workflow review checkpoint` | `CMD-REVIEW-CHECKPOINT` | `--work-id` or `--run`, `--stage` | Writes checkpoint review findings after Quality Gate `ready`. |
-| `workflow review merge` | `CMD-REVIEW-MERGE` | `--work-id` or `--run`, `--stage`, plus `--finding` when findings are not already registered in `run.md` | Merges review findings before checkpoint decision. |
-| `workflow checkpoint decide` | `CMD-CHECKPOINT-DECIDE` | `--work-id` or `--run`, `--stage`, `--decision`, `--confirm` | Records approval, change request, block, or route. |
+| `workflow gate-entry` | `CMD-GATE-ENTRY` | `--work-id` or `--run`, `--stage` | Runs the stage entry gate. |
+| `workflow gate-quality` | `CMD-GATE-QUALITY` | `--work-id` or `--run`, `--stage` | Runs the current stage Quality Gate. |
+| `workflow review-checkpoint` | `CMD-REVIEW-CHECKPOINT` | `--work-id` or `--run`, `--stage` | Writes checkpoint review findings after Quality Gate `ready`. |
+| `workflow review-merge` | `CMD-REVIEW-MERGE` | `--work-id` or `--run`, `--stage`, plus `--finding` when findings are not already registered in `run.md` | Merges review findings before checkpoint decision. |
+| `workflow checkpoint-decide` | `CMD-CHECKPOINT-DECIDE` | `--work-id` or `--run`, `--stage`, `--decision`, `--confirm` | Records approval, change request, block, or route. |
+| `workflow checkpoint-bundle` | `CMD-CHECKPOINT-BUNDLE` | `--work-id` or `--run`, repeated `--stage` for each bundled stage, `--confirm` | Approves multiple eligible no-modifier checkpoint stages in one decision; refused for any-modifier tiers or ineligible stage sets. |
 
 Allowed checkpoint decisions:
 
@@ -288,51 +313,94 @@ route_upstream
 
 | CLI command | Command intent | Required CLI inputs | Notes |
 |---|---|---|---|
-| `workflow confirm record` | `CMD-CONFIRM-RECORD` | `--work-id` or `--run`, `--stage`, `--item`, `--source`, `--decision`, `--affected`, `--downstream`, `--confirm` | Records explicit user-owned confirmation evidence; `--decision` carries the confirmation statement or value. |
-| `workflow confirm reject` | `CMD-CONFIRM-REJECT` | `--work-id` or `--run`, `--stage`, `--item`, `--owner-stage`, `--affected`, `--impact`, `--reason`, `--confirm` | Records rejection or clarification need, including blocking impact, and routes when needed. |
-| `workflow confirm link` | `CMD-CONFIRM-LINK` | `--work-id` or `--run`, `--stage`, `--confirmation`, `--item`, `--affected`, `--downstream`, plus `--confirm` when linking changes the confirmed meaning | Links an existing confirmation to an artifact section and downstream effect. |
+| `workflow confirm-record` | `CMD-CONFIRM-RECORD` | `--work-id` or `--run`, `--stage`, `--item`, `--source`, `--decision`, `--affected`, `--downstream`, `--confirm` | Records explicit user-owned confirmation evidence; `--decision` carries the confirmation statement or value. |
+| `workflow confirm-reject` | `CMD-CONFIRM-REJECT` | `--work-id` or `--run`, `--stage`, `--item`, `--owner-stage`, `--affected`, `--impact`, `--reason`, `--confirm` | Records rejection or clarification need, including blocking impact, and routes when needed. |
+| `workflow confirm-link` | `CMD-CONFIRM-LINK` | `--work-id` or `--run`, `--stage`, `--confirmation`, `--item`, `--affected`, `--downstream`, plus `--confirm` when linking changes the confirmed meaning | Links an existing confirmation to an artifact section and downstream effect. |
 
 ### Subagent
 
 | CLI command | Command intent | Required CLI inputs | Notes |
 |---|---|---|---|
-| `workflow subagent dispatch` | `CMD-SUBAGENT-DISPATCH` | `--work-id` or `--run`, `--stage`, `--task-type`, `--scope`, `--source`, `--template` | Dispatches allowed evidence-gathering work. |
-| `workflow subagent merge` | `CMD-SUBAGENT-MERGE` | `--work-id` or `--run`, `--stage`, `--finding` | Merges findings and preserves unresolved conflicts. |
-| `workflow subagent review` | `CMD-SUBAGENT-REVIEW` | `--work-id` or `--run`, `--stage`, `--scope`, `--template` | Runs checkpoint review subagents after Quality Gate `ready`. |
+| `workflow subagent-dispatch` | `CMD-SUBAGENT-DISPATCH` | `--work-id` or `--run`, `--stage`, `--task-type`, `--scope`, `--source`, `--template` | Dispatches allowed evidence-gathering work. |
+| `workflow subagent-merge` | `CMD-SUBAGENT-MERGE` | `--work-id` or `--run`, `--stage`, `--finding` | Merges findings and preserves unresolved conflicts. |
+| `workflow subagent-review` | `CMD-SUBAGENT-REVIEW` | `--work-id` or `--run`, `--stage`, `--scope`, `--template` | Runs checkpoint review subagents after Quality Gate `ready`. |
 
 ### Gap And Artifact Freshness
 
 | CLI command | Command intent | Required CLI inputs | Notes |
 |---|---|---|---|
-| `workflow gap record` | `CMD-GAP-RECORD` | `--work-id` or `--run`, `--stage`, `--item`, `--owner-stage`, `--affected`, `--required-action`, `--reason`, `--confirm` | Records missing upstream input and opens the route. |
-| `workflow gap route` | `CMD-GAP-ROUTE` | `--work-id` or `--run`, `--route`, `--confirm` | Opens owner-stage repair context and marks affected downstream state; stop if the route does not identify owner stage and current upstream artifact version. |
-| `workflow gap reimport` | `CMD-GAP-REIMPORT` | `--work-id` or `--run`, `--route`, plus `--downstream` and `--reread` when not derivable from the route or `run.md`, `--confirm` | Re-imports repaired upstream after the owner checkpoint is approved; stop if repaired upstream, affected downstream artifact, and reread targets cannot be identified. |
-| `workflow artifact mark-stale` | `CMD-ARTIFACT-MARK-STALE` | `--work-id` or `--run`, `--upstream`, `--downstream`, `--reason`, `--confirm` | Records stale or superseded downstream artifact state. |
+| `workflow gap-record` | `CMD-GAP-RECORD` | `--work-id` or `--run`, `--stage`, `--item`, `--owner-stage`, `--affected`, `--required-action`, `--reason`, `--confirm` | Records missing upstream input and opens the route. |
+| `workflow gap-route` | `CMD-GAP-ROUTE` | `--work-id` or `--run`, `--route`, `--confirm` | Opens owner-stage repair context and marks affected downstream state; stop if the route does not identify owner stage and current upstream artifact version. |
+| `workflow gap-reimport` | `CMD-GAP-REIMPORT` | `--work-id` or `--run`, `--route`, plus `--downstream` and `--reread` when not derivable from the route or `run.md`, `--confirm` | Re-imports repaired upstream after the owner checkpoint is approved; stop if repaired upstream, affected downstream artifact, and reread targets cannot be identified. |
+| `workflow artifact-mark-stale` | `CMD-ARTIFACT-MARK-STALE` | `--work-id` or `--run`, `--upstream`, `--downstream`, `--reason`, `--confirm` | Records stale or superseded downstream artifact state. |
 
 ### Status
 
 | CLI command | Command intent | Required CLI inputs | Notes |
 |---|---|---|---|
-| `workflow status run` | `CMD-STATUS-RUN` | `--work-id` or `--run` | Shows current run status. |
-| `workflow status stage` | `CMD-STATUS-STAGE` | `--work-id` or `--run` | Shows current stage and required next gate or artifact action. |
-| `workflow status next` | `CMD-STATUS-NEXT` | `--work-id` or `--run` | Shows the next allowed semantic operation without writing. |
-| `workflow status routes` | `CMD-STATUS-ROUTES` | `--work-id` or `--run` | Shows open routes and required owner actions. |
-| `workflow status artifacts` | `CMD-STATUS-ARTIFACTS` | `--work-id` or `--run` | Shows active, approved, stale, and superseded artifact versions. |
+| `workflow status-run` | `CMD-STATUS-RUN` | `--work-id` or `--run` | Shows current run status. |
+| `workflow status-stage` | `CMD-STATUS-STAGE` | `--work-id` or `--run` | Shows current stage and required next gate or artifact action. |
+| `workflow status-next` | `CMD-STATUS-NEXT` | `--work-id` or `--run` | Shows the next allowed semantic operation without writing. |
+| `workflow status-routes` | `CMD-STATUS-ROUTES` | `--work-id` or `--run` | Shows open routes and required owner actions. |
+| `workflow status-artifacts` | `CMD-STATUS-ARTIFACTS` | `--work-id` or `--run` | Shows active, approved, stale, and superseded artifact versions. |
+
+### Executor (Post-PLAN)
+
+These commands map to `workflow-post-plan-adapter-surface.md`. They are outside the requirement-to-PLAN `CMD-*` state machine and must not change source run artifacts or `run.md` status.
+
+| CLI command | Command intent | Required CLI inputs | Notes |
+|---|---|---|---|
+| `workflow executor-adapt` | `CMD-EXEC-ADAPT` | `--work-id` or `--run`, `--executor`, plus `--plan` and `--output` when not derivable from the run record, plus `--confirm` when overwriting an existing derived plan or repair-request file | Runs only when the run is `closed_at_plan_checkpoint`, PLAN Checkpoint is approved, and no open route remains. Writes `<output>` on success or `<output>.repair.md` on `adapter_gap_detected` / `stale_source_detected`. Does not mutate the source PLAN or `run.md`. |
+| `workflow executor-list-adapters` | `CMD-EXEC-LIST-ADAPTERS` | none | Read-only registry listing. |
+
+Allowed `workflow executor-adapt` results:
+
+```text
+derived_plan_written
+adapter_gap_detected
+stale_source_detected
+unsupported_executor
+run_not_terminal
+```
+
+## Lifecycle Binary (`r2p <subcommand>`)
+
+The lifecycle binary is a separate carrier from the daily `workflow ...` and `r2p-*` commands. It manages installing, uninstalling, and verifying the requirement-to-PLAN agent integration on a host.
+
+```text
+r2p install --platform <list>
+r2p uninstall --platform <list>
+r2p installed
+r2p doctor
+r2p version
+```
+
+| Subcommand | Purpose |
+|---|---|
+| `r2p install --platform <list>` | Copy agent skill or command templates and bin scripts to the requested platforms; write a manifest under `~/.req-to-plan/install/<platform>.yaml`; back up any existing files at the target paths. |
+| `r2p uninstall --platform <list>` | Restore from manifest backups, remove only manifest-tracked paths, and clean shared targets only when the last platform uninstalls. |
+| `r2p installed` | List installed platforms with their `r2p_version` and install date. Read-only. |
+| `r2p doctor` | Compare each manifest's `r2p_version` against the current `version.py`; report drift and missing files. Read-only. |
+| `r2p version` | Print the current `r2p_version`. Read-only. |
+
+This binary is implemented via the `tools/r2p` shell wrapper delegating to `python3 -m tools.workflow_cli.install_cli`. It is intentionally separate from the daily `workflow ...` commands, which manage workflow runs, and from the `r2p-*` shortcuts, which are session-level agent aliases. See `workflow-install-surface.md` for the full install/uninstall/manifest contract.
 
 ## State Eligibility Rule
 
 Before command-specific validation for requirement-to-PLAN commands, the CLI must check `workflow-command-surface.md#run-state-command-eligibility-matrix`.
 
-Apply the command-surface context-refresh exception before refusing a resume caused by missing loaded context. `workflow run resume` may establish or refresh `Resume Context` for an existing readable, nonterminal run even when ordinary `CMD-RUN-RESUME` is not listed for that state. In this mode, it must not advance stage, create a next-stage draft, close routes, approve checkpoints, or write stage artifact content unless the matrix also allows ordinary `CMD-RUN-RESUME`. If the run is `not_started`, `closed_at_plan_checkpoint`, inconsistent, or unknown after reading `run.md`, the CLI must stop or return read-only status instead of writing.
+Apply the command-surface context-refresh exception before refusing a resume caused by missing loaded context. `workflow run-resume` may establish or refresh `Resume Context` for an existing readable, nonterminal run even when ordinary `CMD-RUN-RESUME` is not listed for that state. In this mode, it must not advance stage, create a next-stage draft, close routes, approve checkpoints, or write stage artifact content unless the matrix also allows ordinary `CMD-RUN-RESUME`. If the run is `not_started`, `closed_at_plan_checkpoint`, inconsistent, or unknown after reading `run.md`, the CLI must stop or return read-only status instead of writing.
 
 If the command is not allowed in the current state:
 
 1. Stop with exit code `3`.
 2. Do not write artifacts or `run.md`.
 3. Report the current run state.
-4. Suggest `workflow status next <run-locator>` or the safe next command if it is unambiguous. Preserve the current resolved run locator: prefer the caller's original `--run <path>` when supplied; otherwise use `--work-id <id>` when the work ID is known.
+4. Suggest `workflow status-next <run-locator>` or the safe next command if it is unambiguous. Preserve the current resolved run locator: prefer the caller's original `--run <path>` when supplied; otherwise use `--work-id <id>` when the work ID is known.
 
 Inspection commands are allowed in any readable state and remain read-only.
+
+Post-PLAN executor commands (`workflow executor *`) use their own preconditions from `workflow-post-plan-adapter-surface.md` and do not consume the requirement-to-PLAN run-state matrix. They must still refuse to run when the source run is not terminal or has open routes.
 
 ## Resume Context Rule
 
@@ -350,7 +418,7 @@ stale or superseded markers
 If this proof is missing, the CLI must run the semantic equivalent of `CMD-RUN-RESUME` first or stop and recommend a resume command that preserves the current resolved run locator. Prefer the caller's original `--run <path>` when supplied; otherwise use `--work-id <id>` when the work ID is known.
 
 ```text
-workflow run resume <run-locator>
+workflow run-resume <run-locator>
 ```
 
 The CLI must not continue from conversation-only memory.
@@ -360,31 +428,31 @@ The CLI must not continue from conversation-only memory.
 Inspect the next allowed operation:
 
 ```sh
-workflow status next --work-id WF-001 --json
+workflow status-next --work-id WF-001 --json
 ```
 
 Resume after interruption or context loss:
 
 ```sh
-workflow run resume --work-id WF-001
+workflow run-resume --work-id WF-001
 ```
 
 Re-import a repaired upstream DESIGN route:
 
 ```sh
-workflow gap reimport --work-id WF-001 --route ROUTE-DES-001 --confirm
+workflow gap-reimport --work-id WF-001 --route ROUTE-DES-001 --confirm
 ```
 
 Approve SPEC after Quality Gate, checkpoint review, review merge, and required confirmations:
 
 ```sh
-workflow checkpoint decide --work-id WF-001 --stage spec --decision approved --confirm
+workflow checkpoint-decide --work-id WF-001 --stage spec --decision approved --confirm
 ```
 
 Preview stale marking without writing:
 
 ```sh
-workflow artifact mark-stale --work-id WF-001 --upstream 05-design.md@v2 --downstream 06-spec.md@v1 --reason "DESIGN v2 approved" --dry-run
+workflow artifact-mark-stale --work-id WF-001 --upstream 05-design.md@v2 --downstream 06-spec.md@v1 --reason "DESIGN v2 approved" --dry-run
 ```
 
 ## Reference Implementation
@@ -394,13 +462,13 @@ The minimal local reference implementation lives under `tools/workflow_cli/`.
 Run it with:
 
 ```sh
-python -m tools.workflow_cli status next --work-id WF-001 --json
+python -m tools.workflow_cli status-next --work-id WF-001 --json
 ```
 
 When the environment exposes only `python3`, use the equivalent:
 
 ```sh
-python3 -m tools.workflow_cli status next --work-id WF-001 --json
+python3 -m tools.workflow_cli status-next --work-id WF-001 --json
 ```
 
 Run tests with:
@@ -424,7 +492,7 @@ Use this checklist when reviewing a CLI implementation or CLI-facing prompt:
 - Required `--confirm` gates cannot be bypassed by `--json`, `--dry-run`, or default flags.
 - Conditional `User Confirmation Required` rules inherited from mapped operation contracts are enforced even when a command map row does not list `--confirm`.
 - Open routes block ordinary resume and downstream approval.
-- `workflow gap reimport` does not approve the downstream checkpoint by itself.
+- `workflow gap-reimport` does not approve the downstream checkpoint by itself.
 - Exit codes distinguish validation issues, precondition stops, upstream gaps, confirmation needs, and inconsistent state.
 - JSON output includes enough state to recover the next safe command without reading conversation history.
 

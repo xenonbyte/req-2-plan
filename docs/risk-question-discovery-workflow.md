@@ -197,6 +197,12 @@ Observability
 Scale
 ```
 
+The initial scan over all 12 dimensions is mandatory at every tier; tier only changes the required depth. See [Workflow Complexity Tier Rule](workflow-invariants.md#workflow-complexity-tier-rule) for the per-modifier depth table.
+
+### Tier Escalation
+
+When the scan surfaces modifier-trigger keywords or signals that are not already in the locked tier, call `tier-escalate` before requesting checkpoint approval. The escalation revokes affected bundled checkpoints and is audit-logged in `run.md`. Skipping escalation will trigger forced-subagent-review or bundle-revocation later in DESIGN/SPEC/PLAN and force rework.
+
 ## Subagent Use
 
 This section follows the shared Subagent Use structure in `workflow-invariants.md#shared-subagent-use-structure`. The rules below define Risk Discovery-specific discovery behavior.
@@ -368,6 +374,7 @@ Template:
 - Status: ready | needs_clarification (draft only) | blocked
 - Reason:
 - Safe next node:
+- All 12 scan dimensions appear in the artifact, with `N/A: <reason>` allowed only when the tier permits per [Workflow Complexity Tier Rule](workflow-invariants.md#workflow-complexity-tier-rule).
 
 ## Risk Discovery Checkpoint
 - Status: approved | changes_requested | route_upstream

@@ -8,6 +8,17 @@ This document records cross-node rules for the requirement-to-plan workflow. Nod
 
 For a first pass, read `README.md` first, then use this document as the shared rulebook. Use the stage workflow documents only when you are producing or reviewing that stage's artifact.
 
+## Workflow Version
+
+Every `run.md` is stamped with `r2p_version` at creation. The version is recorded once and never silently rewritten.
+
+Compatibility rules:
+
+- Minor additions to tier, gate, or checkpoint behavior are non-breaking: a resume against a newer CLI proceeds with a warning recorded in `run.md`.
+- Structural changes to `run.md` format, tier model, command intent IDs, or artifact lifecycle bump the major component of `r2p_version`. A resume against a major-bumped CLI must stop and require explicit operator migration; ordinary resume is refused.
+- The CLI inspects `r2p_version` before any write-capable operation continues an existing run. If the version is missing, the run is treated as inconsistent until the operator records or migrates it.
+- `r2p_version` is independent of stage artifact versions. Artifact versions remain managed by `Artifact Lifecycle Rule`.
+
 ## Canonical Chain
 
 ```text
@@ -65,6 +76,149 @@ SPEC checkpoint review may be performed by subagents, but checkpoint approval an
 PLAN may use subagents for task decomposition review, contract-to-task coverage review, TDD applicability review, execution order review, verification coverage review, and rollback/safety review. Subagents do not change Requirement Brief, DESIGN, or SPEC.
 
 All subagents follow the shared Subagent Model Rule in this document.
+
+## Workflow Complexity Tier Rule
+
+This is the canonical Tier Model contract. All other workflow documents link to this section instead of restating the tables.
+
+### Base x Modifiers
+
+Tier is recorded as a base component plus an unordered set of modifiers.
+
+- `base in { light, standard }`. `standard` is the ambiguous default; any signal that does not affirmatively prove `light` keeps the run on `standard`.
+- `modifiers subset of { migration, cross_project, safety, dependency, scope_expanding }`. Modifiers are additive and never removed once recorded; an undo would silently drop traceable risk.
+- `light` requires every affirmative signal:
+  - Zero modifier triggers in the keyword scan and zero modifier-implying repo signals.
+  - Repository baseline `loc < 10_000`.
+  - Repository baseline `module_count <= 8`.
+  - Requirement touches a single module or capability.
+  - Repository baseline is not a monorepo.
+  - No cross-language reference (no reference to a project, repo, or runtime in a different language than the active repo).
+- `trivial` is not auto-estimated. The CLI may record `trivial` only when the operator passes `--force-tier trivial --confirm` with a textual reason. `trivial` is refused if any modifier was found or `loc > 1_000`.
+- A modifier may only be added through `tier-escalate`. A locked tier cannot drop a modifier; an escalation that adds a modifier becomes part of the tier record.
+
+### Floor Calculation
+
+The CLI computes a Tier Floor at `run-start` and again whenever Risk Discovery or DESIGN re-surfaces modifier signals.
+
+```text
+floor.base = standard if any of:
+  - len(keywords_hit) > 0
+  - repo_baseline.loc > 10_000
+  - repo_baseline.is_monorepo
+  - repo_baseline.module_count > 8
+  - request mentions >=2 distinct repo names
+  - link expansion found unreachable / requires_auth URLs
+else light
+
+floor.modifiers = union { m | any keyword in m's trigger set matched OR repo signal implies m }
+```
+
+Floor rules:
+
+- The operator may lock at or above the Floor.
+- Locking below the Floor requires `--override-floor` plus `--confirm` plus a textual reason. The override is audit-logged in `run.md`.
+- The Floor is recomputed when Risk Discovery surfaces additional modifier keywords or signals. A higher recomputed Floor does not silently re-lock; it surfaces an escalation candidate.
+
+### Section Requirements By Tier
+
+These tables define which sections each stage artifact must contain at each tier component. They are the only canonical source; other workflow documents must link here.
+
+Requirement Brief:
+
+| Section | light | standard | + any modifier |
+|---|---|---|---|
+| Goal / Background | OK | OK | OK |
+| Scope / Non-scope | OK | OK | OK |
+| Scope Inventory | optional (single line OK) | OK | OK |
+| Acceptance (user-confirmed) | OK | OK | OK |
+| Users / Operators | optional | OK | OK |
+| Constraints | optional | OK | OK |
+| Assumptions (with source/impact/carry) | optional | OK | OK |
+| Downstream Attention | optional | OK | OK |
+| Source Provenance | OK if cross_project else optional | OK | OK |
+| Tier Estimation Evidence Block | OK | OK | OK |
+
+Risk Discovery - 12 Scan Dimensions:
+
+Scope / Acceptance / Context / Data / Interfaces / Permissions / Dependencies / Compatibility / Execution / Rollback / Observability / Scale.
+
+Initial scan over all 12 dimensions is mandatory at every tier. Tier only changes the required depth.
+
+| Modifier | Forces deep treatment of |
+|---|---|
+| (no modifier) | scan-then-classify; `N/A: <reason>` allowed per dimension |
+| migration | Compatibility, Rollback, Data, migration-visible behavior |
+| safety | Data, Permissions, Rollback, destructive-op handling |
+| cross_project | Dependencies, Compatibility, Interfaces, source provenance |
+| dependency | Dependencies, Compatibility, Execution |
+| scope_expanding | upgrades base to standard if light; deep treatment of all 12 |
+
+DESIGN - Required design_level set:
+
+| Tier component | Required design_level |
+|---|---|
+| light (no modifier) | `light_design` |
+| standard (no modifier) | `standard_design` |
+| + migration | += `migration_design` |
+| + safety | += `safety_design` |
+| + cross_project | += `architecture_design` |
+| + dependency | += `dependency_design` |
+| + scope_expanding | base->standard if light; no new design_level by itself |
+
+The Design Scope Gate unions tier-derived levels with `RISK-DES-*`-derived levels. Tier never replaces a level required by an explicit risk trigger.
+
+SPEC - Contract Categories:
+
+| Category | light | standard | + modifier triggers |
+|---|---|---|---|
+| Functional Requirements | OK | OK | OK |
+| Interfaces | optional if no public surface change | OK | OK |
+| Data / State | optional if no state touch | OK | safety/migration -> OK |
+| Error Behavior | optional if only happy path | OK | safety/migration -> OK |
+| Permissions / Safety | forbidden unless modifier present | OK if any auth touch | safety -> OK |
+| Compatibility | optional | OK if public surface or data | migration/cross_project -> OK |
+| Observability | optional | OK if user-visible failures | safety -> OK |
+| Acceptance Scenarios | OK | OK | OK |
+| Edge Cases | optional (1 minimum) | OK | OK |
+
+Coverage Closure Rule never relaxes: every imported upstream ID must have a closure status at all tiers.
+
+PLAN - Sub-steps:
+
+| Step | light | standard | + modifier |
+|---|---|---|---|
+| Contract-to-Task Mapping | OK | OK | OK |
+| Risk Discovery Plan Input Traceability | optional if no RISK-PLAN-* | OK if any | OK |
+| TDD Decomposition | OK (alt verification allowed) | OK | OK |
+| Execution Sequencing | optional (single chain OK) | OK | OK |
+| Verification Plan | OK (>=1 check) | OK | safety/migration -> deep |
+| Rollback / Safety Plan | forbidden unless modifier present | OK if any risky step | safety/migration -> OK deep |
+| Stop / Escalation Conditions | OK (>=1) | OK | OK |
+
+### Checkpoint Bundling Eligibility
+
+| Tier | Bundle eligible stages |
+|---|---|
+| light + no modifier | requirement_brief + risk_discovery + design |
+| standard + no modifier | requirement_brief + risk_discovery |
+| any modifier | None - bundle forbidden |
+
+Bundle rules:
+
+- A Bundled Checkpoint approves multiple checkpoint stages in one user-confirmed action; each bundled stage still records its own Quality Gate result and checkpoint review findings.
+- Bundles are revocable. `tier-escalate` after bundle approval reverts the affected bundled checkpoints to `checkpoint_review`, and downstream artifacts derived from a revoked checkpoint must mark imported items stale.
+- A revoked bundled checkpoint never auto-re-approves. Re-approval requires a new `CMD-CHECKPOINT-DECIDE` call once the new tier's section requirements are satisfied.
+
+### Forced Subagent Review Rule
+
+`checkpoint-decide --decision approved` is refused (exit code `5`) when ALL of the following hold:
+
+- The tier is locked with any modifier in `{ migration, safety, cross_project }`.
+- The current stage is in `{ design, spec, plan }`.
+- No `reviews/<stage>-checkpoint-review-*.md` or `reviews/<stage>-subagent-review-*.md` file exists for the current stage and active artifact version.
+
+The refusal surfaces the missing review file path and the suggested command for `CMD-SUBAGENT-REVIEW`. Other checkpoint decisions (`changes_requested`, `blocked`, `upstream_gap_detected`, `route_upstream`) remain allowed so the operator can still record non-approval outcomes.
 
 ## Subagent Model Rule
 
@@ -196,7 +350,7 @@ Artifacts are stored under a workflow artifact root unless a repository-local co
 Default root:
 
 ```text
-docs/artifacts/<work-id>/
+.req-to-plan/<work-id>/
 ```
 
 Default file shape:
@@ -685,7 +839,9 @@ Use this map to choose the right workflow document before editing or generating 
 | Design operation entry semantics before choosing CLI, slash command, MCP, API, skill, or UI carriers | `workflow-operation-surface.md` |
 | Map operation semantics into carrier-neutral command intents before designing concrete CLI, slash command, MCP, API, skill, or UI syntax | `workflow-command-surface.md` |
 | Design concrete CLI command names, flags, output, dry-run, confirmation, and exit semantics | `workflow-cli-adapter.md` |
-| Expose the workflow to agents as `coyeme-workflow-*` project shortcuts | `workflow-agent-command-adapter.md` |
+| Expose the workflow to agents as `r2p-*` project shortcuts | `workflow-agent-command-adapter.md` |
+| Design post-PLAN executor adaptation command intents (`CMD-EXEC-*`) | `workflow-post-plan-adapter-surface.md` |
+| Install, uninstall, verify, or audit the `r2p` lifecycle binary on a host | `workflow-install-surface.md` |
 | Understand cross-stage order, invariants, checkpoints, subagent shared rules, and traceability rules | `workflow-invariants.md` |
 | Capture raw requirement, clarify scope, source provenance, acceptance, and module/capability coverage | `requirement-brief-workflow.md` |
 | Scan blockers, assumptions, risks, discussion points, design triggers, spec inputs, and plan inputs | `risk-question-discovery-workflow.md` |
@@ -711,10 +867,11 @@ Use this map to choose the right workflow document before editing or generating 
 | Command Surface | Carrier-neutral command intent layer that maps operation semantics to operator-facing workflow actions. | `workflow-command-surface.md` | `Purpose` |
 | Command Intent | Stable workflow action ID, such as `CMD-RUN-START`, that a later concrete command carrier may expose. | `workflow-command-surface.md` | `Command Intent Catalog` |
 | Command Contract | Required semantic contract for each command intent, including operation intents, canonical operations, inputs, writes, confirmations, stops, and results. | `workflow-command-surface.md` | `Command Contract Schema` |
-| Agent Command Adapter | Compact project shortcut carrier with `coyeme-workflow-start`, `coyeme-workflow-continue`, `coyeme-workflow-status`, `coyeme-workflow-switch`, and `coyeme-workflow-adapt`. | `workflow-agent-command-adapter.md` | `Purpose` |
-| Active Run | Selected nonterminal workflow run used by `coyeme-workflow-continue`. | `workflow-agent-command-adapter.md` | `Run Selection Model` |
-| Workspace Active Pointer | Workspace-level pointer at `docs/artifacts/.workflow-active` that selects the default run for project shortcuts. | `workflow-agent-command-adapter.md` | `Workspace Active Pointer` |
-| Work ID | Stable generated workflow run ID used in artifact paths and `coyeme-workflow-switch`. | `workflow-agent-command-adapter.md` | `Work ID Rule` |
+| Agent Command Adapter | Compact project shortcut carrier with `r2p-start`, `r2p-continue`, `r2p-status`, `r2p-switch`, and `r2p-adapt`. | `workflow-agent-command-adapter.md` | `Purpose` |
+| Post-PLAN Adapter Surface | Carrier-neutral post-PLAN executor adaptation command intent layer (`CMD-EXEC-*`); outside the requirement-to-PLAN `CMD-*` state machine. | `workflow-post-plan-adapter-surface.md` | `Purpose` |
+| Active Run | Selected nonterminal workflow run used by `r2p-continue`. | `workflow-agent-command-adapter.md` | `Run Selection Model` |
+| Workspace Active Pointer | Workspace-level pointer at `.req-to-plan/.workflow-active` that selects the default run for project shortcuts. | `workflow-agent-command-adapter.md` | `Workspace Active Pointer` |
+| Work ID | Stable generated workflow run ID used in artifact paths and `r2p-switch`. | `workflow-agent-command-adapter.md` | `Work ID Rule` |
 | Run State Command Eligibility | Matrix defining which command intents may run from each `run.md` state. | `workflow-command-surface.md` | `Run State Command Eligibility Matrix` |
 | Operation Coverage Matrix | Mapping that proves every operation intent is covered by a command intent or explicitly marked internal-only. | `workflow-command-surface.md` | `Operation Coverage Matrix` |
 | CLI Adapter | Concrete CLI carrier that maps command intents to command names, flags, output, dry-run, confirmation, and exit semantics without adding workflow authority. | `workflow-cli-adapter.md` | `Purpose` |
@@ -760,3 +917,11 @@ Use this map to choose the right workflow document before editing or generating 
 | Parallel Work Rule | What can and cannot run in parallel across stages and checkpoints. | `workflow-invariants.md` | `Parallel Work Rule` |
 | Cross-Project Checklist | Common checklist for multi-repository, integration, replacement, and migration work. | `workflow-invariants.md` | `Cross-Project Checklist` |
 | Workflow Document Change Rule | Minimum governance for changing workflow documents themselves. | `workflow-invariants.md` | `Workflow Document Change Rule` |
+| Workflow Complexity Tier | Base x Modifiers contract that controls section depth, design level, bundle eligibility, and forced subagent review. | `workflow-invariants.md` | `Workflow Complexity Tier Rule` |
+| Tier Modifier | Additive risk-bearing tag from `{ migration, cross_project, safety, dependency, scope_expanding }` recorded on a tier. | `workflow-invariants.md` | `Workflow Complexity Tier Rule` |
+| Tier Floor | Minimum tier base and modifier set computed from request signals, repo baseline, and linked context. | `workflow-invariants.md` | `Workflow Complexity Tier Rule` |
+| Tier Lock | Operator-confirmed tier value frozen against the Evidence Block before any stage produce runs for `requirement_brief`. | `workflow-invariants.md` | `Workflow Complexity Tier Rule` |
+| Tier Escalation | Adding a modifier to a locked tier mid-run; revokes affected bundled checkpoints and is audit-logged. | `workflow-invariants.md` | `Workflow Complexity Tier Rule` |
+| Bundled Checkpoint | User-confirmed batch approval of multiple eligible checkpoint stages; revocable on `tier-escalate`. | `workflow-invariants.md` | `Workflow Complexity Tier Rule` |
+| Reopen Workflow Run | Operation that copies a `closed_at_plan_checkpoint` run into a new `<id>-rN` run starting from a specified stage; source stays frozen. | `workflow-execution-guide.md` | `Canonical Operations` |
+| Workflow Version | `r2p_version` stamp on `run.md` controlling resume compatibility and migration; bumped per the `Workflow Version` rule. | `workflow-invariants.md` | `Workflow Version` |
