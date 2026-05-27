@@ -220,7 +220,7 @@ Source run is `closed_at_plan_checkpoint`, source PLAN Checkpoint remains approv
 Create `.req-to-plan/<source-work-id>-rN/run.md` and copy source-run artifacts up to (but not including) the target start stage into the new run path. The source run's `run.md` and approved artifacts must not be modified.
 
 **run.md Updates**
-Write a new `run.md` for the reopened run with status `active_stage_draft`, current stage set to the target start stage, and a lineage reference (`reopened_from: <source-work-id>@<source-checkpoint>`). The source `run.md` is read-only during this operation.
+Write a new `run.md` for the reopened run with status `active_stage_draft`, current stage set to the target start stage, and a lineage reference (`reopened_from: <source-work-id>@<source-checkpoint>`). The source `run.md` is read-only during this operation. The new run requires a fresh tier estimation and lock before any `stage-produce` runs (same as a `run-start` flow).
 
 **User Confirmation Required**
 Required. Reopen is a deliberate fork; the operator must confirm the source work ID, target stage, and reason.

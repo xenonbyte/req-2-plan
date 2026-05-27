@@ -83,7 +83,7 @@ backups:
 
 Manifest rules:
 
-- `schema_version` bumps when the manifest layout changes. Older manifests must remain readable by the current `r2p uninstall` and `r2p doctor` flows or the operator must run an explicit migration command.
+- `schema_version` bumps when the manifest layout changes. Older manifests must remain readable by the current `r2p uninstall` and `r2p doctor` flows or the operator must run an explicit migration command (not yet defined in v1; the current schema_version is 1 and is considered stable).
 - `r2p_version` records the version used at install time. `r2p doctor` compares this against the current `version.py`.
 - `installed_paths` is the source of truth for uninstall. Anything outside this list is left alone.
 - `backups` records target/backup pairs. Uninstall restores each backup back to its target, then removes the manifest.

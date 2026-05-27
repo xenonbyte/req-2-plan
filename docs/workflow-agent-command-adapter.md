@@ -135,7 +135,7 @@ r2p-continue
 r2p-status [--all]
 r2p-switch --work-id <id>
 r2p-adapt --executor <name>
-r2p-reopen --from <work-id> --stage <stage>
+r2p-reopen --from <work-id> --stage <stage> --reason "<short>"
 ```
 
 `r2p-adapt` is a post-PLAN carrier. It is not part of the requirement-to-PLAN `CMD-*` state machine and maps to the post-PLAN command intents defined in `workflow-post-plan-adapter-surface.md`.
@@ -306,7 +306,7 @@ repair_request: .req-to-plan/<work-id>/<executor>-plan.repair.md
 next: address the repair request before re-running r2p-adapt
 ```
 
-### `r2p-reopen --from <work-id> --stage <stage>`
+### `r2p-reopen --from <work-id> --stage <stage> --reason "<short>"`
 
 Creates a new lineage run from a closed source run, starting at a specified stage.
 
