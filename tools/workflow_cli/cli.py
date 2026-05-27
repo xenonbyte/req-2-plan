@@ -393,7 +393,7 @@ def _cmd_tier_escalate(args):
     record.tier_locked = record.tier_locked.escalate(modifier)
 
     # Revoke affected bundle authorizations that cover high-tier stages
-    from tools.workflow_cli.models import _FORCED_REVIEW_MODIFIERS
+    from tools.workflow_cli.gates import _FORCED_REVIEW_MODIFIERS
     high_modifiers = {TierModifier.MIGRATION, TierModifier.SAFETY, TierModifier.CROSS_PROJECT}
     from datetime import datetime, timezone
     if modifier in high_modifiers:
