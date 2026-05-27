@@ -34,6 +34,38 @@ class TestStageConstants(unittest.TestCase):
         self.assertEqual(set(self.STAGE_ARTIFACT_MAP.keys()), set(self.STAGE_ORDER))
 
 
+class TestStageRequiredUpstreamCheckpoints(unittest.TestCase):
+    def setUp(self):
+        from tools.workflow_cli.models import (
+            Stage, STAGE_REQUIRED_UPSTREAM_CHECKPOINTS, STAGE_ORDER,
+        )
+        self.Stage = Stage
+        self.STAGE_REQUIRED_UPSTREAM_CHECKPOINTS = STAGE_REQUIRED_UPSTREAM_CHECKPOINTS
+        self.STAGE_ORDER = STAGE_ORDER
+
+    def test_raw_requirement_exists_and_maps_to_empty_list(self):
+        self.assertIn(self.Stage.RAW_REQUIREMENT, self.STAGE_REQUIRED_UPSTREAM_CHECKPOINTS)
+        self.assertEqual(self.STAGE_REQUIRED_UPSTREAM_CHECKPOINTS[self.Stage.RAW_REQUIREMENT], [])
+
+    def test_requirement_brief_maps_to_empty_list(self):
+        self.assertIn(self.Stage.REQUIREMENT_BRIEF, self.STAGE_REQUIRED_UPSTREAM_CHECKPOINTS)
+        self.assertEqual(self.STAGE_REQUIRED_UPSTREAM_CHECKPOINTS[self.Stage.REQUIREMENT_BRIEF], [])
+
+    def test_plan_has_all_4_upstream_stages(self):
+        expected = [
+            self.Stage.REQUIREMENT_BRIEF,
+            self.Stage.RISK_DISCOVERY,
+            self.Stage.DESIGN,
+            self.Stage.SPEC,
+        ]
+        self.assertEqual(self.STAGE_REQUIRED_UPSTREAM_CHECKPOINTS[self.Stage.PLAN], expected)
+
+    def test_all_stages_in_stage_order_are_keys(self):
+        keys = set(self.STAGE_REQUIRED_UPSTREAM_CHECKPOINTS.keys())
+        stage_order_set = set(self.STAGE_ORDER)
+        self.assertEqual(keys, stage_order_set)
+
+
 class TestRunStatusEnum(unittest.TestCase):
     def setUp(self):
         from tools.workflow_cli.models import RunStatus
@@ -270,6 +302,14 @@ class TestTierEstimate(unittest.TestCase):
         est = self.TierEstimate(base=self.TierBase.LIGHT, modifiers=frozenset())
         locked = est.lock(self.TierBase.LIGHT, frozenset())
         self.assertFalse(locked.is_above_floor())
+
+    def test_is_above_floor_false_after_escalate_without_lock(self):
+        # escalate returns a new estimate, but since _floor_base is not set (estimate IS floor),
+        # is_above_floor() returns False
+        estimate = self.TierEstimate(base=self.TierBase.LIGHT, modifiers=frozenset())
+        escalated = estimate.escalate(self.TierModifier.MIGRATION)
+        # escalated estimate has no floor context → is_above_floor is False
+        self.assertFalse(escalated.is_above_floor())
 
 
 class TestEvidenceBlock(unittest.TestCase):

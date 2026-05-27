@@ -85,6 +85,7 @@ STAGE_ARTIFACT_MAP: dict[Stage, str] = {
 }
 
 STAGE_REQUIRED_UPSTREAM_CHECKPOINTS: dict[Stage, list[Stage]] = {
+    Stage.RAW_REQUIREMENT: [],
     Stage.REQUIREMENT_BRIEF: [],
     Stage.RISK_DISCOVERY: [Stage.REQUIREMENT_BRIEF],
     Stage.DESIGN: [Stage.REQUIREMENT_BRIEF, Stage.RISK_DISCOVERY],
@@ -359,6 +360,7 @@ class TierEstimate:
         user_modifiers: frozenset[TierModifier],
     ) -> "TierEstimate":
         """Lock tier to user-specified values; raises ValueError if below floor."""
+        # Derives floor from self.base/self.modifiers (not from _floor_base which is only for is_above_floor)
         floor = self.floor()
         if _TIER_BASE_ORDER.index(user_base) < _TIER_BASE_ORDER.index(floor.base):
             raise ValueError(
