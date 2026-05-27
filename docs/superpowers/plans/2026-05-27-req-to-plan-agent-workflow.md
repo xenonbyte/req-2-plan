@@ -261,6 +261,7 @@ ALLOWED_TRANSITIONS: Dict[RunStatus, Set[RunStatus]] = {
     RunStatus.UPSTREAM_GAP_ROUTING: {
         RunStatus.ACTIVE_STAGE_DRAFT,
         RunStatus.UPSTREAM_GAP_ROUTING,
+        RunStatus.READY_FOR_CHECKPOINT_REVIEW,
         RunStatus.CHECKPOINT_APPROVED,
     },
     RunStatus.CHECKPOINT_APPROVED: {
@@ -1922,6 +1923,31 @@ Clarify the repaired requirement.
                 self.assertIn("gate-complete", data["next_allowed_command"])
                 self.assertIn("--stage requirement_brief", data["next_allowed_command"])
 
+            with StdoutCapture() as out:
+                rc = main([
+                    "gate-complete",
+                    "--work-id", "WF-20260527-cli-gap",
+                    "--artifact-root", str(artifact_base),
+                    "--stage", "requirement_brief",
+                    "--confirm",
+                    "--json",
+                ])
+            data = json.loads(out.getvalue())
+            self.assertEqual(rc, 0)
+            self.assertEqual(data["command_result"], "ready")
+            self.assertEqual(RunStateManager(root).load().status, RunStatus.READY_FOR_CHECKPOINT_REVIEW)
+
+            with StdoutCapture() as out:
+                rc = main([
+                    "status-next",
+                    "--work-id", "WF-20260527-cli-gap",
+                    "--artifact-root", str(artifact_base),
+                    "--json",
+                ])
+            data = json.loads(out.getvalue())
+            self.assertEqual(rc, 0)
+            self.assertIn("review-checkpoint", data["next_allowed_command"])
+
 
 if __name__ == "__main__":
     unittest.main()
@@ -3274,13 +3300,107 @@ cd /Users/xubo/x-skills/req-to-plan && git add tools/workflow_cli/adapters/ test
 
 **Files:**
 - Create: `tools/workflow_cli/agent_shortcuts.py`
+- Create: `tests/test_agent_shortcuts.py`
 - Create: `tools/coyeme-workflow-start`
 - Create: `tools/coyeme-workflow-continue`
 - Create: `tools/coyeme-workflow-status`
 - Create: `tools/coyeme-workflow-switch`
 - Create: `tools/coyeme-workflow-adapt`
 
-- [ ] **Step 1: Write agent_shortcuts.py**
+- [ ] **Step 1: Write shortcut resume tests**
+
+```python
+# tests/test_agent_shortcuts.py
+import io
+import os
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from tools.workflow_cli.agent_shortcuts import cmd_continue
+from tools.workflow_cli.models import RunStatus, Stage, WorkId
+from tools.workflow_cli.state import RunStateManager, create_run_record, update_resume_context
+
+
+class StdoutCapture:
+    def __enter__(self):
+        self._old = sys.stdout
+        self.buffer = io.StringIO()
+        sys.stdout = self.buffer
+        return self.buffer
+
+    def __exit__(self, exc_type, exc, tb):
+        sys.stdout = self._old
+
+
+class Cwd:
+    def __init__(self, path: Path):
+        self.path = path
+
+    def __enter__(self):
+        self._old = Path.cwd()
+        os.chdir(self.path)
+
+    def __exit__(self, exc_type, exc, tb):
+        os.chdir(self._old)
+
+
+class TestAgentShortcuts(unittest.TestCase):
+    def _repo_with_record(self, status: RunStatus, next_operation: str) -> Path:
+        root = Path(self.tmp.name)
+        work_id = "WF-20260527-shortcut"
+        run_root = root / ".req-to-plan" / work_id
+        run_root.mkdir(parents=True)
+        (root / ".req-to-plan" / ".workflow-active").write_text(
+            f"selected_work_id: {work_id}\nselected_run: {run_root / 'run.md'}\n"
+        )
+        record = create_run_record(WorkId(work_id))
+        record.current_stage = Stage.REQUIREMENT_BRIEF
+        record.status = status
+        record = update_resume_context(record, next_operation=next_operation, active_item="requirement_brief")
+        RunStateManager(run_root).save(record)
+        return root
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_continue_surfaces_stage_ready_after_stage_produce_resume(self):
+        root = self._repo_with_record(RunStatus.ACTIVE_STAGE_DRAFT, "mark_stage_ready")
+        with Cwd(root), StdoutCapture() as out:
+            rc = cmd_continue([])
+        self.assertEqual(rc, 0)
+        output = out.getvalue()
+        self.assertIn("next_allowed_command: python3 -m tools.workflow_cli stage-ready", output)
+
+    def test_continue_surfaces_gate_quality_after_stage_ready_resume(self):
+        root = self._repo_with_record(RunStatus.ACTIVE_STAGE_DRAFT, "run_quality_gate")
+        with Cwd(root), StdoutCapture() as out:
+            rc = cmd_continue([])
+        self.assertEqual(rc, 0)
+        output = out.getvalue()
+        self.assertIn("next_allowed_command: python3 -m tools.workflow_cli gate-quality", output)
+
+    def test_continue_surfaces_gate_complete_after_structural_quality_pass_resume(self):
+        root = self._repo_with_record(RunStatus.ACTIVE_STAGE_DRAFT, "run_semantic_quality_gate")
+        with Cwd(root), StdoutCapture() as out:
+            rc = cmd_continue([])
+        self.assertEqual(rc, 0)
+        output = out.getvalue()
+        self.assertIn("next_allowed_command: run semantic quality checks", output)
+        self.assertIn("gate-complete", output)
+
+
+if __name__ == "__main__":
+    unittest.main()
+```
+
+- [ ] **Step 2: Write agent_shortcuts.py**
 
 ```python
 # tools/workflow_cli/agent_shortcuts.py
@@ -3431,41 +3551,25 @@ def cmd_continue(args: list[str]) -> int:
         print(f"next: coyeme-workflow-status --all")
         return 1
 
-    content = run_path.read_text()
+    from tools.workflow_cli.state import RunStateManager
+    from tools.workflow_cli.cli import _next_command_for_state
 
-    if "closed_at_plan_checkpoint" in content:
+    record = RunStateManager(artifact_root).load()
+    next_command = _next_command_for_state(record)
+
+    if record.status.value == "closed_at_plan_checkpoint":
         print("blocked: run_already_closed")
         open_runs = [r for r in _scan_open_runs(repo_root) if r != work_id]
         if open_runs:
             print(f"alternative: coyeme-workflow-switch --work-id {open_runs[0]}")
         return 0
 
-    # Determine current stage and next action from run.md
-    current_stage = "raw_requirement"
-    status = "active_stage_draft"
-    for line in content.split("\n"):
-        if line.startswith("## Current Stage"):
-            continue
-        if line.strip() in ("raw_requirement", "requirement_brief", "risk_discovery", "design", "spec", "plan", "closed"):
-            current_stage = line.strip()
-            break
-
-    for line in content.split("\n"):
-        if line.startswith("## Status"):
-            continue
-        if line.strip().startswith(("active_stage_draft", "not_started", "entry_gate_failed",
-                                    "quality_gate_failed", "ready_for_checkpoint_review",
-                                    "checkpoint_review", "checkpoint_changes_requested",
-                                    "upstream_gap_routing", "checkpoint_approved", "next_stage")):
-            status = line.strip()
-            break
-
-    # Print status and let the Agent decide next steps
     print(f"workflow: {work_id}")
     print(f"run: {run_path}")
-    print(f"current_stage: {current_stage}")
-    print(f"status: {status}")
-    print(f"next: Agent should read run.md, load stage workflow doc, and proceed with next operation")
+    print(f"current_stage: {record.current_stage.value}")
+    print(f"status: {record.status.value}")
+    print(f"next_allowed_command: {next_command}")
+    print(f"next: {next_command}")
 
     return 0
 
@@ -3584,7 +3688,7 @@ def main() -> int:
     return handler(sys.argv[2:])
 ```
 
-- [ ] **Step 2: Create wrapper scripts**
+- [ ] **Step 3: Create wrapper scripts**
 
 ```bash
 # tools/coyeme-workflow-start
@@ -3651,11 +3755,12 @@ sys.exit(cmd_adapt(sys.argv[1:]))
 " "$@"
 ```
 
-- [ ] **Step 3: Make wrappers executable and test**
+- [ ] **Step 4: Make wrappers executable and test**
 
 Run:
 ```bash
 chmod +x /Users/xubo/x-skills/req-to-plan/tools/coyeme-workflow-*
+cd /Users/xubo/x-skills/req-to-plan && python3 -m unittest tests.test_agent_shortcuts -v
 cd /Users/xubo/x-skills/req-to-plan && python3 -c "
 import sys
 sys.path.insert(0, '.')
@@ -3665,10 +3770,10 @@ print('agent_shortcuts module loaded successfully')
 ```
 Expected: "agent_shortcuts module loaded successfully"
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
-cd /Users/xubo/x-skills/req-to-plan && git add tools/workflow_cli/agent_shortcuts.py tools/coyeme-workflow-* && git commit -m "feat: add agent shortcuts and wrapper scripts"
+cd /Users/xubo/x-skills/req-to-plan && git add tools/workflow_cli/agent_shortcuts.py tests/test_agent_shortcuts.py tools/coyeme-workflow-* && git commit -m "feat: add agent shortcuts and wrapper scripts"
 ```
 
 ---
@@ -3698,7 +3803,7 @@ Invoke this skill when the user runs any `coyeme-workflow-*` command or asks to 
    tools/coyeme-workflow-continue
    ```
 
-2. Parse the output to get `current_stage` and `status`.
+2. Parse the output to get `current_stage`, `status`, and `next_allowed_command`.
 
 3. Map `current_stage` to the workflow document:
    - `raw_requirement` / `requirement_brief` → `docs/requirement-brief-workflow.md`
@@ -3709,7 +3814,7 @@ Invoke this skill when the user runs any `coyeme-workflow-*` command or asks to 
 
 4. Read `docs/workflow-invariants.md` and `docs/workflow-execution-guide.md` for cross-stage rules.
 
-5. Based on `status`, execute the next operation:
+5. If `next_allowed_command` is present, treat it as authoritative durable resume state and execute that command next. Use the status table only as a fallback when `next_allowed_command` is absent or blocked by a CLI error:
 
    | Status | Action |
    |--------|--------|
