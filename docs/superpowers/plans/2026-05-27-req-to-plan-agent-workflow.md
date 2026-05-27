@@ -24,7 +24,7 @@ tools/workflow_cli/
 ├── state.py                  # run.md read/write, state transition validation
 ├── artifact.py               # artifact frontmatter, version, stale/superseded
 ├── gates.py                  # structured gate checks
-├── cli.py                    # argparse routing, all 22 commands
+├── cli.py                    # argparse routing, all 23 commands
 ├── output.py                 # JSON/human output formatting
 ├── adapters/
 │   ├── __init__.py           # adapter registry
@@ -284,7 +284,7 @@ ALLOWED_COMMANDS_BY_RUN_STATE: Dict[RunStatus, Set[str]] = {
     RunStatus.NOT_STARTED: {"CMD-RUN-START"},
     RunStatus.ACTIVE_STAGE_DRAFT: {
         "CMD-STAGE-LOAD", "CMD-STAGE-PRODUCE", "CMD-STAGE-READY",
-        "CMD-GATE-ENTRY", "CMD-GATE-QUALITY",
+        "CMD-GATE-ENTRY", "CMD-GATE-QUALITY", "CMD-GATE-COMPLETE",
         "CMD-CONFIRM-RECORD", "CMD-CONFIRM-REJECT", "CMD-CONFIRM-LINK",
         "CMD-SUBAGENT-DISPATCH", "CMD-SUBAGENT-MERGE",
         "CMD-GAP-RECORD",
@@ -295,7 +295,7 @@ ALLOWED_COMMANDS_BY_RUN_STATE: Dict[RunStatus, Set[str]] = {
     },
     RunStatus.QUALITY_GATE_FAILED: {
         "CMD-STAGE-PRODUCE", "CMD-STAGE-READY",
-        "CMD-GATE-QUALITY",
+        "CMD-GATE-QUALITY", "CMD-GATE-COMPLETE",
         "CMD-CONFIRM-RECORD", "CMD-CONFIRM-REJECT",
         "CMD-SUBAGENT-DISPATCH", "CMD-SUBAGENT-MERGE",
         "CMD-GAP-RECORD", "CMD-GAP-ROUTE",
@@ -312,14 +312,14 @@ ALLOWED_COMMANDS_BY_RUN_STATE: Dict[RunStatus, Set[str]] = {
     },
     RunStatus.CHECKPOINT_CHANGES_REQUESTED: {
         "CMD-STAGE-PRODUCE", "CMD-STAGE-READY",
-        "CMD-GATE-QUALITY",
+        "CMD-GATE-QUALITY", "CMD-GATE-COMPLETE",
         "CMD-CONFIRM-RECORD", "CMD-CONFIRM-REJECT",
         "CMD-GAP-RECORD", "CMD-GAP-ROUTE",
     },
     RunStatus.UPSTREAM_GAP_ROUTING: {
         "CMD-GAP-ROUTE", "CMD-GAP-REIMPORT",
         "CMD-STAGE-LOAD", "CMD-STAGE-PRODUCE", "CMD-STAGE-READY",
-        "CMD-GATE-QUALITY", "CMD-CHECKPOINT-DECIDE",
+        "CMD-GATE-QUALITY", "CMD-GATE-COMPLETE", "CMD-CHECKPOINT-DECIDE",
         "CMD-ARTIFACT-MARK-STALE",
     },
     RunStatus.CHECKPOINT_APPROVED: {
@@ -1103,6 +1103,11 @@ class TestArtifactManager(unittest.TestCase):
         loaded = self.mgr.load("06-spec.md")
         self.assertIn("v2", loaded)
 
+    def test_update_refuses_approved_artifact(self):
+        self.mgr.create("03-requirement-brief.md", "---\nversion: 1\nstatus: approved\n---\n# Approved\n")
+        with self.assertRaises(ValueError):
+            self.mgr.update("03-requirement-brief.md", "---\nversion: 2\nstatus: draft\n---\n# Replacement\n")
+
     def test_exists_checks_file(self):
         self.assertFalse(self.mgr.exists("07-plan.md"))
         self.mgr.create("07-plan.md", "plan")
@@ -1206,6 +1211,14 @@ class ArtifactManager:
 
     def update(self, filename: str, content: str) -> Path:
         p = self._path(filename)
+        if p.exists():
+            current = p.read_text(encoding="utf-8")
+            current_fm, _ = parse_frontmatter(current)
+            if current_fm.get("status") == "approved":
+                raise ValueError(
+                    f"Refusing to overwrite approved artifact: {filename}. "
+                    "Mark it stale/superseded and create a versioned replacement."
+                )
         p.write_text(content, encoding="utf-8")
         return p
 
@@ -1276,7 +1289,7 @@ class TestEntryGate(unittest.TestCase):
     def test_entry_gate_fails_when_upstream_checkpoint_missing(self):
         result = check_entry_gate(self.record, Stage.SPEC, [])
         self.assertFalse(result.passed)
-        self.assertIn("missing_upstream_checkpoint", result.reason.lower())
+        self.assertIn("missing upstream checkpoint", result.reason.lower())
 
     def test_entry_gate_passes_with_approved_upstream(self):
         from tools.workflow_cli.state import add_checkpoint
@@ -1304,6 +1317,9 @@ status: ready
 |---|---|---|
 | Raw Requirement | 00-raw-requirement.md | available |
 | DESIGN | 05-design.md | approved |
+
+## Closure
+All referenced upstream artifacts are accounted for.
 """
         result = check_quality_gate_structural(content, Stage.SPEC)
         self.assertTrue(result.passed)
@@ -1606,6 +1622,7 @@ class TestCliParser(unittest.TestCase):
             ["run-start", "--work-id", "WF-20260527-cli-test"],
             ["stage-produce", "--work-id", "WF-20260527-cli-test", "--stage", "raw_requirement"],
             ["gate-quality", "--work-id", "WF-20260527-cli-test", "--stage", "design"],
+            ["gate-complete", "--work-id", "WF-20260527-cli-test", "--stage", "design", "--confirm"],
             ["checkpoint-decide", "--work-id", "WF-20260527-cli-test", "--stage", "plan", "--decision", "approved"],
             ["executor-adapt", "--work-id", "WF-20260527-cli-test", "--executor", "superpowers"],
         ]
@@ -1630,12 +1647,13 @@ class TestCliParser(unittest.TestCase):
 
     def test_run_start_creates_run_and_raw_artifacts(self):
         with tempfile.TemporaryDirectory() as td:
-            root = Path(td) / "WF-20260527-cli-start"
+            artifact_base = Path(td)
+            root = artifact_base / "WF-20260527-cli-start"
             with StdoutCapture() as out:
                 rc = main([
                     "run-start",
                     "--work-id", "WF-20260527-cli-start",
-                    "--artifact-root", str(root),
+                    "--artifact-root", str(artifact_base),
                     "--source", "Add login rate limiting.",
                     "--json",
                 ])
@@ -1649,7 +1667,8 @@ class TestCliParser(unittest.TestCase):
 
     def test_gate_quality_failure_updates_run_state(self):
         with tempfile.TemporaryDirectory() as td:
-            root = Path(td) / "WF-20260527-cli-gate"
+            artifact_base = Path(td)
+            root = artifact_base / "WF-20260527-cli-gate"
             root.mkdir(parents=True)
             record = create_run_record(WorkId("WF-20260527-cli-gate"))
             record.current_stage = Stage.DESIGN
@@ -1661,7 +1680,7 @@ class TestCliParser(unittest.TestCase):
                 rc = main([
                     "gate-quality",
                     "--work-id", "WF-20260527-cli-gate",
-                    "--artifact-root", str(root),
+                    "--artifact-root", str(artifact_base),
                     "--stage", "design",
                     "--json",
                 ])
@@ -1670,6 +1689,40 @@ class TestCliParser(unittest.TestCase):
             self.assertEqual(data["command_result"], "quality_gate_failed")
             self.assertTrue(any("frontmatter" in stop.lower() for stop in data["stops"]))
             self.assertEqual(RunStateManager(root).load().status, RunStatus.QUALITY_GATE_FAILED)
+
+    def test_gate_quality_structural_pass_does_not_advance_before_semantic_pass(self):
+        with tempfile.TemporaryDirectory() as td:
+            artifact_base = Path(td)
+            root = artifact_base / "WF-20260527-cli-semantic"
+            root.mkdir(parents=True)
+            record = create_run_record(WorkId("WF-20260527-cli-semantic"))
+            record.current_stage = Stage.DESIGN
+            record.status = RunStatus.ACTIVE_STAGE_DRAFT
+            RunStateManager(root).save(record)
+            ArtifactManager(root).create("05-design.md", """---
+artifact_id: DESIGN-001
+version: 1
+status: ready
+---
+## Upstream References
+| Artifact | Reference | Status |
+|---|---|---|
+| Raw Requirement | 00-raw-requirement.md | available |
+""")
+
+            with StdoutCapture() as out:
+                rc = main([
+                    "gate-quality",
+                    "--work-id", "WF-20260527-cli-semantic",
+                    "--artifact-root", str(artifact_base),
+                    "--stage", "design",
+                    "--json",
+                ])
+            data = json.loads(out.getvalue())
+            self.assertEqual(rc, 0)
+            self.assertEqual(data["command_result"], "structural_pass")
+            self.assertIn("gate-complete", data["next_allowed_command"])
+            self.assertEqual(RunStateManager(root).load().status, RunStatus.ACTIVE_STAGE_DRAFT)
 
 
 if __name__ == "__main__":
@@ -2031,11 +2084,61 @@ def cmd_gate_quality(args: argparse.Namespace) -> int:
             exit_code=1,
         )
 
+    record = update_resume_context(
+        record,
+        last_operation="structural_quality_gate_passed",
+        next_operation="run_semantic_quality_gate",
+        active_item=stage.value,
+    )
+    mgr.save(record)
+    return print_result(
+        "CMD-GATE-QUALITY", "structural_pass",
+        run_path=str(artifact_root / "run.md"),
+        run_state_before="active_stage_draft",
+        run_state_after=record.status.value,
+        current_stage=stage.value,
+        next_allowed_command=f"run semantic quality checks, then python3 -m tools.workflow_cli gate-complete --work-id {str(record.work_id)} --stage {stage.value} --confirm",
+        json_mode=args.json,
+    )
+
+
+def cmd_gate_complete(args: argparse.Namespace) -> int:
+    artifact_root = _resolve_artifact_root(args.work_id, args.run_path, args.artifact_root)
+    mgr, record = _load_run_state(artifact_root)
+    _check_command_allowed(record, "CMD-GATE-COMPLETE")
+
+    if not args.confirm:
+        return print_result(
+            "CMD-GATE-COMPLETE", "confirmation_required",
+            stops=["--confirm required after semantic Quality Gate passes"],
+            json_mode=args.json,
+            exit_code=5,
+        )
+
+    stage = Stage(args.stage)
+    filename = STAGE_ARTIFACT_MAP.get(stage, "")
+    am = ArtifactManager(artifact_root)
+    if not am.exists(filename):
+        return print_result("CMD-GATE-COMPLETE", "no_artifact", stops=[f"No artifact for stage: {stage.value}"], json_mode=args.json, exit_code=2)
+
+    gate_result = check_quality_gate_structural(am.load(filename), stage)
+    if not gate_result.passed:
+        record.status = RunStatus.QUALITY_GATE_FAILED
+        mgr.save(record)
+        return print_result(
+            "CMD-GATE-COMPLETE", "quality_gate_failed",
+            run_path=str(artifact_root / "run.md"),
+            run_state_after="quality_gate_failed",
+            stops=gate_result.issues,
+            json_mode=args.json,
+            exit_code=1,
+        )
+
     record.status = RunStatus.READY_FOR_CHECKPOINT_REVIEW
     record = update_resume_context(record, last_operation="quality_gate_ready", next_operation="run_checkpoint_review", active_item=f"{stage.value} checkpoint review")
     mgr.save(record)
     return print_result(
-        "CMD-GATE-QUALITY", "ready",
+        "CMD-GATE-COMPLETE", "ready",
         run_path=str(artifact_root / "run.md"),
         run_state_before="active_stage_draft",
         run_state_after="ready_for_checkpoint_review",
@@ -2384,7 +2487,7 @@ def _next_command_for_state(record: RunRecord) -> str:
 def _add_common_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--work-id", default=None, help="Workflow run ID")
     parser.add_argument("--run", dest="run_path", default=None, help="Path to run.md")
-    parser.add_argument("--artifact-root", default=None, help="Artifact root override")
+    parser.add_argument("--artifact-root", default=None, help="Artifact base directory override; run root is <artifact-root>/<work-id>")
     parser.add_argument("--json", action="store_true", help="JSON output mode")
     parser.add_argument("--dry-run", action="store_true", help="Preview without writing")
     parser.add_argument("--confirm", action="store_true", help="Authorize confirmation-bearing writes")
@@ -2412,7 +2515,7 @@ def build_parser() -> argparse.ArgumentParser:
         p.add_argument("--stage", required=True, help="Stage name")
 
     # gate
-    for cmd_name in ["gate-entry", "gate-quality"]:
+    for cmd_name in ["gate-entry", "gate-quality", "gate-complete"]:
         p = sub.add_parser(cmd_name, help=f"{cmd_name} command")
         _add_common_args(p)
         p.add_argument("--stage", required=True, help="Stage name")
@@ -2476,6 +2579,7 @@ COMMAND_MAP = {
     "stage-ready": cmd_stage_ready,
     "gate-entry": cmd_gate_entry,
     "gate-quality": cmd_gate_quality,
+    "gate-complete": cmd_gate_complete,
     "review-checkpoint": cmd_review_checkpoint,
     "review-merge": cmd_review_merge,
     "checkpoint-decide": cmd_checkpoint_decide,
@@ -3341,7 +3445,8 @@ Invoke this skill when the user runs any `coyeme-workflow-*` command or asks to 
 7. For Quality Gate:
    - First run structural check via CLI: `python3 -m tools.workflow_cli gate-quality --stage <stage> --work-id <id> --json`
    - Then run semantic check yourself using the Quality Gate checklist from the stage workflow document
-   - If both pass, the stage is `ready_for_checkpoint_review`
+   - If semantic checks fail, keep the run in `active_stage_draft`, repair the artifact, and rerun `gate-quality`
+   - If structural and semantic checks both pass, call `python3 -m tools.workflow_cli gate-complete --stage <stage> --work-id <id> --confirm --json`; only this command moves the stage to `ready_for_checkpoint_review`
 
 8. For Checkpoint Review:
    - Run subagent reviews for migration/rewrite/integration/cross-project/safety-sensitive work
@@ -3686,7 +3791,7 @@ cd /Users/xubo/x-skills/req-to-plan && git add CLAUDE.md && git commit -m "docs:
 - ✅ Superpowers adapter (adapters/superpowers.py)
 - ✅ Agent shortcuts (agent_shortcuts.py + wrapper scripts)
 - ✅ Structured gate validation (gates.py)
-- ✅ All 22 CLI commands (plus 2 review-only gateways) covered in cli.py
+- ✅ All 23 CLI commands covered in cli.py
 - ✅ Integration test validating full workflow
 - ✅ CLAUDE.md project instructions
 
