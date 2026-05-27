@@ -1,13 +1,11 @@
 """
 r2p lifecycle binary — install/uninstall/doctor CLI.
-
-Full install logic implemented in Task 14.
-This module provides the argparse router with stub implementations.
 """
 from __future__ import annotations
 
 import argparse
 import sys
+from pathlib import Path
 
 
 def main(args=None):
@@ -17,6 +15,12 @@ def main(args=None):
     # install
     p_install = subparsers.add_parser("install", help="Install agent integration templates")
     p_install.add_argument("--platform", required=True)
+    p_install.add_argument(
+        "--confirm",
+        action="store_true",
+        default=False,
+        help="Overwrite an existing installation",
+    )
     p_install.set_defaults(func=_cmd_install)
 
     # uninstall
@@ -40,24 +44,84 @@ def main(args=None):
     parsed.func(parsed)
 
 
+def _make_service():
+    from tools.workflow_cli.install import InstallService
+
+    repo_root = Path(__file__).parent.parent.parent
+    manifest_root = Path.home() / ".req-to-plan"
+    return InstallService(repo_root=repo_root, manifest_root=manifest_root)
+
+
 def _cmd_install(args):
-    print(f"[stub] install --platform {args.platform} — implemented in Task 14")
+    from tools.workflow_cli.install import InstallService
+
+    service = _make_service()
+    try:
+        manifest = service.install(args.platform, confirm=args.confirm)
+    except FileExistsError as exc:
+        print(f"Error: {exc}")
+        print("Use --confirm to reinstall.")
+        sys.exit(1)
+    except ValueError as exc:
+        print(f"Error: {exc}")
+        sys.exit(1)
+
+    n = len(manifest.get("installed_paths", []))
+    manifest_path = (
+        Path.home() / ".req-to-plan" / "install" / f"{args.platform}.yaml"
+    )
+    print(
+        f"install: platform={args.platform!r} "
+        f"installed_paths={n} "
+        f"manifest={manifest_path}"
+    )
 
 
 def _cmd_uninstall(args):
-    print(f"[stub] uninstall --platform {args.platform} — implemented in Task 14")
+    service = _make_service()
+    try:
+        result = service.uninstall(args.platform)
+    except FileNotFoundError as exc:
+        print(f"Error: {exc}")
+        sys.exit(1)
+    print(
+        f"uninstall: platform={args.platform!r} "
+        f"removed={len(result['removed'])} paths"
+    )
 
 
 def _cmd_installed(args):
-    print("[stub] installed — implemented in Task 14")
+    service = _make_service()
+    platforms = service.installed()
+    if not platforms:
+        print("installed: none")
+    else:
+        for info in platforms:
+            print(
+                f"installed: platform={info['platform']!r} "
+                f"version={info['r2p_version']!r} "
+                f"at={info['installed_at']}"
+            )
 
 
 def _cmd_doctor(args):
-    print("[stub] doctor — implemented in Task 14")
+    service = _make_service()
+    reports = service.doctor()
+    if not reports:
+        print("doctor: no platforms installed")
+    else:
+        for r in reports:
+            status = r["status"]
+            issues = r["issues"]
+            if issues:
+                print(f"doctor: platform={r['platform']!r} status={status} issues={issues}")
+            else:
+                print(f"doctor: platform={r['platform']!r} status={status}")
 
 
 def _cmd_version(args):
     from tools.workflow_cli.version import R2P_VERSION
+
     print(R2P_VERSION)
 
 

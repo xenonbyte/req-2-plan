@@ -375,11 +375,26 @@ class TestStageReady:
 
 
 class TestInstallCli:
-    def test_install_stub(self, capsys):
+    def test_install_stub(self, capsys, tmp_path):
         from tools.workflow_cli.install_cli import main as install_main
-        install_main(["install", "--platform", "claude-code"])
+        from tools.workflow_cli.install import InstallService
+
+        repo_root = Path(__file__).parent.parent
+        svc = InstallService(
+            repo_root=repo_root,
+            manifest_root=tmp_path / "manifest",
+            platform_homes={
+                "claude": tmp_path / "claude",
+                "codex": tmp_path / "codex",
+                "gemini": tmp_path / "gemini",
+            },
+        )
+        with __import__("unittest.mock", fromlist=["patch"]).patch(
+            "tools.workflow_cli.install_cli._make_service", return_value=svc
+        ):
+            install_main(["install", "--platform", "claude"])
         out = capsys.readouterr().out
-        assert "install" in out.lower() or "stub" in out.lower()
+        assert "install" in out.lower()
 
     def test_version(self, capsys):
         from tools.workflow_cli.install_cli import main as install_main
