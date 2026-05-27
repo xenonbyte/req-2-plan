@@ -199,12 +199,21 @@ class InstallService:
                 target_path.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(str(backup_path), str(target_path))
                 restored.append(str(target_path))
+                backup_path.unlink(missing_ok=True)
 
         # Reference-count bin dir: only remove when no other platform manifests exist
         if not self._other_platforms_have_manifests(platform):
             bin_dir = self.manifest_root / "bin"
             if bin_dir.exists():
                 shutil.rmtree(str(bin_dir))
+
+        # Clean up empty backup directory for this platform
+        backup_dir = self.manifest_root / "install" / "backups" / platform
+        if backup_dir.exists():
+            try:
+                backup_dir.rmdir()  # only removes if empty
+            except OSError:
+                pass  # non-empty is OK (unexpected files left by user)
 
         # Remove the manifest itself
         manifest_path.unlink(missing_ok=True)
@@ -326,6 +335,6 @@ def _safe_write(
         backup = backup_dir / f"{dest.name}.{ts}"
         shutil.copy2(str(dest), str(backup))
         backups.append({"target": str(dest), "backup": str(backup)})
-    dest.write_text(content)
+    dest.write_text(content, encoding="utf-8")
     installed_paths.append(str(dest))
     written.append(dest)

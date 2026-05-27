@@ -7,6 +7,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 from pathlib import Path
 
@@ -127,6 +128,15 @@ def _cmd_run_start(args):
     run_dir = _get_run_dir(work_id, args.base_path)
     mgr = RunStateManager(run_dir)
 
+    if (run_dir / "run.md").exists() and not getattr(args, "overwrite", False):
+        print_and_exit(
+            format_error(
+                f"Run {work_id!r} already exists. Use --overwrite to reset or choose a different --work-id.",
+                exit_code=EXIT_CONFLICT,
+            ),
+            EXIT_CONFLICT,
+        )
+
     # Create run record
     record = create_run_record(work_id)
 
@@ -212,7 +222,10 @@ def _cmd_run_close(args):
             ),
             EXIT_CONFLICT,
         )
-    record.status = RunStatus.CLOSED_AT_PLAN_CHECKPOINT
+    try:
+        record = update_run_status(record, RunStatus.CLOSED_AT_PLAN_CHECKPOINT)
+    except ValueError as e:
+        print_and_exit(format_error(str(e), exit_code=EXIT_CONFLICT), EXIT_CONFLICT)
     mgr.save(record)
     print_and_exit(
         format_success({"work_id": str(record.work_id), "status": record.status.value}, message="Run closed"),
@@ -249,7 +262,6 @@ def _cmd_run_reopen(args):
     base = source_id
     suffix = 1
     # Remove existing -rN suffix from base if present
-    import re
     m = re.match(r"^(WF-\d{8}-.+?)-r(\d+)$", source_id)
     if m:
         base = m.group(1)
@@ -455,7 +467,7 @@ def _cmd_gate_entry(args):
         record.bundle_authorizations,
     )
     output = format_gate_result(result, gate_type="entry-gate")
-    exit_code = EXIT_OK if result.passed else EXIT_GATE_FAIL
+    exit_code = EXIT_OK if result.passed else result.exit_code
     print_and_exit(output, exit_code)
 
 
@@ -574,7 +586,10 @@ def _cmd_stage_produce(args):
     content = _resolve_content(args)
 
     am = ArtifactManager(run_dir)
-    path = am.stage_produce(stage, content)
+    try:
+        path = am.stage_produce(stage, content)
+    except FileExistsError as e:
+        print_and_exit(format_error(str(e), exit_code=EXIT_CONFLICT), EXIT_CONFLICT)
 
     # Update run record active artifacts
     artifact_file = STAGE_ARTIFACT_MAP[stage]
@@ -665,6 +680,7 @@ def _register_run_commands(subparsers):
     p.add_argument("--work-id", required=True, help="Workflow ID (WF-YYYYMMDD-slug)")
     p.add_argument("--requirement", required=True, help="Raw requirement text")
     p.add_argument("--repo-path", default=None, help="Path to repository for baseline scan")
+    p.add_argument("--overwrite", action="store_true", help="Overwrite an existing run")
     p.set_defaults(func=_cmd_run_start)
 
     # run-resume

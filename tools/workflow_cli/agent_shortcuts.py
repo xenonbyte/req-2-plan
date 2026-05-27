@@ -69,8 +69,8 @@ def scan_open_runs(base_path: Path) -> list[str]:
             record = mgr.load()
             if not is_terminal(record.status):
                 open_ids.append(run_md.parent.name)
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"warning: could not load run {run_md.parent.name!r}: {e}", file=sys.stderr)
     return open_ids
 
 
@@ -126,7 +126,10 @@ def generate_work_id(
         if not (base_path / ".req-to-plan" / alt).exists():
             return alt
 
-    return base_id
+    raise RuntimeError(
+        f"Could not generate a unique work ID for {base_id!r} after 98 attempts. "
+        "Clean up old runs in .req-to-plan/ before starting a new one."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -207,8 +210,8 @@ def _cmd_continue(ns: argparse.Namespace, base_path: Path) -> None:
             if is_terminal(record.status):
                 print(f"blocked: run_already_closed\nwork_id: {work_id}\nnext: r2p-adapt --executor superpowers\n")
                 sys.exit(1)
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"warning: could not load run state for {work_id!r}: {e}", file=sys.stderr)
 
     exit_code = _run_cli(["run-resume", "--work-id", work_id], base_path)
     sys.exit(exit_code)
@@ -262,8 +265,8 @@ def _cmd_adapt(ns: argparse.Namespace, base_path: Path) -> None:
             if not is_terminal(record.status):
                 print(f"blocked: run_not_closed\nwork_id: {work_id}\nnext: r2p-continue\n")
                 sys.exit(1)
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"warning: could not load run state for {work_id!r}: {e}", file=sys.stderr)
 
     plan_path = base_path / ".req-to-plan" / work_id / "07-plan.md"
     output_path = base_path / ".req-to-plan" / work_id / f"{ns.executor}-plan.md"

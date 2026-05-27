@@ -19,6 +19,7 @@ from tools.workflow_cli.models import (
     TierEstimate,
     TierModifier,
 )
+from tools.workflow_cli.output import EXIT_GATE_FAIL
 
 # ---------------------------------------------------------------------------
 # GateResult
@@ -73,7 +74,7 @@ def check_entry_gate(
     return GateResult(
         passed=len(issues) == 0,
         issues=issues,
-        exit_code=2 if issues else 0,
+        exit_code=EXIT_GATE_FAIL if issues else 0,
     )
 
 

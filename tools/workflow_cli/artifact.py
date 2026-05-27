@@ -165,7 +165,23 @@ class ArtifactManager:
         self.run_dir = run_dir
 
     def stage_produce(self, stage: Stage, content: str) -> Path:
-        """Write the initial version (v1, draft) of a stage artifact."""
+        """Write the initial version (v1, draft) of a stage artifact.
+
+        Raises FileExistsError if the artifact already exists at version > 1
+        or with a non-draft status. Use stage_update to create a new version.
+        """
+        version = get_artifact_version(self.run_dir, stage)
+        status = get_artifact_status(self.run_dir, stage)
+        if version > 1:
+            raise FileExistsError(
+                f"Artifact for stage {stage.value!r} is already at version {version}. "
+                "Use stage_update to create a new version."
+            )
+        if status not in ("draft", "missing"):
+            raise FileExistsError(
+                f"Artifact for stage {stage.value!r} has status {status!r}. "
+                "Cannot re-produce a non-draft artifact; use stage_update instead."
+            )
         return write_artifact(self.run_dir, stage, content, version=1, status="draft")
 
     def stage_update(self, stage: Stage, content: str) -> Path:
@@ -184,10 +200,23 @@ class ArtifactManager:
         update_artifact_status(self.run_dir, stage, "ready")
 
     def mark_stale(self, stage: Stage, reason: str, replaced_by: str) -> None:
-        """Mark a stage artifact as stale (content unchanged).
-
-        ``reason`` and ``replaced_by`` are accepted for caller context but are
-        not written into the file in this implementation; status is set to
-        "stale" in the frontmatter.
-        """
-        update_artifact_status(self.run_dir, stage, "stale")
+        """Mark a stage artifact as stale, recording reason and replaced_by in frontmatter."""
+        path = artifact_path(self.run_dir, stage)
+        if not path.exists():
+            raise FileNotFoundError(f"Artifact not found: {path}")
+        fm, body = _parse_frontmatter(path.read_text(encoding="utf-8"))
+        now = datetime.now(timezone.utc).isoformat()
+        created_at = fm.get("r2p_created_at", now)
+        version = int(fm.get("r2p_version", 1))
+        content = (
+            f"---\n"
+            f"r2p_stage: {stage.value}\n"
+            f"r2p_version: {version}\n"
+            f"r2p_status: stale\n"
+            f"r2p_created_at: {created_at}\n"
+            f"r2p_updated_at: {now}\n"
+            f"r2p_stale_reason: {reason}\n"
+            f"r2p_replaced_by: {replaced_by}\n"
+            f"---\n\n"
+        ) + body
+        path.write_text(content, encoding="utf-8")

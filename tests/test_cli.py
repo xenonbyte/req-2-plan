@@ -78,6 +78,20 @@ class TestRunStart:
                 main(["--base-path", str(tmp), "run-start", "--work-id", "INVALID", "--requirement", "foo"])
             assert exc.value.code != 0
 
+    def test_second_run_start_same_work_id_exits_conflict(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            invoke(["run-start", "--work-id", "WF-20260527-test", "--requirement", "foo"], base_path=tmp)
+            with pytest.raises(SystemExit) as exc:
+                main(["--base-path", str(tmp), "run-start", "--work-id", "WF-20260527-test", "--requirement", "bar"])
+            assert exc.value.code == 6  # EXIT_CONFLICT
+
+    def test_run_start_with_overwrite_succeeds(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            invoke(["run-start", "--work-id", "WF-20260527-test", "--requirement", "foo"], base_path=tmp)
+            invoke(["run-start", "--work-id", "WF-20260527-test", "--requirement", "bar", "--overwrite"], base_path=tmp)
+            run_md = Path(tmp) / ".req-to-plan" / "WF-20260527-test" / "run.md"
+            assert run_md.exists()
+
 
 # ---------------------------------------------------------------------------
 # tier-status

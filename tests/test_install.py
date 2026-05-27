@@ -352,3 +352,21 @@ class TestInstallService:
         assert isinstance(result, dict)
         assert "removed" in result
         assert len(result["removed"]) > 0
+
+    def test_uninstall_cleans_backup_directory(self, tmp_path):
+        """Backup directory for the platform is removed after uninstall."""
+        svc, manifest_root, ph_root = make_service(tmp_path)
+        platform_homes = {"claude": ph_root / "claude"}
+        svc2 = InstallService(repo_root=REPO_ROOT, manifest_root=manifest_root, platform_homes={
+            "claude": ph_root / "claude",
+            "codex": ph_root / "codex",
+            "gemini": ph_root / "gemini",
+        })
+        # Create an existing file so a backup is made
+        cmd_dir = ph_root / "claude" / "commands"
+        cmd_dir.mkdir(parents=True)
+        (cmd_dir / "r2p-start.md").write_text("old content", encoding="utf-8")
+        svc2.install("claude")
+        svc2.uninstall("claude")
+        backup_dir = manifest_root / "install" / "backups" / "claude"
+        assert not backup_dir.exists()

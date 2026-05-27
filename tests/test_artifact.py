@@ -10,7 +10,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from tools.workflow_cli.models import Stage, WorkId, STAGE_ARTIFACT_MAP
 from tools.workflow_cli.artifact import (
     ArtifactManager, write_artifact, read_artifact, artifact_path,
-    artifact_exists, get_artifact_version
+    artifact_exists, get_artifact_version, get_artifact_status
 )
 
 
@@ -248,6 +248,49 @@ class TestArtifactManagerMarkStale(unittest.TestCase):
             manager = ArtifactManager(run_dir)
             with self.assertRaises(FileNotFoundError):
                 manager.mark_stale(Stage.REQUIREMENT_BRIEF, "reason", "replaced_by")
+
+
+class TestArtifactManagerStageProduceGuards(unittest.TestCase):
+    def test_stage_produce_raises_if_already_updated(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            am = ArtifactManager(run_dir)
+            am.stage_produce(Stage.RAW_REQUIREMENT, "v1 content")
+            am.stage_update(Stage.RAW_REQUIREMENT, "v2 content")
+            with self.assertRaises(FileExistsError):
+                am.stage_produce(Stage.RAW_REQUIREMENT, "reset attempt")
+
+    def test_stage_produce_raises_if_ready(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            am = ArtifactManager(run_dir)
+            am.stage_produce(Stage.RAW_REQUIREMENT, "v1 content")
+            am.stage_ready(Stage.RAW_REQUIREMENT)
+            with self.assertRaises(FileExistsError):
+                am.stage_produce(Stage.RAW_REQUIREMENT, "reset attempt")
+
+    def test_stage_produce_allowed_on_v1_draft(self):
+        # Producing over an existing v1 draft is allowed (e.g., after run-start)
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            am = ArtifactManager(run_dir)
+            am.stage_produce(Stage.RAW_REQUIREMENT, "initial content")
+            # second produce on v1 draft should succeed
+            path = am.stage_produce(Stage.RAW_REQUIREMENT, "replaced content")
+            self.assertIn("replaced content", path.read_text())
+
+
+class TestMarkStaleWritesFrontmatter(unittest.TestCase):
+    def test_mark_stale_writes_reason_to_frontmatter(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            am = ArtifactManager(run_dir)
+            am.stage_produce(Stage.RAW_REQUIREMENT, "content")
+            am.mark_stale(Stage.RAW_REQUIREMENT, "DESIGN v2 approved", "05-design.md@v2")
+            text = artifact_path(run_dir, Stage.RAW_REQUIREMENT).read_text()
+            self.assertIn("r2p_status: stale", text)
+            self.assertIn("r2p_stale_reason: DESIGN v2 approved", text)
+            self.assertIn("r2p_replaced_by: 05-design.md@v2", text)
 
 
 class TestCreatedAtPreserved(unittest.TestCase):

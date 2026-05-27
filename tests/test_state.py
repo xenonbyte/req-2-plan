@@ -607,5 +607,60 @@ none
         self.assertIsNone(record.reopen_lineage)
 
 
+class TestPipeEscaping(unittest.TestCase):
+    def test_roundtrip_pipe_in_stale_reason(self):
+        from tools.workflow_cli.state import (
+            create_run_record, record_stale_artifact,
+            run_record_to_markdown, parse_run_record,
+        )
+        from tools.workflow_cli.models import WorkId
+        work_id = WorkId("WF-20260527-pipe")
+        record = create_run_record(work_id)
+        record = record_stale_artifact(record, "x.md", "reason | pipes", "y.md", "action | pipes")
+        md = run_record_to_markdown(record)
+        parsed = parse_run_record(md, work_id)
+        self.assertEqual(parsed.stale_artifacts[0].reason, "reason | pipes")
+        self.assertEqual(parsed.stale_artifacts[0].required_action, "action | pipes")
+
+    def test_roundtrip_pipe_in_open_route(self):
+        from tools.workflow_cli.state import (
+            create_run_record, add_open_route,
+            run_record_to_markdown, parse_run_record,
+        )
+        from tools.workflow_cli.models import WorkId, Stage
+        work_id = WorkId("WF-20260527-pipe")
+        record = create_run_record(work_id)
+        record = add_open_route(record, "ROUTE-001", Stage.DESIGN, Stage.REQUIREMENT_BRIEF, "fix | this | issue")
+        md = run_record_to_markdown(record)
+        parsed = parse_run_record(md, work_id)
+        self.assertEqual(parsed.open_routes[0].required_action, "fix | this | issue")
+
+    def test_roundtrip_backslash_in_reason(self):
+        from tools.workflow_cli.state import (
+            create_run_record, record_stale_artifact,
+            run_record_to_markdown, parse_run_record,
+        )
+        from tools.workflow_cli.models import WorkId
+        work_id = WorkId("WF-20260527-pipe")
+        record = create_run_record(work_id)
+        record = record_stale_artifact(record, "x.md", "path\\\\to\\\\file", "y.md", "action")
+        md = run_record_to_markdown(record)
+        parsed = parse_run_record(md, work_id)
+        self.assertIn("\\", parsed.stale_artifacts[0].reason)
+
+    def test_roundtrip_pipe_in_resume_context(self):
+        from tools.workflow_cli.state import (
+            create_run_record, update_resume_context,
+            run_record_to_markdown, parse_run_record,
+        )
+        from tools.workflow_cli.models import WorkId
+        work_id = WorkId("WF-20260527-pipe")
+        record = create_run_record(work_id)
+        record = update_resume_context(record, next_operation="gate | check | required")
+        md = run_record_to_markdown(record)
+        parsed = parse_run_record(md, work_id)
+        self.assertEqual(parsed.resume_context.next_allowed_operation, "gate | check | required")
+
+
 if __name__ == "__main__":
     unittest.main()

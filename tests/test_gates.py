@@ -86,7 +86,7 @@ class TestEntryGate(unittest.TestCase):
             run_dir = Path(tmpdir)
             result = self.check_entry_gate(run_dir, self.Stage.RISK_DISCOVERY, [], [])
         self.assertFalse(result.passed)
-        self.assertEqual(result.exit_code, 2)
+        self.assertEqual(result.exit_code, 3)  # EXIT_GATE_FAIL
         self.assertTrue(len(result.issues) > 0)
 
     def test_entry_gate_fails_when_upstream_artifact_file_missing(self):
@@ -97,7 +97,7 @@ class TestEntryGate(unittest.TestCase):
             cp = self._make_checkpoint(self.Stage.REQUIREMENT_BRIEF)
             result = self.check_entry_gate(run_dir, self.Stage.RISK_DISCOVERY, [cp], [])
         self.assertFalse(result.passed)
-        self.assertEqual(result.exit_code, 2)
+        self.assertEqual(result.exit_code, 3)  # EXIT_GATE_FAIL
         # Should mention missing file
         self.assertTrue(any("03-requirement-brief.md" in issue for issue in result.issues))
 
@@ -128,7 +128,7 @@ class TestEntryGate(unittest.TestCase):
             )
             result = self.check_entry_gate(run_dir, self.Stage.RISK_DISCOVERY, [], [bundle])
         self.assertFalse(result.passed)
-        self.assertEqual(result.exit_code, 2)
+        self.assertEqual(result.exit_code, 3)  # EXIT_GATE_FAIL
 
     def test_entry_gate_collects_all_missing_upstream(self):
         """DESIGN needs REQUIREMENT_BRIEF + RISK_DISCOVERY; both missing = 2 issues."""

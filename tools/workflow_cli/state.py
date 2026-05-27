@@ -151,10 +151,10 @@ def add_open_route(
 
 
 def close_route(record: RunRecord, route_id: str) -> RunRecord:
-    """Set matching route status to 'closed'."""
+    """Set matching route status to 'repaired'."""
     for route in record.open_routes:
         if route.route_id == route_id:
-            route.status = "closed"
+            route.status = "repaired"
     return record
 
 
@@ -221,30 +221,60 @@ def _block_to_tier(text: str, empty_label: str) -> Optional[TierEstimate]:
 # ---------------------------------------------------------------------------
 
 
-def _parse_md_table(section_text: str) -> list[dict[str, str]]:
-    """Parse a markdown table from section text.
+def _escape_cell(val: str) -> str:
+    """Escape backslashes and pipes in a markdown table cell value."""
+    return val.replace("\\", "\\\\").replace("|", "\\|")
 
-    First line = headers (pipe-delimited, stripped),
-    second line = separator row (ignored),
-    remaining non-empty lines = data rows.
-    Returns a list of dicts keyed by header name.
-    """
+
+def _unescape_cell(val: str) -> str:
+    """Unescape backslashes and pipes in a parsed markdown table cell."""
+    return val.replace("\\|", "|").replace("\\\\", "\\")
+
+
+def _split_cells(row_text: str) -> list[str]:
+    """Split pipe-delimited row, honouring \\| and \\\\ escape sequences."""
+    cells: list[str] = []
+    current: list[str] = []
+    i = 0
+    while i < len(row_text):
+        if row_text[i] == "\\" and i + 1 < len(row_text) and row_text[i + 1] == "|":
+            current.append("|")
+            i += 2
+        elif row_text[i] == "\\" and i + 1 < len(row_text) and row_text[i + 1] == "\\":
+            current.append("\\")
+            i += 2
+        elif row_text[i] == "|":
+            cells.append("".join(current).strip())
+            current = []
+            i += 1
+        else:
+            current.append(row_text[i])
+            i += 1
+    remainder = "".join(current).strip()
+    if remainder:
+        cells.append(remainder)
+    return cells
+
+
+def _parse_md_table(section_text: str) -> list[dict[str, str]]:
+    """Parse a markdown table from section text, respecting \\| escapes."""
     lines = [ln for ln in section_text.splitlines() if ln.strip()]
     if len(lines) < 2:
         return []
-    # Header row
     raw_headers = lines[0].strip()
     if not raw_headers.startswith("|"):
         return []
     headers = [h.strip() for h in raw_headers.strip("|").split("|")]
-    # Skip separator row (lines[1])
     rows: list[dict[str, str]] = []
     for row_line in lines[2:]:
         row_line = row_line.strip()
         if not row_line or not row_line.startswith("|"):
             continue
-        cells = [c.strip() for c in row_line.strip("|").split("|")]
-        # Pad or truncate to header count
+        # Strip leading/trailing | then split, respecting \| escapes
+        inner = row_line[1:]
+        if inner.endswith("|"):
+            inner = inner[:-1]
+        cells = _split_cells(inner)
         while len(cells) < len(headers):
             cells.append("")
         row = {headers[i]: cells[i] for i in range(len(headers))}
@@ -253,12 +283,13 @@ def _parse_md_table(section_text: str) -> list[dict[str, str]]:
 
 
 def _table(headers: list[str], rows: list[list[str]]) -> str:
-    """Produce a markdown table string."""
+    """Produce a markdown table string, escaping | and \\ in cell values."""
     sep = "|" + "|".join("---" for _ in headers) + "|"
     header_row = "| " + " | ".join(headers) + " |"
     lines = [header_row, sep]
     for row in rows:
-        lines.append("| " + " | ".join(str(c) for c in row) + " |")
+        escaped = [_escape_cell(str(c)) for c in row]
+        lines.append("| " + " | ".join(escaped) + " |")
     return "\n".join(lines)
 
 
