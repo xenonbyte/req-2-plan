@@ -1858,6 +1858,19 @@ Clarify the repaired requirement.
             self.assertEqual(saved.active_artifacts[0].artifact, "03-requirement-brief.v2.md")
             self.assertEqual(saved.stale_artifacts[0].artifact, "03-requirement-brief.md")
 
+            for command in ("status-next", "run-resume"):
+                with self.subTest(command=command), StdoutCapture() as out:
+                    rc = main([
+                        command,
+                        "--work-id", "WF-20260527-cli-gap",
+                        "--artifact-root", str(artifact_base),
+                        "--json",
+                    ])
+                data = json.loads(out.getvalue())
+                self.assertEqual(rc, 0)
+                self.assertIn("stage-ready", data["next_allowed_command"])
+                self.assertIn("--stage requirement_brief", data["next_allowed_command"])
+
             with StdoutCapture() as out:
                 rc = main([
                     "stage-ready",
@@ -1871,6 +1884,19 @@ Clarify the repaired requirement.
             self.assertEqual(data["active_artifact"], "03-requirement-brief.v2.md@v2")
             self.assertIn("status: ready", ArtifactManager(root).load("03-requirement-brief.v2.md"))
 
+            for command in ("status-next", "run-resume"):
+                with self.subTest(command=command), StdoutCapture() as out:
+                    rc = main([
+                        command,
+                        "--work-id", "WF-20260527-cli-gap",
+                        "--artifact-root", str(artifact_base),
+                        "--json",
+                    ])
+                data = json.loads(out.getvalue())
+                self.assertEqual(rc, 0)
+                self.assertIn("gate-quality", data["next_allowed_command"])
+                self.assertIn("--stage requirement_brief", data["next_allowed_command"])
+
             with StdoutCapture() as out:
                 rc = main([
                     "gate-quality",
@@ -1882,6 +1908,19 @@ Clarify the repaired requirement.
             data = json.loads(out.getvalue())
             self.assertEqual(rc, 0)
             self.assertEqual(data["command_result"], "structural_pass")
+
+            for command in ("status-next", "run-resume"):
+                with self.subTest(command=command), StdoutCapture() as out:
+                    rc = main([
+                        command,
+                        "--work-id", "WF-20260527-cli-gap",
+                        "--artifact-root", str(artifact_base),
+                        "--json",
+                    ])
+                data = json.loads(out.getvalue())
+                self.assertEqual(rc, 0)
+                self.assertIn("gate-complete", data["next_allowed_command"])
+                self.assertIn("--stage requirement_brief", data["next_allowed_command"])
 
 
 if __name__ == "__main__":
@@ -1957,6 +1996,50 @@ def _read_stdin() -> str:
 def _stage_artifact_filename(record: RunRecord, stage: Stage) -> str:
     active = get_active_artifact(record, stage)
     return active.artifact if active else STAGE_ARTIFACT_MAP.get(stage, "")
+
+
+def _next_command_from_resume_context(record: RunRecord) -> str:
+    wid = str(record.work_id)
+    stage = record.current_stage.value
+    operation = record.resume_context.next_allowed_operation
+    if operation == "produce_stage_artifact":
+        return f"python3 -m tools.workflow_cli stage-produce --work-id {wid} --stage {stage}"
+    if operation == "mark_stage_ready":
+        return f"python3 -m tools.workflow_cli stage-ready --work-id {wid} --stage {stage}"
+    if operation == "run_quality_gate":
+        return f"python3 -m tools.workflow_cli gate-quality --work-id {wid} --stage {stage}"
+    if operation == "run_semantic_quality_gate":
+        return f"run semantic quality checks, then python3 -m tools.workflow_cli gate-complete --work-id {wid} --stage {stage} --confirm"
+    if operation == "run_stage_entry_gate":
+        return f"python3 -m tools.workflow_cli gate-entry --work-id {wid} --stage {stage}"
+    if operation == "route_upstream_gap":
+        return f"python3 -m tools.workflow_cli gap-route --work-id {wid}"
+    if operation == "run_checkpoint_review":
+        return f"python3 -m tools.workflow_cli review-checkpoint --work-id {wid} --stage {stage}"
+    if operation == "run_resume":
+        return f"python3 -m tools.workflow_cli run-resume --work-id {wid}"
+    return ""
+
+
+def _should_use_resume_context(record: RunRecord) -> bool:
+    operation = record.resume_context.next_allowed_operation
+    artifact_flow = {
+        "produce_stage_artifact",
+        "mark_stage_ready",
+        "run_quality_gate",
+        "run_semantic_quality_gate",
+    }
+    if record.status in {
+        RunStatus.ACTIVE_STAGE_DRAFT,
+        RunStatus.QUALITY_GATE_FAILED,
+        RunStatus.CHECKPOINT_CHANGES_REQUESTED,
+    }:
+        return operation in artifact_flow
+    if record.status == RunStatus.UPSTREAM_GAP_ROUTING:
+        return operation in artifact_flow or operation == "route_upstream_gap"
+    if record.status == RunStatus.NEXT_STAGE:
+        return operation == "run_stage_entry_gate"
+    return False
 
 
 def cmd_run_start(args: argparse.Namespace) -> int:
@@ -2038,7 +2121,7 @@ def cmd_run_resume(args: argparse.Namespace) -> int:
         last_operation="run_resume",
         next_operation=record.resume_context.next_allowed_operation,
         active_item=record.resume_context.active_item,
-        resume_reason="active_run_refresh",
+        reason="active_run_refresh",
     )
     mgr.save(record)
     active_artifact = ""
@@ -2150,7 +2233,12 @@ def cmd_stage_produce(args: argparse.Namespace) -> int:
             "review replacement and rerun gates",
         )
     record.current_stage = stage
-    record = update_resume_context(record, active_item=stage.value, next_operation="produce_stage_artifact")
+    record = update_resume_context(
+        record,
+        last_operation="stage_artifact_produced",
+        next_operation="mark_stage_ready",
+        active_item=stage.value,
+    )
     mgr.save(record)
 
     writes = [{"path": str(path), "kind": "artifact_replacement" if replaced else "artifact_update"}]
@@ -2187,7 +2275,12 @@ def cmd_stage_ready(args: argparse.Namespace) -> int:
 
     version = int(fm.get("version", "1"))
     record = upsert_active_artifact(record, stage, filename, version, "ready")
-    record = update_resume_context(record, next_operation="run_quality_gate", active_item=f"{stage.value} ready")
+    record = update_resume_context(
+        record,
+        last_operation="stage_ready_recorded",
+        next_operation="run_quality_gate",
+        active_item=f"{stage.value} ready",
+    )
     mgr.save(record)
 
     return print_result(
@@ -2406,6 +2499,12 @@ def cmd_checkpoint_decide(args: argparse.Namespace) -> int:
         )
     elif decision == "changes_requested":
         record.status = RunStatus.CHECKPOINT_CHANGES_REQUESTED
+        record = update_resume_context(
+            record,
+            last_operation="checkpoint_changes_requested",
+            next_operation="produce_stage_artifact",
+            active_item=stage.value,
+        )
         mgr.save(record)
         return print_result(
             "CMD-CHECKPOINT-DECIDE", "changes_requested",
@@ -2463,6 +2562,12 @@ def cmd_gap_record(args: argparse.Namespace) -> int:
         return print_result("CMD-GAP-RECORD", "confirmation_required", stops=["--confirm required"], json_mode=args.json, exit_code=5)
 
     record.status = RunStatus.UPSTREAM_GAP_ROUTING
+    record = update_resume_context(
+        record,
+        last_operation="upstream_gap_recorded",
+        next_operation="route_upstream_gap",
+        active_item=record.current_stage.value,
+    )
     mgr.save(record)
     return print_result(
         "CMD-GAP-RECORD", "upstream_gap_detected",
@@ -2641,6 +2746,9 @@ def _next_command_for_state(record: RunRecord) -> str:
     wid = str(record.work_id)
     stage = record.current_stage.value
     status = record.status
+    context_command = _next_command_from_resume_context(record)
+    if context_command and _should_use_resume_context(record):
+        return context_command
     if status == RunStatus.NOT_STARTED:
         return f"python3 -m tools.workflow_cli run-start --work-id {wid}"
     if status == RunStatus.ACTIVE_STAGE_DRAFT:
