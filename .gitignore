@@ -9,3 +9,4 @@ venv/
 !.claude/
 !.claude/skills/
 !.claude/skills/*.md
+!CLAUDE.md
