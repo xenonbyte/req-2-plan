@@ -213,8 +213,8 @@ ACTIVE_STAGE_DRAFT ──gate-quality──▶ READY_FOR_CHECKPOINT_REVIEW
                           ║      │          (next stage)          ║
                           ╚══════╪════════════════════════════════╝
                   plan stage approved│
-                                     ▼ run-close (already exists)
-                          CLOSED_AT_PLAN_CHECKPOINT
+                                     ▼ run-close (command exists; Part 1 adds a
+                          CLOSED_AT_PLAN_CHECKPOINT   checkpoint-match guard, QR2)
 ```
 
 All target states (`CHECKPOINT_REVIEW` / `APPROVED` / `CHANGES_REQUESTED` / `NEXT_STAGE`)
