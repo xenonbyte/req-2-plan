@@ -1,8 +1,23 @@
 # Workflow Fixes + PLAN Optimization — Implementation Plan
 
-**Status:** Proposed — revised after review rounds 1, 2 & 3 (awaiting re-review)
+**Status:** Proposed — revised after review rounds 1–4 (awaiting re-review)
 **Date:** 2026-05-30
 **Author:** req-to-plan maintainers (via /think workflow)
+
+> **Review round 4 — all three findings accepted (verified against code, 2026-05-30):**
+> - **FR1** `QUALITY_GATE_FAILED` only allows `→ {ACTIVE_STAGE_DRAFT, UPSTREAM_GAP_ROUTING}`
+>   (`models.py:116`), **not** `READY_FOR_CHECKPOINT_REVIEW`. `gate-quality` only reaches
+>   `READY…` on re-run today by writing status directly (`cli.py:574`) — so the TR3 migration
+>   would *break* the re-run path. Add the `QUALITY_GATE_FAILED → ACTIVE_STAGE_DRAFT` repair
+>   flip. → §1.6b.
+> - **FR2** `next_stage` still lists `CMD-STAGE-PRODUCE` (`models.py:262`) and
+>   `_cmd_stage_produce` never calls `is_command_allowed` (which is **never called** in cli.py),
+>   so production can bypass the entry gate. Remove it from the matrix and add an explicit
+>   handler status guard. → §1.5d.
+> - **FR3** Deleting the stale `r2p-adapt` file isn't enough: uninstall skips shared `bin/`
+>   when other platforms remain (`install.py:201`), and the path stays in every platform
+>   manifest's `installed_paths`, causing doctor drift. Cleanup must update all manifests +
+>   backup metadata. → §2.2.
 
 > **Review round 3 — all seven findings accepted (verified against code, 2026-05-30):**
 > - **TR1** `gate-entry` (`_cmd_gate_entry`) is read-only — it persists no status, and
@@ -318,6 +333,21 @@ first" (`command-surface.md:221`: allows `CMD-STAGE-LOAD`, `CMD-GATE-ENTRY`, `CM
 This keeps `stage-advance` aligned with the matrix and reuses the entry-gate transition —
 but only after `gate-entry` is fixed to actually persist it.
 
+**Close the NEXT_STAGE produce-bypass (review finding FR2).** The matrix's `next_stage` row
+says "Stop production until entry gate passes" (`command-surface.md:221`), but
+`ALLOWED_COMMANDS_BY_RUN_STATE[NEXT_STAGE]` still lists `CMD-STAGE-PRODUCE` (`models.py:262`),
+**and** `_cmd_stage_produce` only checks `stage != current_stage` (`cli.py:654/658`) — it
+never calls `is_command_allowed` (which is in fact **never called anywhere** in cli.py; the
+matrix is declarative only). So a run in `NEXT_STAGE` can `stage-produce` directly and skip
+the entry gate. Required changes (Part 1 scope):
+- Remove `CMD-STAGE-PRODUCE` from `ALLOWED_COMMANDS_BY_RUN_STATE[NEXT_STAGE]` in `models.py`.
+- Add a status guard to `_cmd_stage_produce`: refuse (exit 6) when `record.status == NEXT_STAGE`,
+  directing the operator to run `gate-entry` first. (Production is only valid from
+  `ACTIVE_STAGE_DRAFT`/`CHECKPOINT_CHANGES_REQUESTED`/`QUALITY_GATE_FAILED` per the repair
+  loops.) Do not rely on `is_command_allowed` — guard explicitly in the handler.
+- Test: `stage-produce` while in `NEXT_STAGE` → exit 6; after `gate-entry` lands in
+  `ACTIVE_STAGE_DRAFT`, `stage-produce` works.
+
 ## 1.6 r2p-continue rework (agent_shortcuts._cmd_continue)
 
 Change from "only calls run-resume" to a status-dispatched driver. Read `record.status`
@@ -363,6 +393,30 @@ Fix (part of Part 1 scope):
 - Add a test: decide `changes_requested` → `stage-update` → assert status is
   `ACTIVE_STAGE_DRAFT` and the stage can be re-gated and re-approved.
 
+### 1.6b Close the QUALITY_GATE_FAILED repair loop (review finding FR1)
+
+**This is the necessary companion to the TR3 migration (1.3) and a latent bug TR3 would
+otherwise expose.** `QUALITY_GATE_FAILED`'s only allowed transitions are
+`{ACTIVE_STAGE_DRAFT, UPSTREAM_GAP_ROUTING}` (`models.py:116`) — **not**
+`READY_FOR_CHECKPOINT_REVIEW`. Today `gate-quality` gets away with going straight to
+`READY_FOR_CHECKPOINT_REVIEW` on a re-run only because it writes `record.status` directly
+(`cli.py:574`), bypassing `ALLOWED_TRANSITIONS`. Once TR3 routes that write through
+`update_run_status`, a **second** `gate-quality` run from `QUALITY_GATE_FAILED` → `READY…`
+would be **rejected** by the state machine — turning a previously-"working" path into a
+dead end.
+
+Fix (part of Part 1 scope), pick the repair path explicitly:
+- The repair loop from `QUALITY_GATE_FAILED` must first return to `ACTIVE_STAGE_DRAFT` (the
+  allowed transition), then re-run `stage-ready` → `gate-quality`. So `stage-update`/
+  `stage-produce` must flip `QUALITY_GATE_FAILED → ACTIVE_STAGE_DRAFT` too (same mechanism as
+  1.6a for `CHECKPOINT_CHANGES_REQUESTED`), and `gate-quality` only ever transitions to
+  `READY…` from `ACTIVE_STAGE_DRAFT`.
+- `r2p-continue`'s `QUALITY_GATE_FAILED` row already stops and asks for repair; the repair
+  edit now also performs the status flip.
+- Add a test: fail quality gate → `stage-update` → status `ACTIVE_STAGE_DRAFT` → `stage-ready`
+  → `gate-quality` passes to `READY_FOR_CHECKPOINT_REVIEW` (this is the regression that TR3
+  alone would have broken).
+
 > **Cross-part reconciliation:** The original standalone version of this rework suggested
 > `r2p-adapt --executor superpowers` at the closed/approved states. Because **Part 2 deletes
 > the adapter**, those hints are replaced with "PLAN is at `07-plan.md`, hand it to your
@@ -373,10 +427,11 @@ Fix (part of Part 1 scope):
 
 | File | Change |
 |---|---|
-| `tools/workflow_cli/cli.py` | +3 handlers (`_cmd_review_checkpoint` / `_cmd_checkpoint_decide` / `_cmd_stage_advance`) with shared precondition checks (1.5); register in `_register_*`; import `NEXT_STAGE_MAP`, `add_checkpoint`. **`_cmd_gate_entry`:** when status is `NEXT_STAGE`, persist pass→`ACTIVE_STAGE_DRAFT` / fail→`ENTRY_GATE_FAILED` via `update_run_status` + save (TR1, 1.5d) — currently read-only. **`_cmd_gate_quality`:** remove the `check_forced_subagent_review` call (NR1, 1.5b), add the `ready`-artifact precondition (NR2, 1.5c). **`_cmd_checkpoint_decide`:** version-aware forced-review guard on approve; missing-confirm → exit 5 (NR1/TR2/TR5). **`_cmd_stage_advance`:** stop at `NEXT_STAGE`; require a matching approved checkpoint (NR3/TR4, 1.5d). **Migrate the 4 direct `record.status =` writes** at `cli.py:555/574/675/697` to `update_run_status` (TR3, 1.3). **`_cmd_stage_update` / `_cmd_stage_produce`:** flip `CHECKPOINT_CHANGES_REQUESTED → ACTIVE_STAGE_DRAFT` (1.6a) |
+| `tools/workflow_cli/cli.py` | +3 handlers (`_cmd_review_checkpoint` / `_cmd_checkpoint_decide` / `_cmd_stage_advance`) with shared precondition checks (1.5); register in `_register_*`; import `NEXT_STAGE_MAP`, `add_checkpoint`. **`_cmd_gate_entry`:** when status is `NEXT_STAGE`, persist pass→`ACTIVE_STAGE_DRAFT` / fail→`ENTRY_GATE_FAILED` via `update_run_status` + save (TR1, 1.5d). **`_cmd_gate_quality`:** remove the `check_forced_subagent_review` call (NR1, 1.5b), add the `ready`-artifact precondition (NR2, 1.5c). **`_cmd_checkpoint_decide`:** version-aware forced-review guard on approve; missing-confirm → exit 5 (NR1/TR2/TR5). **`_cmd_stage_advance`:** stop at `NEXT_STAGE`; require a matching approved checkpoint (NR3/TR4, 1.5d). **`_cmd_stage_produce`:** add a `NEXT_STAGE` status guard → exit 6 (FR2, 1.5d). **Migrate the 4 direct `record.status =` writes** at `cli.py:555/574/675/697` to `update_run_status` (TR3, 1.3). **`_cmd_stage_update` / `_cmd_stage_produce`:** flip `CHECKPOINT_CHANGES_REQUESTED → ACTIVE_STAGE_DRAFT` **and** `QUALITY_GATE_FAILED → ACTIVE_STAGE_DRAFT` (1.6a / 1.6b — the latter is required so the TR3 migration doesn't break the gate-quality re-run path) |
 | `tools/workflow_cli/gates.py` | Add a `version` param to `check_forced_subagent_review` and match only `…-review-v<version>.md` (TR2, 1.5b) |
 | `tools/workflow_cli/output.py` | Broaden the `EXIT_REVIEW_REQ = 5` comment to "approval precondition not met (confirmation or forced review)" (TR5) |
-| `tools/workflow_cli/models.py` | Add `CMD-STAGE-ADVANCE` (+ ensure `CMD-REVIEW-CHECKPOINT` / `CMD-CHECKPOINT-DECIDE` present); wire into `ALLOWED_COMMANDS_BY_RUN_STATE` for the correct states (1.5a) |
+| `tools/workflow_cli/models.py` | Add `CMD-STAGE-ADVANCE` (+ ensure `CMD-REVIEW-CHECKPOINT` / `CMD-CHECKPOINT-DECIDE` present); wire into `ALLOWED_COMMANDS_BY_RUN_STATE` for the correct states (1.5a). **Remove `CMD-STAGE-PRODUCE` from `ALLOWED_COMMANDS_BY_RUN_STATE[NEXT_STAGE]`** (FR2, 1.5d) |
+| `tools/workflow_cli/install.py` | Upgrade cleanup: deterministically remove an obsolete shared `bin/r2p-*` wrapper from **all** installed platform manifests' `installed_paths` (+ backup metadata), then delete the file — even when other platforms remain installed (FR3, §2.2) |
 | `tools/workflow_cli/agent_shortcuts.py` | Rewrite `_cmd_continue` as a status-dispatch driver with the corrected ready→gate order (1.6); reuse `_run_cli`; no `r2p-adapt` reference |
 | `tests/test_cli.py` | 3 commands × (happy + wrong-state refusal + missing-confirm refusal → **exit 5** + shared precondition refusals: wrong stage, not-ready artifact, duplicate-version approval, **missing-checkpoint advance** (TR4)). Move forced-review exit-5 assertions from `gate-quality` to `checkpoint-decide approved` (NR1). Add a **"v1 marker must not clear a v2 approval"** test (TR2). Add an **illegal-direct-transition rejection** test (TR3). Update `test_runs_quality_check_after_tier_lock` (`:498`) to insert `stage-ready` before `gate-quality` (NR2) |
 | `tests/test_gates.py` | Update forced-review tests for the new `version` param; assert version mismatch fails (TR2) |
@@ -422,6 +477,8 @@ Fix (part of Part 1 scope):
 - **NEXT_STAGE observable + persisted (NR3 + TR1):** after `stage-advance`, status is `NEXT_STAGE` (not draft); `gate-entry` (now state-persisting in this state) moves it to `ACTIVE_STAGE_DRAFT` on pass / `ENTRY_GATE_FAILED` on fail, and the change is saved to run.md.
 - **State authority (TR3):** an attempt to drive an illegal transition is rejected by `update_run_status`; the migrated handlers (gate-quality / stage-produce) no longer write `record.status` directly.
 - **changes_requested loop (R5):** decide `changes_requested` → status `CHECKPOINT_CHANGES_REQUESTED`; then `stage-update` → status flips to `ACTIVE_STAGE_DRAFT`; then re-gate and re-approve succeed.
+- **quality-gate repair loop (FR1):** fail `gate-quality` → `QUALITY_GATE_FAILED`; `stage-update` → `ACTIVE_STAGE_DRAFT`; `stage-ready` → `gate-quality` → `READY_FOR_CHECKPOINT_REVIEW`. (Regression guard: this path breaks if TR3 migration lands without the 1.6b flip.)
+- **NEXT_STAGE produce-bypass (FR2):** `stage-produce` while in `NEXT_STAGE` → exit 6; after `gate-entry` → `ACTIVE_STAGE_DRAFT`, `stage-produce` works.
 - **Driver:** `r2p-continue` from each status produces the documented stop/advance outcome; stops (does not auto-run) at a not-`ready` artifact; auto-runs `gate-entry` at `NEXT_STAGE`; never auto-approves at `CHECKPOINT_REVIEW`.
 
 ---
@@ -480,8 +537,21 @@ actively misleads users (TR6) — "doctor reports it" is **not** an acceptable e
 Required: install/reinstall/uninstall must **deterministically remove** managed wrappers that
 are no longer part of the current template set (i.e. treat the wrapper set as
 manifest-driven: any managed `bin/r2p-*` not in the new install is deleted). `r2p doctor` is
-an additional diagnostic only, not the cleanup mechanism. Add an "upgrade from an installed
-0.1.2 state" test asserting the stale `r2p-adapt` wrapper is gone after reinstall.
+an additional diagnostic only, not the cleanup mechanism.
+
+**Manifest consistency (review finding FR3).** Deleting the file alone is not enough. Uninstall
+currently **skips** shared `bin/` paths when other platforms are still installed
+(`install.py:201`, the `other_platforms_installed and p.is_relative_to(bin_dir)` continue). So
+the stale `r2p-adapt` is referenced from **every installed platform's manifest**
+`installed_paths`. The upgrade cleanup must therefore:
+- remove the obsolete shared wrapper path from the `installed_paths` of **all** installed
+  platform manifests (not just the one being reinstalled), and clean any related `backups`
+  metadata entries, so a later `doctor` does not report a missing-file drift for a path that
+  no longer should exist;
+- then delete the file itself.
+
+Add the "upgrade from an installed 0.1.2 multi-platform state" test asserting both: the
+`r2p-adapt` file is gone **and** no installed manifest still lists it (no doctor drift).
 
 ## 2.3 Test edits
 
