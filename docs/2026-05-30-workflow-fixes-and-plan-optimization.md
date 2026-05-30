@@ -1,8 +1,26 @@
 # Workflow Fixes + PLAN Optimization — Implementation Plan
 
-**Status:** Proposed — revised after review rounds 1 & 2 (awaiting re-review)
+**Status:** Proposed — revised after review rounds 1, 2 & 3 (awaiting re-review)
 **Date:** 2026-05-30
 **Author:** req-to-plan maintainers (via /think workflow)
+
+> **Review round 3 — all seven findings accepted (verified against code, 2026-05-30):**
+> - **TR1** `gate-entry` (`_cmd_gate_entry`) is read-only — it persists no status, and
+>   `cli.py:697` is in `_cmd_stage_produce`, not gate-entry. The NEXT_STAGE→draft path didn't
+>   exist. Fix: bring `gate-entry` into Part 1 to persist status when in `NEXT_STAGE`. → §1.5d.
+> - **TR2** `check_forced_subagent_review` has no `version` param and globs any
+>   `*-review-*.md` (`gates.py:208`), so a v1 marker clears a v2 approval. Make it
+>   version-aware. → §1.5b.
+> - **TR3** "every transition via `update_run_status`" is aspirational — 4 handlers write
+>   `record.status` directly (`cli.py:555/574/675/697`). Migrate them. → §1.3.
+> - **TR4** `stage-advance` needs a "matching approved checkpoint exists" guard, not just the
+>   `CHECKPOINT_APPROVED` status. → §1.5 shared checks.
+> - **TR5** Missing `--confirm` exit code: `cli-adapter.md:175` says **5**, the draft said 2.
+>   Unify on 5 (`EXIT_REVIEW_REQ` broadened to "approval precondition not met"). → §1.5.
+> - **TR6** A stale PATH wrapper `r2p-adapt` must be **deterministically removed** on
+>   upgrade; doctor-only reporting is not acceptable. → §2.2.
+> - **TR7** Part 3.2 Context7 gate shouldn't guess; require `External Documentation Checked`
+>   always (explicit `N/A` row when no deps) and make the gate a presence check. → §3.2.
 
 > **Review round 1 — all six findings accepted (verified against code, 2026-05-30):**
 > - **R1** `stage-advance` must enter the authoritative command model, not just cli.py
@@ -113,9 +131,19 @@ steps automatically and stops only at the two boundaries that need a human or an
 ## 1.3 Driving model (confirmed direction)
 
 **Agent orchestrates + CLI holds state authority + checkpoints are human approvals.** Each
-state transition = one explicit CLI subcommand + an `update_run_status` validation (same
-style as existing `gate-quality` / `stage-ready`). The CLI never auto-approves — approval
-is always a human stop point. This is the load-bearing invariant of the whole design.
+state transition = one explicit CLI subcommand that persists via `update_run_status` (which
+enforces `ALLOWED_TRANSITIONS`). The CLI never auto-approves — approval is always a human
+stop point. This is the load-bearing invariant of the whole design.
+
+> **State-authority correction (review finding TR3).** This "every transition goes through
+> `update_run_status`" is currently an *aspiration*, not the code: four existing handlers write
+> `record.status = RunStatus.X` directly, bypassing `ALLOWED_TRANSITIONS` —
+> `gate-quality` (`cli.py:555` QUALITY_GATE_FAILED, `:574` READY_FOR_CHECKPOINT_REVIEW),
+> `stage-produce` (`cli.py:675` ENTRY_GATE_FAILED, `:697` ACTIVE_STAGE_DRAFT). Part 1 migrates
+> these four to `update_run_status` so the new commands aren't the only validated ones and the
+> CLI can't silently make an illegal transition. (The new `gate-entry` NEXT_STAGE persistence
+> in 1.5d uses `update_run_status` from the start.) Add a test asserting an illegal direct
+> transition is now rejected.
 
 > **Most fragile assumption:** checkpoint approval is intentionally reserved for a
 > human/Main, not an overlooked automatic step. If the desired behavior were instead
@@ -164,11 +192,26 @@ additionally refuses to re-approve a stage+version that already has an approved 
 (no duplicate approval of the same version). Any failed check → exit 6, no state change.
 These mirror the existing `stage-produce` guard at `cli.py:658` (`stage != current_stage`).
 
+**`stage-advance` checkpoint guard (review finding TR4).** Beyond the `CHECKPOINT_APPROVED`
+status, `stage-advance` must also verify an `approved` checkpoint actually exists for the
+current stage + active artifact + version in `record.approved_checkpoints`. Without this, a
+run.md whose status was hand-edited (or set in a test) to `CHECKPOINT_APPROVED` with no
+checkpoint row could advance. Missing/mismatched checkpoint → exit 6.
+
+**Exit-code decision for missing `--confirm` (review finding TR5).** The CLI-adapter spec is
+authoritative: "If confirmation is required but missing, the CLI must stop with **exit code
+5**" (`cli-adapter.md:175`). The earlier draft said exit 2 — that is corrected to **5**
+throughout this plan. Exit 5 (`EXIT_REVIEW_REQ`) is therefore the single "approval
+precondition not met" code, covering both *missing confirmation* and *missing forced review*;
+its comment in `output.py:10` is broadened from "forced subagent review required" to
+"approval precondition not met (confirmation or forced review)". No numeric value changes, so
+existing exit-5 forced-review behavior is preserved.
+
 | Command | Args | Precondition | Action | Exit |
 |---|---|---|---|---|
-| `review-checkpoint` | `--work-id --stage` | `READY_FOR_CHECKPOINT_REVIEW` + shared checks | **MVP scope (review finding R2):** `update_run_status(CHECKPOINT_REVIEW)`; `resume_context.next="checkpoint_decide"`; write a minimal marker at the **deterministic path** `reviews/<stage>-checkpoint-review-v<version>.md` (review finding NR1) containing "review started / ready for human decision" — nothing more. It does **not** produce review findings or run merge — the full `CMD-REVIEW-CHECKPOINT` contract (write findings, require merge before decide; `command-surface.md:157`) is explicitly downgraded to this marker for the MVP. The marker path is exactly what the forced-review guard in `checkpoint-decide` looks for (see NR1 note below). The downgrade is documented in 1.5a and synced into the command-surface/cli-adapter docs. | OK; wrong state → 6 |
-| `checkpoint-decide` | `--work-id --stage --decision {approved,changes_requested} [--confirm] [--downstream-authorization S]` | `CHECKPOINT_REVIEW` + shared checks | approved: requires `--confirm` (else exit 2); **then the forced-subagent-review guard (moved here from gate-quality — review finding NR1): refuse with exit 5 when tier has a modifier in `{migration, safety, cross_project}` AND stage ∈ `{design, spec, plan}` AND no `reviews/<stage>-checkpoint-review-*.md` / `reviews/<stage>-subagent-review-*.md` exists for the active version** (matches `invariants.md:215`); on pass: `add_checkpoint(stage, artifact, version, downstream_auth)` + `upsert_active_artifact(..., "approved")` + `update_run_status(CHECKPOINT_APPROVED)`; `downstream_authorization` defaults to the `NEXT_STAGE_MAP` next-stage name, and to `close_workflow_run` at the plan stage (verified in the forma run, not `"none"`). changes_requested: `update_run_status(CHECKPOINT_CHANGES_REQUESTED)` **and set `resume_context.next="repair_stage_artifact"` + `active_item=stage`** (see 1.6a, R5) — and is allowed even when forced review is missing. | OK; missing confirm → 2; forced review missing on approve → 5; wrong state → 6 |
-| `stage-advance` | `--work-id` | `CHECKPOINT_APPROVED` and `current_stage != PLAN` + shared checks | `update_run_status(NEXT_STAGE)` only (do **not** collapse to draft — review finding NR3, see 1.5d); `current_stage = NEXT_STAGE_MAP[cur]`; `resume_context(active_item=next, next="gate_entry")`. Entry into `ACTIVE_STAGE_DRAFT` then happens via the existing `gate-entry` (`NEXT_STAGE → ACTIVE_STAGE_DRAFT` at `cli.py:697`). | OK; plan stage → 6 (point to run-close); wrong state → 6 |
+| `review-checkpoint` | `--work-id --stage` | `READY_FOR_CHECKPOINT_REVIEW` + shared checks | **MVP scope (review finding R2):** `update_run_status(CHECKPOINT_REVIEW)`; `resume_context.next="checkpoint_decide"`; write a minimal marker at the **version-stamped deterministic path** `reviews/<stage>-checkpoint-review-v<version>.md` containing "review started / ready for human decision" — nothing more. The `v<version>` stamp is what lets the forced-review guard be version-aware (see 1.5b / TR2). It does **not** produce review findings or run merge — the full `CMD-REVIEW-CHECKPOINT` contract (`command-surface.md:157`) is downgraded to this marker for the MVP, synced into command-surface/cli-adapter docs. | OK; wrong state → 6 |
+| `checkpoint-decide` | `--work-id --stage --decision {approved,changes_requested} [--confirm] [--downstream-authorization S]` | `CHECKPOINT_REVIEW` + shared checks | approved: requires `--confirm` (else **exit 5**, per TR5); **then the version-aware forced-subagent-review guard (moved here from gate-quality — NR1/TR2): refuse with exit 5 when tier has a modifier in `{migration, safety, cross_project}` AND stage ∈ `{design, spec, plan}` AND no review file for the *active version* exists** (i.e. `reviews/<stage>-checkpoint-review-v<version>.md` or `…-subagent-review-v<version>.md`; matches `invariants.md:215`); on pass: `add_checkpoint(...)` + `upsert_active_artifact(..., "approved")` + `update_run_status(CHECKPOINT_APPROVED)`; `downstream_authorization` defaults to the `NEXT_STAGE_MAP` next-stage name, and `close_workflow_run` at the plan stage (verified in the forma run, not `"none"`). changes_requested: `update_run_status(CHECKPOINT_CHANGES_REQUESTED)` **and set `resume_context.next="repair_stage_artifact"` + `active_item=stage`** (see 1.6a, R5) — allowed even when forced review is missing. | OK; missing confirm → 5; forced review missing on approve → 5; wrong state → 6 |
+| `stage-advance` | `--work-id` | `CHECKPOINT_APPROVED`, `current_stage != PLAN`, **a matching `approved` checkpoint exists** (TR4) + shared checks | `update_run_status(NEXT_STAGE)` only (do **not** collapse to draft — NR3, see 1.5d); `current_stage = NEXT_STAGE_MAP[cur]`; `resume_context(active_item=next, next="gate_entry")`. Entry into `ACTIVE_STAGE_DRAFT` then happens via `gate-entry`, which Part 1 fixes to persist status when in `NEXT_STAGE` (see 1.5d / TR1). | OK; plan stage → 6 (point to run-close); missing checkpoint → 6; wrong state → 6 |
 
 All three reuse existing `_load_run` / `add_checkpoint` / `update_run_status` / `mgr.save`;
 no new serialization path is introduced.
@@ -217,14 +260,18 @@ created and the gate can never pass. Required changes (Part 1 scope):
   `--decision approved`, after the `--confirm` check (see 1.5 table). Other decisions
   (`changes_requested`, …) stay allowed even when the review file is missing, per
   `invariants.md`.
-- The guard looks for `reviews/<stage>-checkpoint-review-*.md` or
-  `reviews/<stage>-subagent-review-*.md` for the active version — which is exactly the
-  deterministic marker path `review-checkpoint` writes (1.5). So the normal MVP flow
-  (`review-checkpoint` writes the marker → `checkpoint-decide approved` finds it → passes)
-  works without a separate subagent step; a real forced review, when wanted, drops a
-  `*-subagent-review-*.md` file that also satisfies the guard.
-- Update `tests/test_cli.py` forced-review tests to assert exit 5 now comes from
-  `checkpoint-decide`, not `gate-quality`.
+- **Make the guard version-aware (review finding TR2).** Today
+  `check_forced_subagent_review(stage, tier, reviews_dir)` has **no version parameter** and
+  globs `*-checkpoint-review-*.md` / `*-subagent-review-*.md` (`gates.py:208/234`), so a stale
+  v1 marker would wrongly clear a v2 approval. Change the helper signature to
+  `check_forced_subagent_review(stage, tier, reviews_dir, version)` and match only
+  `…-review-v<version>.md`. `review-checkpoint` writes exactly that version-stamped path (1.5),
+  so the normal MVP flow (`review-checkpoint` writes `…-v<version>.md` →
+  `checkpoint-decide approved` finds it → passes) works; a real forced review drops a
+  `…-subagent-review-v<version>.md` that also satisfies the guard.
+- Update `tests/test_cli.py` / `tests/test_gates.py` forced-review tests: exit 5 now comes
+  from `checkpoint-decide` not `gate-quality`, and add a **"v1 marker must not clear a v2
+  artifact approval"** test (the version-aware regression).
 
 ### 1.5c gate-quality must require a `ready` artifact (review finding NR2)
 
@@ -246,20 +293,30 @@ The earlier draft had `stage-advance` do `CHECKPOINT_APPROVED → NEXT_STAGE →
 in one shot, making `NEXT_STAGE` a transient internal blip. But the authoritative matrix
 defines `next_stage` as an **observable state** whose job is "run the next stage's entry gate
 first" (`command-surface.md:221`: allows `CMD-STAGE-LOAD`, `CMD-GATE-ENTRY`, `CMD-RUN-RESUME`).
-**Decision: keep `NEXT_STAGE` observable.** Revised contract:
+**Decision: keep `NEXT_STAGE` observable.**
+
+> **Correction (review finding TR1):** the earlier revision claimed `gate-entry` performs
+> `NEXT_STAGE → ACTIVE_STAGE_DRAFT` "at `cli.py:697`". That is wrong on two counts:
+> `_cmd_gate_entry` only prints the gate result and **persists no status** (it is read-only);
+> and `cli.py:697` is inside `_cmd_stage_produce` (which is what actually writes
+> `ACTIVE_STAGE_DRAFT`, after running the entry gate internally). So today there is **no**
+> command that moves `NEXT_STAGE → ACTIVE_STAGE_DRAFT` — another dead end if we park a run in
+> `NEXT_STAGE`. Revised contract makes `gate-entry` a real state-transition command:
 
 - `stage-advance` transitions `CHECKPOINT_APPROVED → NEXT_STAGE` only, sets
-  `current_stage = NEXT_STAGE_MAP[cur]`, and sets `resume_context.next="gate_entry"`. It
-  does **not** auto-collapse to `ACTIVE_STAGE_DRAFT`.
-- Entering `ACTIVE_STAGE_DRAFT` happens via the existing `gate-entry` path
-  (`NEXT_STAGE → ACTIVE_STAGE_DRAFT` on pass at `cli.py:697`; → `ENTRY_GATE_FAILED` on fail),
-  which already exists and is what the matrix expects.
-- `r2p-continue` handles `NEXT_STAGE` by auto-running `gate-entry` (mechanical), then stops
-  at the new `ACTIVE_STAGE_DRAFT` asking for content. Add a `NEXT_STAGE` row to the 1.6
-  dispatch table.
+  `current_stage = NEXT_STAGE_MAP[cur]`, and sets `resume_context.next="gate_entry"`. It does
+  **not** auto-collapse to `ACTIVE_STAGE_DRAFT`.
+- **`_cmd_gate_entry` is brought into Part 1 scope:** when run status is `NEXT_STAGE`, it must
+  persist the result via `update_run_status` — pass → `ACTIVE_STAGE_DRAFT`, fail →
+  `ENTRY_GATE_FAILED` — then `mgr.save(record)`. (Outside `NEXT_STAGE` it keeps today's
+  read-only "just report" behavior so existing `gate-entry` tests still hold.) This is the
+  missing persistence the TR1 finding calls out.
+- `r2p-continue` handles `NEXT_STAGE` by auto-running `gate-entry` (now state-persisting),
+  then stops at the new `ACTIVE_STAGE_DRAFT` asking for content. See the `NEXT_STAGE` row in
+  the 1.6 dispatch table.
 
-This keeps `stage-advance` aligned with the matrix and reuses the existing entry-gate
-transition instead of bypassing it.
+This keeps `stage-advance` aligned with the matrix and reuses the entry-gate transition —
+but only after `gate-entry` is fixed to actually persist it.
 
 ## 1.6 r2p-continue rework (agent_shortcuts._cmd_continue)
 
@@ -316,10 +373,13 @@ Fix (part of Part 1 scope):
 
 | File | Change |
 |---|---|
-| `tools/workflow_cli/cli.py` | +3 handlers (`_cmd_review_checkpoint` / `_cmd_checkpoint_decide` / `_cmd_stage_advance`) with the shared precondition checks (1.5); register in `_register_*`; import `NEXT_STAGE_MAP`, `add_checkpoint`. **`_cmd_gate_quality`:** remove the `check_forced_subagent_review` call (NR1, 1.5b) and add the `ready`-artifact precondition (NR2, 1.5c). **`_cmd_checkpoint_decide`:** add the forced-review guard on `--decision approved` (NR1). **`_cmd_stage_advance`:** stop at `NEXT_STAGE`, do not collapse to draft (NR3, 1.5d). **`_cmd_stage_update` / `_cmd_stage_produce`:** flip `CHECKPOINT_CHANGES_REQUESTED → ACTIVE_STAGE_DRAFT` (1.6a) |
+| `tools/workflow_cli/cli.py` | +3 handlers (`_cmd_review_checkpoint` / `_cmd_checkpoint_decide` / `_cmd_stage_advance`) with shared precondition checks (1.5); register in `_register_*`; import `NEXT_STAGE_MAP`, `add_checkpoint`. **`_cmd_gate_entry`:** when status is `NEXT_STAGE`, persist pass→`ACTIVE_STAGE_DRAFT` / fail→`ENTRY_GATE_FAILED` via `update_run_status` + save (TR1, 1.5d) — currently read-only. **`_cmd_gate_quality`:** remove the `check_forced_subagent_review` call (NR1, 1.5b), add the `ready`-artifact precondition (NR2, 1.5c). **`_cmd_checkpoint_decide`:** version-aware forced-review guard on approve; missing-confirm → exit 5 (NR1/TR2/TR5). **`_cmd_stage_advance`:** stop at `NEXT_STAGE`; require a matching approved checkpoint (NR3/TR4, 1.5d). **Migrate the 4 direct `record.status =` writes** at `cli.py:555/574/675/697` to `update_run_status` (TR3, 1.3). **`_cmd_stage_update` / `_cmd_stage_produce`:** flip `CHECKPOINT_CHANGES_REQUESTED → ACTIVE_STAGE_DRAFT` (1.6a) |
+| `tools/workflow_cli/gates.py` | Add a `version` param to `check_forced_subagent_review` and match only `…-review-v<version>.md` (TR2, 1.5b) |
+| `tools/workflow_cli/output.py` | Broaden the `EXIT_REVIEW_REQ = 5` comment to "approval precondition not met (confirmation or forced review)" (TR5) |
 | `tools/workflow_cli/models.py` | Add `CMD-STAGE-ADVANCE` (+ ensure `CMD-REVIEW-CHECKPOINT` / `CMD-CHECKPOINT-DECIDE` present); wire into `ALLOWED_COMMANDS_BY_RUN_STATE` for the correct states (1.5a) |
 | `tools/workflow_cli/agent_shortcuts.py` | Rewrite `_cmd_continue` as a status-dispatch driver with the corrected ready→gate order (1.6); reuse `_run_cli`; no `r2p-adapt` reference |
-| `tests/test_cli.py` | 3 commands × (happy + wrong-state refusal + missing-confirm refusal + shared precondition refusals: wrong stage, not-ready artifact, duplicate-version approval). Move forced-review exit-5 assertions from `gate-quality` to `checkpoint-decide approved` (NR1). Update `test_runs_quality_check_after_tier_lock` (`:498`) to insert `stage-ready` before `gate-quality` (NR2) |
+| `tests/test_cli.py` | 3 commands × (happy + wrong-state refusal + missing-confirm refusal → **exit 5** + shared precondition refusals: wrong stage, not-ready artifact, duplicate-version approval, **missing-checkpoint advance** (TR4)). Move forced-review exit-5 assertions from `gate-quality` to `checkpoint-decide approved` (NR1). Add a **"v1 marker must not clear a v2 approval"** test (TR2). Add an **illegal-direct-transition rejection** test (TR3). Update `test_runs_quality_check_after_tier_lock` (`:498`) to insert `stage-ready` before `gate-quality` (NR2) |
+| `tests/test_gates.py` | Update forced-review tests for the new `version` param; assert version mismatch fails (TR2) |
 | `tests/test_models.py` | Assert the new command intents are allowed in exactly the right states, refused elsewhere (1.5a) |
 | `tests/test_integration.py` | New true end-to-end test: pure CLI/shortcut from `run-start` to `CLOSED`, assert all 6 stages pass, a PLAN checkpoint exists, `status == CLOSED_AT_PLAN_CHECKPOINT`. Plus a `changes_requested → stage-update → re-gate → re-approve` loop test (1.6a). Keep `_force_to_closed` for unit-level reuse but stop depending on it for end-to-end |
 | `tests/test_agent_shortcuts.py` | `r2p-continue` dispatch behavior per status, incl. the not-ready stop and the changes_requested stop |
@@ -355,11 +415,12 @@ Fix (part of Part 1 scope):
 ## 1.9 Test plan (Part 1)
 
 - **Happy path:** start → (per stage) produce → tier-lock (once) → **stage-ready → gate-quality** (corrected order, R3) → review-checkpoint (writes the marker) → checkpoint-decide approved → stage-advance → gate-entry; at plan: checkpoint-decide approved → run-close. Assert terminal status + plan checkpoint row.
-- **Errors:** `checkpoint-decide approved` without `--confirm` → exit 2; `stage-advance` at plan stage → exit 6; `review-checkpoint` from wrong state → exit 6; `checkpoint-decide` from non-review state → exit 6.
-- **Precondition guards (R4):** `checkpoint-decide --stage X` where `X != current_stage` → exit 6; `checkpoint-decide` when the stage artifact is not `ready` → exit 6; re-approving an already-approved stage+version → exit 6.
+- **Errors:** `checkpoint-decide approved` without `--confirm` → **exit 5** (TR5); `stage-advance` at plan stage → exit 6; `review-checkpoint` from wrong state → exit 6; `checkpoint-decide` from non-review state → exit 6.
+- **Precondition guards (R4 + TR4):** `checkpoint-decide --stage X` where `X != current_stage` → exit 6; `checkpoint-decide` when the stage artifact is not `ready` → exit 6; re-approving an already-approved stage+version → exit 6; `stage-advance` in `CHECKPOINT_APPROVED` but with **no matching approved checkpoint** (e.g. hand-edited run.md) → exit 6.
 - **gate-quality readiness (NR2):** `stage-produce → gate-quality` without `stage-ready` → exit 6; `stage-ready → gate-quality` → passes the precondition.
-- **Forced review moved (NR1):** standard tier + a forced modifier (e.g. safety) on a design stage with no review file: `gate-quality` now **passes** to `READY_FOR_CHECKPOINT_REVIEW` (no exit 5); `review-checkpoint` writes `reviews/design-checkpoint-review-v1.md`; `checkpoint-decide approved` then **passes** because the marker exists. Negative: delete the marker → `checkpoint-decide approved` → exit 5; `checkpoint-decide changes_requested` still allowed.
-- **NEXT_STAGE observable (NR3):** after `stage-advance`, status is `NEXT_STAGE` (not draft); `gate-entry` then moves it to `ACTIVE_STAGE_DRAFT` on pass / `ENTRY_GATE_FAILED` on fail.
+- **Forced review moved + version-aware (NR1 + TR2):** standard tier + a forced modifier (e.g. safety) on a design stage with no review file: `gate-quality` now **passes** to `READY_FOR_CHECKPOINT_REVIEW` (no exit 5); `review-checkpoint` writes `reviews/design-checkpoint-review-v1.md`; `checkpoint-decide approved` then **passes**. Negatives: delete the marker → exit 5; a **v1 marker present but the active artifact is v2** → exit 5 (version mismatch, TR2); `checkpoint-decide changes_requested` still allowed without any marker.
+- **NEXT_STAGE observable + persisted (NR3 + TR1):** after `stage-advance`, status is `NEXT_STAGE` (not draft); `gate-entry` (now state-persisting in this state) moves it to `ACTIVE_STAGE_DRAFT` on pass / `ENTRY_GATE_FAILED` on fail, and the change is saved to run.md.
+- **State authority (TR3):** an attempt to drive an illegal transition is rejected by `update_run_status`; the migrated handlers (gate-quality / stage-produce) no longer write `record.status` directly.
 - **changes_requested loop (R5):** decide `changes_requested` → status `CHECKPOINT_CHANGES_REQUESTED`; then `stage-update` → status flips to `ACTIVE_STAGE_DRAFT`; then re-gate and re-approve succeed.
 - **Driver:** `r2p-continue` from each status produces the documented stop/advance outcome; stops (does not auto-run) at a not-`ready` artifact; auto-runs `gate-entry` at `NEXT_STAGE`; never auto-approves at `CHECKPOINT_REVIEW`.
 
@@ -411,14 +472,16 @@ files, then `rm -rf` the dir to clear the untracked `__pycache__/` left behind).
 Install discovery is glob-based (`install.py:91/120/130/140`), so **fresh** installs need no
 install-code change beyond deleting the template files and the `tools/r2p-adapt` wrapper.
 
-**Upgrade path (review finding NR4):** the shared `~/.req-to-plan/bin/r2p-adapt` wrapper is
-reference-counted across platforms (`install.py:195`). A user already on 0.1.2 with multiple
-platforms installed may have a stale `r2p-adapt` that fresh-install logic never revisits.
-Required: add an "upgrade from an installed 0.1.2 state" test asserting that after reinstall,
-the stale `r2p-adapt` wrapper is either removed by the reference-count cleanup or clearly
-reported by `r2p doctor`. If neither happens automatically, add explicit stale-wrapper
-cleanup to uninstall/reinstall (or surface it in `doctor`) so upgraders don't keep a dead
-shortcut.
+**Upgrade path (review findings NR4 + TR6):** the shared `~/.req-to-plan/bin/r2p-adapt`
+wrapper is reference-counted across platforms (`install.py:195`). A user already on 0.1.2 with
+multiple platforms installed may have a stale `r2p-adapt` that fresh-install logic never
+revisits. Because `r2p-adapt` is an **executable on PATH**, leaving a dead command behind
+actively misleads users (TR6) — "doctor reports it" is **not** an acceptable end state.
+Required: install/reinstall/uninstall must **deterministically remove** managed wrappers that
+are no longer part of the current template set (i.e. treat the wrapper set as
+manifest-driven: any managed `bin/r2p-*` not in the new install is deleted). `r2p doctor` is
+an additional diagnostic only, not the cleanup mechanism. Add an "upgrade from an installed
+0.1.2 state" test asserting the stale `r2p-adapt` wrapper is gone after reinstall.
 
 ## 2.3 Test edits
 
@@ -448,7 +511,7 @@ deleted surface.
 - `.venv/bin/python -m pytest tests/ -v` green. Removing adapter tests drops the count by **25** (18 + 2 + 2 + 3; corrected per NR5 — `test_integration` executor-adapt class is 3 tests, not 4) from the current 494 → **469**; Part 1 adds tests on top. Update the baseline in both `CLAUDE.md` (says 460) and `.claude/skills/req-to-plan.md` (says 397) to the real post-change number — reconcile after whichever parts run.
 - `git grep -i "adapt"` returns only intentional prose, no `r2p-adapt` / `get_adapter` / `CMD-EXEC-ADAPT` / `ADAPTER_REGISTRY`.
 - `r2p install --platform claude,codex,gemini` into a temp home installs no `r2p-adapt*` file; the `r2p-*` shortcut count is 5.
-- **Upgrade (NR4):** from a temp home pre-seeded with a 0.1.2-style multi-platform install (stale `bin/r2p-adapt` present), reinstall/uninstall leaves no dangling `r2p-adapt`, or `r2p doctor` reports it.
+- **Upgrade (NR4 + TR6):** from a temp home pre-seeded with a 0.1.2-style multi-platform install (stale `bin/r2p-adapt` present), reinstall/uninstall **deterministically removes** the dangling `bin/r2p-adapt` (assert the file is gone — doctor-only reporting is not sufficient).
 - `r2p --help` (agent_shortcuts) lists 5 subcommands, no `adapt`.
 
 ---
@@ -518,16 +581,22 @@ also subsumes the `Skeleton` and checkbox requirements from 3.1/3.3.
   already passed to `check_quality_gate(run_dir, stage, tier, ...)` — no signature change
   needed. Parsing keys off 3.0's heading/field convention, not loose Markdown.
 
-## 3.2 Context7 version verification — `spec-workflow.md` + `plan-workflow.md` + `gates.py`
+## 3.2 Context7 version verification — `spec-workflow.md` + `gates.py`
 
-- Add a required `## External Documentation Checked` section (mirroring the superpowers
-  spec): for any version-sensitive external dependency (framework / SDK / CLI / cloud
-  service), verify current usage via Context7 before finalizing SPEC, and record one row
-  per dependency: `dependency + version + check date + conclusion`.
-- Anything unverifiable is marked `UNCONFIRMED` (per global CLAUDE.md rule).
-- Quality-gate guard: **fires only when `stage == SPEC`** (other stages unaffected). A SPEC
-  that references external dependencies and lacks this section fails the gate. Detection
-  heuristic is conservative — only flags when an external dependency is clearly named.
+**Always-present section, not a heuristic (review finding TR7).** The earlier draft made the
+gate guess "does this SPEC reference an external dependency?" — fragile. Instead:
+
+- The `## External Documentation Checked` section is **required in every SPEC**. It contains a
+  small machine-parseable dependency inventory; a SPEC with no external dependencies writes a
+  single explicit `N/A — no external dependencies` row rather than omitting the section.
+- For each version-sensitive external dependency (framework / SDK / CLI / cloud service),
+  verify current usage via Context7 before finalizing SPEC, and record one row:
+  `dependency | version | check date | conclusion`. Unverifiable → `UNCONFIRMED` (global
+  CLAUDE.md rule).
+- Quality-gate guard (`stage == SPEC` only): fail if the section is **absent or empty**. This
+  is a presence check on a fixed heading + at least one inventory row (real dep or the
+  explicit `N/A` row) — no guessing whether deps exist. Deciding *which* deps belong is the
+  author's job; the gate only enforces that the question was answered.
 
 ## 3.3 Machine-checkable execution tracking — `plan-workflow.md`
 
@@ -548,10 +617,13 @@ also subsumes the `Skeleton` and checkbox requirements from 3.1/3.3.
 ## 3.5 Verification (Part 3)
 
 - `tests/test_tier.py` and `tests/test_gates.py` stay green; add tests for the new gate
-  guards (3.1 missing-code-block fail, 3.2 missing-external-docs-section fail).
+  guards: 3.1 standard-tier PLAN with a `TDD Applicable: yes` task lacking a code block →
+  fail; 3.2 SPEC **missing the `External Documentation Checked` section entirely** → fail, and
+  a SPEC with the section + an explicit `N/A — no external dependencies` row → pass (presence
+  check, not dependency-guessing; TR7).
 - Generate one PLAN through the workflow on a small standard-tier requirement and confirm
-  the output contains code blocks, an `External Documentation Checked` section, and `- [ ]`
-  steps.
+  the output contains code blocks, an `External Documentation Checked` section (with at least
+  one inventory row), and `- [ ]` steps.
 - Doc-only changes to `plan-workflow.md` / `spec-workflow.md` are verified by review + the
   gate tests that enforce them.
 
