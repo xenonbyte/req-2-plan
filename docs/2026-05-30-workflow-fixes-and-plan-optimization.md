@@ -1,8 +1,22 @@
 # Workflow Fixes + PLAN Optimization — Implementation Plan
 
-**Status:** Proposed (awaiting review)
+**Status:** Proposed — revised after review round 1 (awaiting re-review)
 **Date:** 2026-05-30
 **Author:** req-to-plan maintainers (via /think workflow)
+
+> **Review round 1 — all six findings accepted (verified against code, 2026-05-30):**
+> - **R1** `stage-advance` must enter the authoritative command model, not just cli.py
+>   (`command-surface.md:220/350` map continue-after-approval to `CMD-RUN-RESUME`). → §1.5a.
+> - **R2** `review-checkpoint` conflicts with the findings-writing `CMD-REVIEW-CHECKPOINT`
+>   contract (`command-surface.md:157`). Resolved as an explicit MVP downgrade. → §1.5 row + KD2.
+> - **R3** `r2p-continue` order was backwards and auto-ran `stage-ready`; real order is
+>   `stage-ready` then `gate-quality` (`operator-runbook.md:150/180`). → §1.6.
+> - **R4** `checkpoint-decide`/`stage-advance` need stronger precondition checks
+>   (stage==current, artifact exists/ready, version match, no duplicate approval). → §1.5 shared checks.
+> - **R5** `changes_requested` loop isn't closed: `stage-update` (`cli.py:712`) never flips
+>   status back to draft. → §1.6a.
+> - **R6 (Part 3)** gate needs a fixed machine-parseable PLAN task schema first, or it's a
+>   fragile Markdown guess. → §3.0.
 
 **Scope (three parts):**
 1. **Close the end-to-end loop** — wire the missing approve/advance state transitions so a run reaches `CLOSED_AT_PLAN_CHECKPOINT` purely through CLI/shortcut commands; make `r2p-continue` a real driver.
@@ -124,31 +138,95 @@ state-machine table itself does not change.
 
 ## 1.5 New command contracts (cli.py)
 
+**Shared precondition checks (all three commands; review finding R4).** Before any state
+change, each command validates: `--stage == record.current_stage`; an active artifact for
+that stage exists; the active artifact's recorded version matches the on-disk artifact
+version; the artifact status is the one the command expects (e.g. `checkpoint-decide`
+requires the stage's active artifact to be `ready`). `checkpoint-decide approved`
+additionally refuses to re-approve a stage+version that already has an approved checkpoint
+(no duplicate approval of the same version). Any failed check → exit 6, no state change.
+These mirror the existing `stage-produce` guard at `cli.py:658` (`stage != current_stage`).
+
 | Command | Args | Precondition | Action | Exit |
 |---|---|---|---|---|
-| `review-checkpoint` | `--work-id --stage` | `READY_FOR_CHECKPOINT_REVIEW` | `update_run_status(CHECKPOINT_REVIEW)`; `resume_context.next="checkpoint_decide"`. CLI only transitions state; it does not write review findings (review content is an Agent/subagent product — preserve CLI/Agent separation) | OK; wrong state → 6 |
-| `checkpoint-decide` | `--work-id --stage --decision {approved,changes_requested} [--confirm] [--downstream-authorization S]` | `CHECKPOINT_REVIEW` | approved: requires `--confirm`, else exit 2; `add_checkpoint(stage, artifact, version, downstream_auth)` + `upsert_active_artifact(..., "approved")` + `update_run_status(CHECKPOINT_APPROVED)`; `downstream_authorization` defaults to the `NEXT_STAGE_MAP` next-stage name, and to `close_workflow_run` at the plan stage (matches existing run.md convention — verified in the forma run, not `"none"`). changes_requested: `update_run_status(CHECKPOINT_CHANGES_REQUESTED)` | OK; missing confirm → 2; wrong state → 6 |
-| `stage-advance` | `--work-id` | `CHECKPOINT_APPROVED` and `current_stage != PLAN` | `update_run_status(NEXT_STAGE)` → `update_run_status(ACTIVE_STAGE_DRAFT)`; `current_stage = NEXT_STAGE_MAP[cur]`; `resume_context(active_item=next, next="produce_stage_artifact")` | OK; plan stage → 6 (point to run-close); wrong state → 6 |
+| `review-checkpoint` | `--work-id --stage` | `READY_FOR_CHECKPOINT_REVIEW` + shared checks | **MVP scope (review finding R2):** `update_run_status(CHECKPOINT_REVIEW)`; `resume_context.next="checkpoint_decide"`; record a minimal "review started / ready for human decision" marker only. It does **not** produce review findings or run merge — the full `CMD-REVIEW-CHECKPOINT` contract (write findings, require merge before decide; `command-surface.md:157`) is explicitly downgraded to this marker for the MVP. The downgrade is documented in 1.5a below and synced into the command-surface/cli-adapter docs. | OK; wrong state → 6 |
+| `checkpoint-decide` | `--work-id --stage --decision {approved,changes_requested} [--confirm] [--downstream-authorization S]` | `CHECKPOINT_REVIEW` + shared checks | approved: requires `--confirm`, else exit 2; `add_checkpoint(stage, artifact, version, downstream_auth)` + `upsert_active_artifact(..., "approved")` + `update_run_status(CHECKPOINT_APPROVED)`; `downstream_authorization` defaults to the `NEXT_STAGE_MAP` next-stage name, and to `close_workflow_run` at the plan stage (matches existing run.md convention — verified in the forma run, not `"none"`). changes_requested: `update_run_status(CHECKPOINT_CHANGES_REQUESTED)` **and set `resume_context.next="repair_stage_artifact"` + `active_item=stage`** so the repair loop is reachable (see 1.6a, review finding R5). | OK; missing confirm → 2; wrong state → 6 |
+| `stage-advance` | `--work-id` | `CHECKPOINT_APPROVED` and `current_stage != PLAN` + shared checks | `update_run_status(NEXT_STAGE)` → `update_run_status(ACTIVE_STAGE_DRAFT)`; `current_stage = NEXT_STAGE_MAP[cur]`; `resume_context(active_item=next, next="produce_stage_artifact")` | OK; plan stage → 6 (point to run-close); wrong state → 6 |
 
 All three reuse existing `_load_run` / `add_checkpoint` / `update_run_status` / `mgr.save`;
 no new serialization path is introduced.
+
+### 1.5a Authoritative command-model sync (review finding R1)
+
+`stage-advance` is a **new command intent**, not just a cli.py handler. The authoritative
+matrix currently maps "continue after checkpoint approval" to `CMD-RUN-RESUME`
+(`command-surface.md:220` — `checkpoint_approved` allows `CMD-RUN-RESUME`; and the
+"Continue After Checkpoint Approval" section at `command-surface.md:350`). Adding a
+dedicated command therefore requires updating the model layer and its docs, not only
+`cli.py`:
+
+- `models.py` — add `CMD-STAGE-ADVANCE` (and, if we keep `review-checkpoint`/`checkpoint-decide`
+  as the MVP-scoped commands, ensure `CMD-REVIEW-CHECKPOINT` / `CMD-CHECKPOINT-DECIDE` are
+  represented), and add them to `ALLOWED_COMMANDS_BY_RUN_STATE` for the right states
+  (`CMD-STAGE-ADVANCE` under `CHECKPOINT_APPROVED`; `CMD-CHECKPOINT-DECIDE` under
+  `CHECKPOINT_REVIEW`; `CMD-REVIEW-CHECKPOINT` under `READY_FOR_CHECKPOINT_REVIEW`/`CHECKPOINT_REVIEW`).
+- `docs/workflow-command-surface.md` — add the `CMD-STAGE-ADVANCE` row and reconcile the
+  `checkpoint_approved` row + "Continue After Checkpoint Approval" section so resume vs
+  advance is unambiguous (advance = move to next stage draft; resume = read-only context
+  refresh).
+- `docs/workflow-cli-adapter.md` — add the `workflow stage-advance` mapping row.
+- `tests/test_models.py` — assert the new command intents are allowed in exactly the right
+  states and refused elsewhere.
+
+**Alternative considered:** instead of a new `stage-advance` intent, extend `CMD-RUN-RESUME`
+to perform the advance (matching the current matrix). Rejected for the same reason as Key
+Decision 1 — the run-resume context-refresh exception is complex and many tests depend on
+its read-only behavior. If the maintainer prefers fidelity to the existing matrix over a new
+command, this is the one decision to revisit before implementing Part 1.
 
 ## 1.6 r2p-continue rework (agent_shortcuts._cmd_continue)
 
 Change from "only calls run-resume" to a status-dispatched driver. Read `record.status`
 and act:
 
+**Order correction (review finding R3):** the real workflow order is **`stage-ready` first,
+then `gate-quality`** (runbook: `stage-ready` at `operator-runbook.md:150`, `gate-quality` at
+`:180`; `stage-ready` records the author's readiness assertion, then the gate evaluates).
+The earlier draft of this table had it backwards and also auto-ran `stage-ready`. Corrected
+rule: `r2p-continue` does **not** auto-`stage-ready` — marking ready is the author's
+assertion, so it stops and asks. Only after the artifact is `ready` does it auto-run
+`gate-quality`.
+
 | Current status | r2p-continue behavior |
 |---|---|
-| `ACTIVE_STAGE_DRAFT` | Read stage artifact: empty → stop, report "produce `<stage>` content" (Agent writes). tier not locked → stop, report "needs tier-lock". Otherwise auto `gate-quality`: pass → auto `stage-ready` → continue to review; fail → stop, report repair |
+| `ACTIVE_STAGE_DRAFT` | Read stage artifact + active-artifact status. Content empty → stop, report "produce `<stage>` content" (Agent writes). tier not locked → stop, report "needs tier-lock". Artifact not yet `ready` → stop, report "review and run `stage-ready`" (author assertion, not automatic). Artifact `ready` → auto `gate-quality`: pass → continue to review; fail → stop, report repair |
 | `READY_FOR_CHECKPOINT_REVIEW` | Auto `review-checkpoint`, then stop at `CHECKPOINT_REVIEW`, report "needs human approval: checkpoint approve / changes" |
 | `CHECKPOINT_REVIEW` | Stop, wait for human `checkpoint-decide` (never auto-approve) |
 | `CHECKPOINT_APPROVED` | plan stage → auto `run-close`, report closed + **PLAN is at `07-plan.md`, hand it to your executor** (see reconciliation note); otherwise auto `stage-advance`, stop at new stage, report "entered `<next>`, produce content" |
-| `ENTRY/QUALITY_GATE_FAILED`, `CHANGES_REQUESTED` | Stop, report repair needed + the specific next command |
+| `CHECKPOINT_CHANGES_REQUESTED` | Stop, report "address requested changes, then `stage-update` (or `stage-produce`) to return to draft" (see 1.6a) |
+| `ENTRY_GATE_FAILED` / `QUALITY_GATE_FAILED` | Stop, report repair needed + the specific next command |
 | `CLOSED_AT_PLAN_CHECKPOINT` | Report done, **PLAN is at `07-plan.md`, hand it to your executor** |
 
 Exit codes use the existing convention to distinguish "stopped, needs input" from "error".
 `run-resume` stays read-only and unchanged (see Key Decision 1).
+
+### 1.6a Close the changes_requested repair loop (review finding R5)
+
+The `CHECKPOINT_CHANGES_REQUESTED → ACTIVE_STAGE_DRAFT` transition exists in
+`ALLOWED_TRANSITIONS` (`models.py:129`), but **no command performs it today**:
+`stage-update` (`cli.py:712-726`) writes the active artifact back to `"draft"` status but
+never calls `update_run_status`, so a run parked in `CHECKPOINT_CHANGES_REQUESTED` cannot
+re-enter the draft→gate→review loop — the same class of dead-end as the Part 1 P0.
+
+Fix (part of Part 1 scope):
+- `checkpoint-decide --decision changes_requested` sets
+  `resume_context.next="repair_stage_artifact"` + `active_item=stage` (see 1.5 table).
+- `stage-update` **and** `stage-produce`: when the current status is
+  `CHECKPOINT_CHANGES_REQUESTED`, call `update_run_status(ACTIVE_STAGE_DRAFT)` as part of the
+  edit (guarded by `is_transition_allowed`, which already permits it). This is the missing
+  state flip; without it the artifact goes back to draft but the run status stays stuck.
+- Add a test: decide `changes_requested` → `stage-update` → assert status is
+  `ACTIVE_STAGE_DRAFT` and the stage can be re-gated and re-approved.
 
 > **Cross-part reconciliation:** The original standalone version of this rework suggested
 > `r2p-adapt --executor superpowers` at the closed/approved states. Because **Part 2 deletes
@@ -160,27 +238,36 @@ Exit codes use the existing convention to distinguish "stopped, needs input" fro
 
 | File | Change |
 |---|---|
-| `tools/workflow_cli/cli.py` | +3 handlers (`_cmd_review_checkpoint` / `_cmd_checkpoint_decide` / `_cmd_stage_advance`); register in `_register_*`; import `NEXT_STAGE_MAP`, `add_checkpoint` |
-| `tools/workflow_cli/agent_shortcuts.py` | Rewrite `_cmd_continue` as a status-dispatch driver; reuse `_run_cli`; no `r2p-adapt` reference |
-| `tests/test_cli.py` | 3 commands × (happy + wrong-state refusal + missing-confirm refusal) |
-| `tests/test_integration.py` | New true end-to-end test: pure CLI/shortcut from `run-start` to `CLOSED`, assert all 6 stages pass, a PLAN checkpoint exists, `status == CLOSED_AT_PLAN_CHECKPOINT`. Keep `_force_to_closed` for unit-level reuse but stop depending on it for end-to-end |
-| `tests/test_agent_shortcuts.py` | `r2p-continue` dispatch behavior per status |
-| `docs/workflow-cli-adapter.md` | Add `stage-advance` row; `review-checkpoint` / `checkpoint-decide` move from "Covered (on paper)" to actually implemented |
+| `tools/workflow_cli/cli.py` | +3 handlers (`_cmd_review_checkpoint` / `_cmd_checkpoint_decide` / `_cmd_stage_advance`) with the shared precondition checks (1.5); register in `_register_*`; import `NEXT_STAGE_MAP`, `add_checkpoint`. **Also** edit `_cmd_stage_update` and `_cmd_stage_produce` to flip `CHECKPOINT_CHANGES_REQUESTED → ACTIVE_STAGE_DRAFT` (1.6a) |
+| `tools/workflow_cli/models.py` | Add `CMD-STAGE-ADVANCE` (+ ensure `CMD-REVIEW-CHECKPOINT` / `CMD-CHECKPOINT-DECIDE` present); wire into `ALLOWED_COMMANDS_BY_RUN_STATE` for the correct states (1.5a) |
+| `tools/workflow_cli/agent_shortcuts.py` | Rewrite `_cmd_continue` as a status-dispatch driver with the corrected ready→gate order (1.6); reuse `_run_cli`; no `r2p-adapt` reference |
+| `tests/test_cli.py` | 3 commands × (happy + wrong-state refusal + missing-confirm refusal + the shared precondition refusals: wrong stage, not-ready artifact, duplicate-version approval) |
+| `tests/test_models.py` | Assert the new command intents are allowed in exactly the right states, refused elsewhere (1.5a) |
+| `tests/test_integration.py` | New true end-to-end test: pure CLI/shortcut from `run-start` to `CLOSED`, assert all 6 stages pass, a PLAN checkpoint exists, `status == CLOSED_AT_PLAN_CHECKPOINT`. Plus a `changes_requested → stage-update → re-gate → re-approve` loop test (1.6a). Keep `_force_to_closed` for unit-level reuse but stop depending on it for end-to-end |
+| `tests/test_agent_shortcuts.py` | `r2p-continue` dispatch behavior per status, incl. the not-ready stop and the changes_requested stop |
+| `docs/workflow-command-surface.md` | Add `CMD-STAGE-ADVANCE` row; reconcile the `checkpoint_approved` row + "Continue After Checkpoint Approval" section (resume vs advance) (1.5a) |
+| `docs/workflow-cli-adapter.md` | Add `workflow stage-advance` row; `review-checkpoint` / `checkpoint-decide` move from "Covered (on paper)" to implemented, with the MVP-scope note for review-checkpoint (1.5 / R2) |
 | `docs/workflow-operator-runbook.md` | Complete happy-path steps with review/decide/advance |
-| `tools/workflow_cli/agent_templates/claude/SKILL.md` + `commands/r2p-continue.md` | Clarify real continue behavior (auto-advance + stop at content/approval) |
+| `tools/workflow_cli/agent_templates/claude/SKILL.md` + `commands/r2p-continue.md` | Clarify real continue behavior (stop-at-ready, auto-gate, stop-at-approval) |
 | `CLAUDE.md` (project) | Update test-count baseline |
 
 ## 1.8 Key decisions (Part 1)
 
 1. **Advance responsibility goes into a new `stage-advance` command, not a `run-resume`
-   rewrite.** The docs fold next-stage advance into run-resume's dual-mode semantics, but
-   that context-refresh exception is complex and many tests depend on its read-only
-   behavior. A new explicit command is safer and matches existing code style. Cost:
-   `stage-advance` is a name outside the documented command table — this plan adds it to
-   cli-adapter.md.
-2. **`review-checkpoint` only transitions state; it does not write review findings.** Review
-   content is a semantic product owned by the Agent; the CLI holds only state authority.
-   Matches CLAUDE.md "CLI never generates artifact text".
+   rewrite.** The docs fold next-stage advance into run-resume's dual-mode semantics
+   (`command-surface.md:220/350`), but that context-refresh exception is complex and many
+   tests depend on its read-only behavior. A new explicit command is safer and matches
+   existing code style. Cost: `stage-advance` is a new command intent — it must be added to
+   the authoritative model and docs, not just cli.py (see 1.5a). Alternative (extend
+   `CMD-RUN-RESUME` to advance) is documented and rejected there; revisit only if the
+   maintainer prefers matrix fidelity over a new command.
+2. **`review-checkpoint` is MVP-scoped to a state transition + "ready for human decision"
+   marker; it does not write review findings or run merge.** The full `CMD-REVIEW-CHECKPOINT`
+   contract (write findings, require merge before decide) is intentionally downgraded for the
+   MVP and the downgrade is synced into command-surface/cli-adapter docs (1.5 / R2). Rationale
+   stands: review *content* is a semantic Agent/subagent product; the CLI holds state
+   authority only (CLAUDE.md "CLI never generates artifact text"). If a real review artifact
+   is wanted instead of a marker, that is a scope increase to decide before implementing.
 3. **raw_requirement also goes through the full checkpoint loop** (content is already written
    by run-start, so the loop is fast); no special-case shortcut — the only legal path to
    change `current_stage` is approved → advance, uniformly.
@@ -189,10 +276,11 @@ Exit codes use the existing convention to distinguish "stopped, needs input" fro
 
 ## 1.9 Test plan (Part 1)
 
-- **Happy path:** start → (per stage) produce → tier-lock (once) → gate-quality → stage-ready → review-checkpoint → checkpoint-decide approved → stage-advance; at plan: checkpoint-decide approved → run-close. Assert terminal status + plan checkpoint row.
+- **Happy path:** start → (per stage) produce → tier-lock (once) → **stage-ready → gate-quality** (corrected order, R3) → review-checkpoint → checkpoint-decide approved → stage-advance; at plan: checkpoint-decide approved → run-close. Assert terminal status + plan checkpoint row.
 - **Errors:** `checkpoint-decide approved` without `--confirm` → exit 2; `stage-advance` at plan stage → exit 6; `review-checkpoint` from wrong state → exit 6; `checkpoint-decide` from non-review state → exit 6.
-- **Edge:** `changes_requested` returns the run to a state from which the stage can be re-produced and re-gated, then re-approved.
-- **Driver:** `r2p-continue` from each status produces the documented stop/advance outcome; never auto-approves at `CHECKPOINT_REVIEW`.
+- **Precondition guards (R4):** `checkpoint-decide --stage X` where `X != current_stage` → exit 6; `checkpoint-decide` when the stage artifact is not `ready` → exit 6; re-approving an already-approved stage+version → exit 6.
+- **changes_requested loop (R5):** decide `changes_requested` → status `CHECKPOINT_CHANGES_REQUESTED`; then `stage-update` → status flips to `ACTIVE_STAGE_DRAFT`; then re-gate and re-approve succeed.
+- **Driver:** `r2p-continue` from each status produces the documented stop/advance outcome; stops (does not auto-run) at a not-`ready` artifact; never auto-approves at `CHECKPOINT_REVIEW`.
 
 ---
 
@@ -294,19 +382,50 @@ Driving comparison (four real artifacts audited 2026-05-30):
 r2p maximized correctness/traceability but outsourced executability to an adapter that
 failed. Part 3 closes the executability gap while keeping r2p's traceability strengths.
 
+## 3.0 Prerequisite: fix the PLAN task schema first (review finding R6)
+
+The PLAN gate guards in 3.1/3.2 can only be reliable if PLAN tasks have a **stable,
+machine-parseable structure**. Today the template is narrative (`### PR #1 — Task A-01`,
+free-form `Steps:`), and the only structured fields are `Spec References` and the TDD
+Decomposition table (`plan-workflow.md:177/224`). The now-deleted adapter relied on a
+`PLAN-TASK-*` / `TDD` / `Change Type` section convention (`adapters/superpowers.py:7`) that
+the template never actually enforced — which is part of why adaptation failed.
+
+So 3.1 is gated on first defining a fixed task schema in `plan-workflow.md`, e.g.:
+
+```
+### PLAN-TASK-001: <title>
+Spec References: SPEC-...
+Change Type: add | modify | remove
+TDD Applicable: yes | no
+Files: <Create/Modify + path list>
+Skeleton:
+  ```<lang>
+  <interface signature or test skeleton>
+  ```
+Steps:
+- [ ] red: ...
+- [ ] green: ...
+Verification: ...
+```
+
+The gate parses this structure (heading regex `^### PLAN-TASK-\d+`, field labels), not
+free-form prose. Without this step the gate becomes a fragile Markdown guess. This schema
+also subsumes the `Skeleton` and checkbox requirements from 3.1/3.3.
+
 ## 3.1 Executable anchors (highest priority) — `plan-workflow.md` + `gates.py`
 
-- Add a `Skeleton` field to the PLAN Task template: minimal executable scaffold —
-  interface signatures in the target language, key tests as skeleton code blocks, explicit
-  file list (Create/Modify + path).
+- Depends on 3.0's fixed task schema. The `Skeleton` field (interface signatures in the
+  target language, key tests as skeleton code blocks) and explicit `Files:` list become
+  required fields of each `PLAN-TASK-*`.
 - Keep PLAN Neutrality (no GSD/superpowers orchestration format), but require the anchor to
   be a real code fragment, not pure prose.
 - Quality-gate guard: **fires only when `stage == PLAN`** (other stages unaffected). For a
-  `standard`-tier PLAN, every task with `TDD Applicable=yes` must contain at least one fenced
-  code block (test skeleton or interface signature), else the quality gate fails.
-  `light`-tier and `TDD Applicable=no` tasks are exempt. The guard reads `tier.base` from the
-  locked tier already passed to `check_quality_gate(run_dir, stage, tier, ...)` — no signature
-  change needed.
+  `standard`-tier PLAN, every `PLAN-TASK-*` with `TDD Applicable: yes` must contain at least
+  one fenced code block in its `Skeleton`, else the quality gate fails. `light`-tier and
+  `TDD Applicable: no` tasks are exempt. The guard reads `tier.base` from the locked tier
+  already passed to `check_quality_gate(run_dir, stage, tier, ...)` — no signature change
+  needed. Parsing keys off 3.0's heading/field convention, not loose Markdown.
 
 ## 3.2 Context7 version verification — `spec-workflow.md` + `plan-workflow.md` + `gates.py`
 
