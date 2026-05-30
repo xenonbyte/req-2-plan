@@ -1,6 +1,6 @@
 # Workflow Fixes + PLAN Optimization — Implementation Plan
 
-**Status:** Proposed — revised after review rounds 1–5 + self-audit (awaiting re-review)
+**Status:** Approved — 5 review rounds + 2 self-audits; 4 decisions resolved (see Decisions). Ready to implement.
 **Date:** 2026-05-30
 **Author:** req-to-plan maintainers (via /think workflow)
 
@@ -783,17 +783,21 @@ changes. **No run.md format change, no RunRecord field change, no data migration
 runs are unaffected (leftover `superpowers-plan.md` files are harmless; none are newly
 generated). Rollback = `git revert` per part.
 
-## Open questions (resolve before implementing the affected part)
+## Decisions (resolved by maintainer, 2026-05-30 — implement as written)
 
-- **Part 3.1 gate strictness:** should a missing code block be a hard gate fail or a warning
-  for the first release? Plan default: hard fail at standard tier, exempt at light tier.
-  Owner: maintainer.
-- **Test-count baseline:** current real count is 494 (not the 460 in `CLAUDE.md` nor the 397
-  in `.claude/skills/req-to-plan.md` — both stale). Part 2 removes **25** (→ 469), Part 1 adds
-  several. Settle the final baseline in both files after whichever parts are executed, not
-  per-part.
-- **NR1 review marker vs real review — RESOLVED (QR3):** the forced-review guard now requires
-  a distinct `…-subagent-review-v<version>.md`, not the `review-checkpoint` marker, so forced
-  review can no longer be self-satisfied (§1.5b). No longer open; noted here for history. If
-  the maintainer instead wants the marker to suffice (lighter, but weakens forced review),
-  flag it before implementing Part 1b.
+- **Part 1 delivery:** ship as **one PR** (not split into 1a/1b). Still implement in the
+  1a→1b internal order (land the state-machine-correctness changes + their tests first, then
+  the three new commands) so regressions surface early, but in a single PR. (§1.10)
+- **Part 3.1 gate strictness:** **hard fail** at standard tier — a `TDD Applicable: yes` task
+  with no code block fails the quality gate (exit 3). `light` tier and `TDD Applicable: no`
+  tasks are exempt. (§3.1)
+- **Test-count baseline:** do **not** hard-code a number in code/docs prose. After each
+  executed Part, run `pytest --co` and backfill the real count into **both** `CLAUDE.md` and
+  `.claude/skills/req-to-plan.md` (same value). Current actual = 494; the 460/397 in those
+  files are stale. (§2.5)
+- **Forced review (NR1/QR3):** `checkpoint-decide approved` on a forced-modifier
+  design/spec/plan requires a real `reviews/<stage>-subagent-review-v<version>.md`; the
+  `review-checkpoint` marker does **not** satisfy it. (§1.5b)
+
+(No open questions remain. Earlier rounds' alternatives — extend `CMD-RUN-RESUME` instead of
+`stage-advance` (§1.5a), marker-suffices forced review — were considered and rejected.)
