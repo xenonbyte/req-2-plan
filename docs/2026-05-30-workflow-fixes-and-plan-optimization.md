@@ -1,8 +1,17 @@
 # Workflow Fixes + PLAN Optimization — Implementation Plan
 
-**Status:** Proposed — revised after review rounds 1–4 (awaiting re-review)
+**Status:** Proposed — revised after review rounds 1–4 + self-audit (awaiting re-review)
 **Date:** 2026-05-30
 **Author:** req-to-plan maintainers (via /think workflow)
+
+> **Self-audit (2026-05-30, after round 4):** re-verified every code/doc anchor cited in this
+> plan against the source — all correct (cli.py 253/529/555/566/574/658/675/697/712/762,
+> models.py 116/129/168/262/269, gates.py 208/234, install.py 195/201, output.py 10,
+> command-surface/cli-adapter/invariants/runbook refs, and the `tests/test_*` line refs). Also
+> traced the reopen path (`create_run_record` → `ACTIVE_STAGE_DRAFT`, so the FR2 `NEXT_STAGE`
+> produce guard does not misfire) and the first stage (raw_requirement never enters
+> `NEXT_STAGE`). One honest finding surfaced: **Part 1 has grown well beyond "+3 commands"** —
+> documented in §1.10 with an optional 1a/1b split.
 
 > **Review round 4 — all three findings accepted (verified against code, 2026-05-30):**
 > - **FR1** `QUALITY_GATE_FAILED` only allows `→ {ACTIVE_STAGE_DRAFT, UPSTREAM_GAP_ROUTING}`
@@ -427,7 +436,7 @@ Fix (part of Part 1 scope), pick the repair path explicitly:
 
 | File | Change |
 |---|---|
-| `tools/workflow_cli/cli.py` | +3 handlers (`_cmd_review_checkpoint` / `_cmd_checkpoint_decide` / `_cmd_stage_advance`) with shared precondition checks (1.5); register in `_register_*`; import `NEXT_STAGE_MAP`, `add_checkpoint`. **`_cmd_gate_entry`:** when status is `NEXT_STAGE`, persist pass→`ACTIVE_STAGE_DRAFT` / fail→`ENTRY_GATE_FAILED` via `update_run_status` + save (TR1, 1.5d). **`_cmd_gate_quality`:** remove the `check_forced_subagent_review` call (NR1, 1.5b), add the `ready`-artifact precondition (NR2, 1.5c). **`_cmd_checkpoint_decide`:** version-aware forced-review guard on approve; missing-confirm → exit 5 (NR1/TR2/TR5). **`_cmd_stage_advance`:** stop at `NEXT_STAGE`; require a matching approved checkpoint (NR3/TR4, 1.5d). **`_cmd_stage_produce`:** add a `NEXT_STAGE` status guard → exit 6 (FR2, 1.5d). **Migrate the 4 direct `record.status =` writes** at `cli.py:555/574/675/697` to `update_run_status` (TR3, 1.3). **`_cmd_stage_update` / `_cmd_stage_produce`:** flip `CHECKPOINT_CHANGES_REQUESTED → ACTIVE_STAGE_DRAFT` **and** `QUALITY_GATE_FAILED → ACTIVE_STAGE_DRAFT` (1.6a / 1.6b — the latter is required so the TR3 migration doesn't break the gate-quality re-run path) |
+| `tools/workflow_cli/cli.py` | **3 new + 5 modified handlers** (scope grew across review rounds — see 1.10). New: `_cmd_review_checkpoint` / `_cmd_checkpoint_decide` / `_cmd_stage_advance` with shared precondition checks (1.5); register in `_register_*`; import `NEXT_STAGE_MAP`, `add_checkpoint`. **`_cmd_gate_entry`:** when status is `NEXT_STAGE`, persist pass→`ACTIVE_STAGE_DRAFT` / fail→`ENTRY_GATE_FAILED` via `update_run_status` + save (TR1, 1.5d). **`_cmd_gate_quality`:** remove the `check_forced_subagent_review` call (NR1, 1.5b), add the `ready`-artifact precondition (NR2, 1.5c). **`_cmd_checkpoint_decide`:** version-aware forced-review guard on approve; missing-confirm → exit 5 (NR1/TR2/TR5). **`_cmd_stage_advance`:** stop at `NEXT_STAGE`; require a matching approved checkpoint (NR3/TR4, 1.5d). **`_cmd_stage_produce`:** add a `NEXT_STAGE` status guard → exit 6 (FR2, 1.5d). **Migrate the 4 direct `record.status =` writes** at `cli.py:555/574/675/697` to `update_run_status` (TR3, 1.3). **`_cmd_stage_update` / `_cmd_stage_produce`:** flip `CHECKPOINT_CHANGES_REQUESTED → ACTIVE_STAGE_DRAFT` **and** `QUALITY_GATE_FAILED → ACTIVE_STAGE_DRAFT` (1.6a / 1.6b — the latter is required so the TR3 migration doesn't break the gate-quality re-run path) |
 | `tools/workflow_cli/gates.py` | Add a `version` param to `check_forced_subagent_review` and match only `…-review-v<version>.md` (TR2, 1.5b) |
 | `tools/workflow_cli/output.py` | Broaden the `EXIT_REVIEW_REQ = 5` comment to "approval precondition not met (confirmation or forced review)" (TR5) |
 | `tools/workflow_cli/models.py` | Add `CMD-STAGE-ADVANCE` (+ ensure `CMD-REVIEW-CHECKPOINT` / `CMD-CHECKPOINT-DECIDE` present); wire into `ALLOWED_COMMANDS_BY_RUN_STATE` for the correct states (1.5a). **Remove `CMD-STAGE-PRODUCE` from `ALLOWED_COMMANDS_BY_RUN_STATE[NEXT_STAGE]`** (FR2, 1.5d) |
@@ -480,6 +489,31 @@ Fix (part of Part 1 scope), pick the repair path explicitly:
 - **quality-gate repair loop (FR1):** fail `gate-quality` → `QUALITY_GATE_FAILED`; `stage-update` → `ACTIVE_STAGE_DRAFT`; `stage-ready` → `gate-quality` → `READY_FOR_CHECKPOINT_REVIEW`. (Regression guard: this path breaks if TR3 migration lands without the 1.6b flip.)
 - **NEXT_STAGE produce-bypass (FR2):** `stage-produce` while in `NEXT_STAGE` → exit 6; after `gate-entry` → `ACTIVE_STAGE_DRAFT`, `stage-produce` works.
 - **Driver:** `r2p-continue` from each status produces the documented stop/advance outcome; stops (does not auto-run) at a not-`ready` artifact; auto-runs `gate-entry` at `NEXT_STAGE`; never auto-approves at `CHECKPOINT_REVIEW`.
+
+## 1.10 Scope note: Part 1 is bigger than "+3 commands" (self-review)
+
+Across four review rounds, Part 1 grew from "add 3 transition commands" into **"make the
+state machine actually self-consistent"**. It now touches **8 handlers** (3 new + 5 modified)
+and fixes structural gaps the new commands depend on: the forced-review guard was in the wrong
+place (NR1), four handlers bypassed `update_run_status` (TR3), `is_command_allowed` is never
+called so the matrix isn't enforced (FR2), and two repair loops (`CHECKPOINT_CHANGES_REQUESTED`,
+`QUALITY_GATE_FAILED`) had no command to exit them (R5/FR1). This is the genuine minimum to get
+one happy path end-to-end without the state machine rejecting it — not scope creep — but it is
+**not a small PR**, and the implementer should plan for that.
+
+**Suggested split (optional, recommended):**
+- **Part 1a — state-machine self-consistency** (no new user-facing commands): migrate the 4
+  direct `record.status =` writes to `update_run_status` (TR3); add the
+  `CHECKPOINT_CHANGES_REQUESTED` and `QUALITY_GATE_FAILED` repair flips (1.6a/1.6b); make
+  `gate-quality` require `ready` (NR2); make `gate-entry` persist in `NEXT_STAGE` (TR1); add
+  the `NEXT_STAGE` produce guard + matrix removal (FR2); move the forced-review guard target
+  off `gate-quality` (NR1, the removal half). Independently testable; unblocks the rest.
+- **Part 1b — the three new commands**: `review-checkpoint` / `checkpoint-decide` /
+  `stage-advance` + their model/doc sync (1.5a) and the forced-review guard's new home on
+  `checkpoint-decide` (NR1, the add half).
+
+1a is a safe, self-contained correctness pass; 1b is the feature surface. If a single large PR
+is acceptable, keep them together — but land 1a's tests first so regressions are caught early.
 
 ---
 
