@@ -548,9 +548,7 @@ not satisfy the Quality Gate.
 
 If there are no external dependencies:
 
-```text
 N/A — no external dependencies
-```
 
 Entries that cannot be verified must be marked `UNCONFIRMED`.
 

@@ -489,10 +489,11 @@ class TestPlanCodeBlockGate(unittest.TestCase):
         with_code: bool,
         outside_skeleton_code: bool = False,
         indented_skeleton_code: bool = False,
+        fence: str = "```",
     ) -> str:
         if with_code:
             fence_prefix = "  " if indented_skeleton_code else ""
-            skeleton = f"{fence_prefix}```python\ndef f():\n    ...\n{fence_prefix}```\n"
+            skeleton = f"{fence_prefix}{fence}python\ndef f():\n    ...\n{fence_prefix}{fence}\n"
         else:
             skeleton = "(prose only)\n"
         verification = (
@@ -534,6 +535,26 @@ class TestPlanCodeBlockGate(unittest.TestCase):
             self.assertEqual(r.exit_code, 3)
             self.assertTrue(any("PLAN-TASK" in issue for issue in r.issues))
 
+    def test_standard_plan_ignores_fenced_template_task_heading(self):
+        import tempfile
+        from pathlib import Path
+        plan = (
+            "# PLAN\n\n"
+            "````md\n"
+            "### PLAN-TASK-001: example only\n"
+            "TDD Applicable: yes\n"
+            "Skeleton:\n"
+            "```python\n"
+            "assert True\n"
+            "```\n"
+            "````\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            r = self.check(Path(tmp), self.Stage.PLAN, self.standard, [], plan)
+            self.assertFalse(r.passed)
+            self.assertEqual(r.exit_code, 3)
+            self.assertTrue(any("PLAN-TASK" in issue for issue in r.issues))
+
     def test_standard_plan_code_block_outside_skeleton_fails(self):
         import tempfile
         from pathlib import Path
@@ -565,6 +586,19 @@ class TestPlanCodeBlockGate(unittest.TestCase):
                 self.standard,
                 [],
                 self._plan(True, indented_skeleton_code=True),
+            )
+            self.assertTrue(r.passed)
+
+    def test_standard_plan_with_tilde_skeleton_code_block_passes_this_check(self):
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as tmp:
+            r = self.check(
+                Path(tmp),
+                self.Stage.PLAN,
+                self.standard,
+                [],
+                self._plan(True, fence="~~~"),
             )
             self.assertTrue(r.passed)
 
@@ -696,6 +730,21 @@ class TestSpecExternalDocsGate(unittest.TestCase):
             body = (
                 "# SPEC\n\n## External Documentation Checked\n\n"
                 "```md\n"
+                "N/A — no external dependencies\n"
+                "```\n"
+            )
+            r = self.check(Path(tmp), self.Stage.SPEC, self.tier, [], body)
+            self.assertFalse(r.passed)
+            self.assertEqual(r.exit_code, 3)
+
+    def test_spec_ignores_fenced_template_external_docs_section(self):
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as tmp:
+            body = (
+                "# SPEC\n\n"
+                "```md\n"
+                "## External Documentation Checked\n\n"
                 "N/A — no external dependencies\n"
                 "```\n"
             )

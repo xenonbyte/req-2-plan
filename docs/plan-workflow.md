@@ -211,7 +211,7 @@ Each PLAN task must follow this schema structure:
 
 Spec References: SPEC-...
 
-Change Type: add | modify | remove
+Change Type: add | modify | remove | preserve | no-op
 
 TDD Applicable: yes | no
 
@@ -306,54 +306,77 @@ Task template:
 
 Each task is self-contained: it carries its own spec references, behavior goal, checkable steps, verification commands, and rollback/safety anchor so an executor can read one task top-to-bottom without cross-referencing other sections.
 
-```markdown
-### Task N: <task title>
+````markdown
+### PLAN-TASK-001: <task title>
 
-**Spec References:**
+Spec References:
 - SPEC-<TYPE>-<ID>: <title>
 
-**Goal**
+Goal:
 What this task accomplishes.
 
-**Change Type**
-add | modify | replace | remove | preserve | no-op
+Change Type:
+add | modify | remove | preserve | no-op
 
-**Steps**
+TDD Applicable: yes | no
+
+Files:
+- Create/Modify: <path>
+
+Skeleton:
+```<lang>
+<interface signature, failing-test skeleton, or "N/A - TDD not applicable">
+```
+
+Steps:
 - [ ] <executor-neutral step>
 - [ ] <executor-neutral step>
 
-**Verification**
+Verification:
 Checks, commands, or methods that verify the task. Reference the SPEC contract or acceptance scenario confirmed by each check.
 
-**Rollback / Safety**
+Rollback / Safety:
 Task-specific rollback, safety notes, or stop conditions.
-```
+````
 
 Positive executor-neutral handling:
 
-```markdown
-### Task N: Preserve legacy import compatibility
+````markdown
+### PLAN-TASK-001: Preserve legacy import compatibility
 
-**Spec References:**
+Spec References:
 - SPEC-COMPAT-003: Legacy import files remain accepted.
 
-**Goal**
+Goal:
 Keep the existing import behavior compatible while adding the new parser boundary.
 
-**Change Type**
+Change Type:
 preserve
 
-**Steps**
+TDD Applicable: yes
+
+Files:
+- Modify: `src/import/parser-boundary.ts`
+- Modify: `tests/import/legacy-compat.test.ts`
+
+Skeleton:
+```typescript
+test("opens a legacy import file through the new parser boundary", async () => {
+  await expect(openLegacyImportFixture()).resolves.toMatchObject({ status: "accepted" });
+});
+```
+
+Steps:
 - [ ] Add or update compatibility coverage for the legacy import case.
 - [ ] Make the minimal implementation change needed for the new boundary.
 - [ ] Run the compatibility and regression checks named in the Verification Plan.
 
-**Verification**
+Verification:
 The compatibility check proves SPEC-COMPAT-003 still passes. Run the named regression suite and confirm no regressions against SPEC-COMPAT-003.
 
-**Rollback / Safety**
+Rollback / Safety:
 Stop if the implementation requires changing the legacy file format without a new SPEC compatibility decision.
-```
+````
 
 Anti-examples:
 
@@ -367,32 +390,45 @@ These anti-examples are not executor-neutral because they depend on a specific e
 
 Example task mapping for `forma` replacing `pencil` design capability with `opendesign`:
 
-```markdown
-### Task 3: Add compatibility-preserving document open path
+````markdown
+### PLAN-TASK-003: Add compatibility-preserving document open path
 
-**Spec References:**
+Spec References:
 - SPEC-FR-001: Existing supported design documents open with the expected visible canvas state.
 - SPEC-COMPAT-001: Supported pencil-backed documents remain openable or fail with documented non-mutating errors.
 - SPEC-ERR-001: Unsupported opendesign parse cases do not overwrite the source document.
 
-**Goal**
+Goal:
 Introduce the document-open boundary needed by the approved DESIGN while preserving existing document safety behavior.
 
-**Change Type**
+Change Type:
 modify
 
-**Steps**
+TDD Applicable: yes
+
+Files:
+- Modify: `src/document/open.ts`
+- Modify: `tests/document/open-compat.test.ts`
+
+Skeleton:
+```typescript
+test("opens supported existing design documents without overwriting source", async () => {
+  await expect(openExistingDesignFixture()).resolves.toMatchObject({ canvasVisible: true });
+});
+```
+
+Steps:
 - [ ] red: Add failing compatibility/golden test for opening a supported existing design document (covers SPEC-FR-001, SPEC-COMPAT-001).
 - [ ] red: Add failing error-path test for unsupported parse behavior (covers SPEC-ERR-001).
 - [ ] green: Implement the minimal document-open integration path until both tests pass.
 - [ ] verify: Run targeted compatibility, error-path, and regression checks.
 
-**Verification**
+Verification:
 Targeted tests prove SPEC-FR-001, SPEC-COMPAT-001, and SPEC-ERR-001. All three tests must pass; no existing regression may fail.
 
-**Rollback / Safety**
+Rollback / Safety:
 Stop if the implementation requires mutating existing documents before read-only compatibility tests pass.
-```
+````
 
 Anti-example:
 

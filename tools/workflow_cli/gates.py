@@ -145,8 +145,39 @@ def _find_duplicate_ids(content: str) -> list[str]:
 
 _EXTERNAL_DOCS_RE = re.compile(r"^## External Documentation Checked\s*$", re.MULTILINE)
 _H2_RE = re.compile(r"^##\s+", re.MULTILINE)
-_MARKDOWN_CODE_FENCE_RE = re.compile(r"^[ \t]{0,3}```", re.MULTILINE)
+_MARKDOWN_CODE_FENCE_RE = re.compile(r"^[ \t]{0,3}(`{3,}|~{3,})", re.MULTILINE)
+_MARKDOWN_FENCE_MARKER_RE = re.compile(r"^[ \t]{0,3}(`{3,}|~{3,})")
 _ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def _unfenced_markdown_lines(content: str):
+    """Yield (line, start, end) for lines outside Markdown fenced code blocks."""
+    fence_char = ""
+    fence_len = 0
+    offset = 0
+    for line in content.splitlines(keepends=True):
+        marker = _MARKDOWN_FENCE_MARKER_RE.match(line)
+        if fence_char:
+            if (
+                marker
+                and marker.group(1)[0] == fence_char
+                and len(marker.group(1)) >= fence_len
+                and not line[marker.end():].strip()
+            ):
+                fence_char = ""
+                fence_len = 0
+            offset += len(line)
+            continue
+
+        if marker:
+            fence_char = marker.group(1)[0]
+            fence_len = len(marker.group(1))
+            offset += len(line)
+            continue
+
+        start = offset
+        offset += len(line)
+        yield line, start, offset
 
 
 def _plain_table_cell(cell: str) -> str:
@@ -185,24 +216,20 @@ def _is_external_docs_inventory_row(line: str) -> bool:
     return bool(dependency and version and conclusion)
 
 
-def _external_docs_section_lines(section: str):
-    in_fence = False
-    for line in section.splitlines():
-        if _MARKDOWN_CODE_FENCE_RE.match(line):
-            in_fence = not in_fence
-            continue
-        if in_fence:
-            continue
-        yield line
-
-
 def _has_external_docs_inventory(content: str) -> bool:
-    match = _EXTERNAL_DOCS_RE.search(content)
-    if not match:
+    section_start = None
+    for line, _, end in _unfenced_markdown_lines(content):
+        if _EXTERNAL_DOCS_RE.match(line):
+            section_start = end
+            break
+    if section_start is None:
         return False
-    next_heading = _H2_RE.search(content, match.end())
-    section = content[match.end(): next_heading.start() if next_heading else len(content)]
-    for line in _external_docs_section_lines(section):
+
+    for line, start, _ in _unfenced_markdown_lines(content):
+        if start < section_start:
+            continue
+        if _H2_RE.match(line):
+            break
         stripped = line.strip()
         if stripped and _is_external_docs_inventory_row(stripped):
             return True
@@ -222,6 +249,14 @@ _PLAN_TASK_FIELD_RE = re.compile(
 )
 
 
+def _plan_task_starts(content: str) -> list[int]:
+    return [
+        start
+        for line, start, _ in _unfenced_markdown_lines(content)
+        if _PLAN_TASK_RE.match(line)
+    ]
+
+
 def _plan_task_field_body(task_body: str, field: str) -> str:
     field_re = re.compile(rf"^{re.escape(field)}:[ \t]*(.*)$", re.MULTILINE)
     match = field_re.search(task_body)
@@ -234,7 +269,7 @@ def _plan_task_field_body(task_body: str, field: str) -> str:
 
 def _plan_tasks_missing_code(content: str) -> bool:
     """True if any TDD-applicable PLAN-TASK has no fenced code block in its Skeleton field."""
-    starts = [m.start() for m in _PLAN_TASK_RE.finditer(content)]
+    starts = _plan_task_starts(content)
     if not starts:
         return False
     bounds = starts + [len(content)]
@@ -291,7 +326,7 @@ def check_quality_gate(
         # Check 5 (PLAN, standard tier): TDD-applicable tasks must carry a code block.
         from tools.workflow_cli.models import TierBase
         if stage == Stage.PLAN and tier.base == TierBase.STANDARD:
-            if not _PLAN_TASK_RE.search(artifact_content):
+            if not _plan_task_starts(artifact_content):
                 issues.append(
                     "PLAN is missing '### PLAN-TASK-*' sections; standard tier requires "
                     "machine-parseable executable anchors."

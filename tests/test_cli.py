@@ -630,6 +630,22 @@ class TestGateQualityReadiness:
             invoke(["stage-ready", "--work-id", work_id, "--stage", "raw_requirement"], base_path=tmp)
             invoke(["gate-quality", "--work-id", work_id, "--stage", "raw_requirement"], base_path=tmp)
 
+    def test_gate_quality_without_tier_lock_keeps_tier_lock_reachable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work_id = "WF-20260527-gqtl"
+            invoke(["run-start", "--work-id", work_id, "--requirement", "foo"], base_path=tmp)
+            invoke(["stage-produce", "--work-id", work_id, "--stage", "raw_requirement",
+                    "--content", "real content"], base_path=tmp)
+            invoke(["stage-ready", "--work-id", work_id, "--stage", "raw_requirement"], base_path=tmp)
+
+            invoke(["gate-quality", "--work-id", work_id, "--stage", "raw_requirement"],
+                   base_path=tmp, expect_exit=3)
+
+            record = load_record(tmp, work_id)
+            assert record.status == RunStatus.ACTIVE_STAGE_DRAFT
+            invoke(["tier-lock", "--work-id", work_id, "--base", "standard", "--confirm"],
+                   base_path=tmp)
+
     def test_gate_quality_refuses_wrong_stage_or_stale_version(self):
         with tempfile.TemporaryDirectory() as tmp:
             work_id = "WF-20260527-gqst"
@@ -1220,6 +1236,20 @@ class TestReviewCheckpoint:
             record = load_record(tmp, work_id)
             assert record.status == RunStatus.CHECKPOINT_REVIEW
             marker = Path(tmp) / ".req-to-plan" / work_id / "reviews" / "raw_requirement-checkpoint-review-v1.md"
+            assert marker.exists()
+
+    def test_review_checkpoint_recreates_missing_marker_in_open_review(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work_id = "WF-20260527-rcrb"
+            self._to_ready(tmp, work_id)
+            invoke(["review-checkpoint", "--work-id", work_id, "--stage", "raw_requirement"], base_path=tmp)
+            marker = Path(tmp) / ".req-to-plan" / work_id / "reviews" / "raw_requirement-checkpoint-review-v1.md"
+            marker.unlink()
+
+            invoke(["review-checkpoint", "--work-id", work_id, "--stage", "raw_requirement"], base_path=tmp)
+
+            record = load_record(tmp, work_id)
+            assert record.status == RunStatus.CHECKPOINT_REVIEW
             assert marker.exists()
 
     def test_review_checkpoint_wrong_state(self):

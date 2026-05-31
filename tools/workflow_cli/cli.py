@@ -651,6 +651,9 @@ def _cmd_gate_quality(args):
     )
 
     if not result.passed:
+        if record.tier_locked is None:
+            print_and_exit(format_gate_result(result, gate_type="quality-gate"), result.exit_code)
+
         record = update_run_status(record, RunStatus.QUALITY_GATE_FAILED)
         update_resume_context(
             record,
@@ -1061,11 +1064,14 @@ def _cmd_review_checkpoint(args):
     record, mgr, run_dir = _load_run(args.work_id, args.base_path)
     stage = _parse_stage(args.stage)
 
-    if record.status != RunStatus.READY_FOR_CHECKPOINT_REVIEW:
+    if record.status not in {
+        RunStatus.READY_FOR_CHECKPOINT_REVIEW,
+        RunStatus.CHECKPOINT_REVIEW,
+    }:
         print_and_exit(
             format_error(
                 f"Cannot review-checkpoint in status {record.status.value!r}; "
-                "must be ready_for_checkpoint_review",
+                "must be ready_for_checkpoint_review or checkpoint_review",
                 exit_code=EXIT_CONFLICT,
             ),
             EXIT_CONFLICT,
@@ -1111,7 +1117,8 @@ def _cmd_review_checkpoint(args):
         encoding="utf-8",
     )
 
-    record = update_run_status(record, RunStatus.CHECKPOINT_REVIEW)
+    if record.status == RunStatus.READY_FOR_CHECKPOINT_REVIEW:
+        record = update_run_status(record, RunStatus.CHECKPOINT_REVIEW)
     update_resume_context(
         record,
         last_operation=f"review_checkpoint_{stage.value}",
