@@ -198,6 +198,47 @@ Suggested template:
 |---|---|---|---|---|---|
 ```
 
+## PLAN Task Schema
+
+Purpose: define machine-parseable structure for PLAN tasks to enable automated validation, traceability, and executor adaptation.
+
+Each PLAN task must follow this schema structure:
+
+````markdown
+### PLAN-TASK-001: <title>
+
+Spec References: SPEC-...
+
+Change Type: add | modify | remove
+
+TDD Applicable: yes | no
+
+Files: <Create/Modify + path list>
+
+Skeleton:
+  ```<lang>
+  <interface signature or failing-test skeleton>
+  ```
+
+Steps:
+- [ ] red: ...
+- [ ] green: ...
+
+Verification: ...
+````
+
+Machine-parsing rules:
+
+- Task headings match regex `^### PLAN-TASK-\d+` (followed by colon, space, and title text).
+- `Change Type` is one of: `add`, `modify`, `remove`, `preserve`, or `no-op`.
+- `TDD Applicable` is `yes` or `no` (case-insensitive).
+- When `TDD Applicable: yes`, the task MUST include at least one fenced code block under `Skeleton` section.
+- Steps use checkbox format `- [ ]` (unchecked) or `- [x]` (checked).
+- `Skeleton` fenced code blocks begin with triple backticks and a language specifier (e.g., `python`, `typescript`, `bash`).
+- The outer fence (shown above) uses four backticks to allow inner triple-backtick code blocks to render correctly in markdown.
+
+Human readers see the schema as part of the document structure. Automation scans for PLAN-TASK-NN headings, extracts metadata and code skeletons, and validates coverage against SPEC contracts and traceability tables.
+
 ## TDD Decomposition
 
 Purpose: turn testable SPEC contracts into test-first execution steps where appropriate.
