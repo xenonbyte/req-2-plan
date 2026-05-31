@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import re
+import shlex
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -156,6 +157,44 @@ def _run_cli(args_list: list[str], base_path: Path) -> int:
         return int(code) if isinstance(code, int) else (1 if code else 0)
 
 
+def _shell_join(parts: list[str | Path]) -> str:
+    return " ".join(shlex.quote(str(part)) for part in parts)
+
+
+def _repo_root() -> Path:
+    return Path(__file__).resolve().parents[2]
+
+
+def _workflow_cli_command(base_path: Path, args_list: list[str]) -> str:
+    return _shell_join(
+        [
+            "env",
+            f"PYTHONPATH={_repo_root()}",
+            "python3",
+            "-m",
+            "tools.workflow_cli",
+            "--base-path",
+            base_path,
+            *args_list,
+        ]
+    )
+
+
+def _tier_lock_command(base_path: Path, work_id: str, record) -> str:
+    estimate = getattr(record, "tier_estimate", None)
+    base = estimate.base.value if estimate is not None else "light"
+    modifiers = (
+        sorted(m.value for m in estimate.modifiers)
+        if estimate is not None
+        else []
+    )
+    args = ["tier-lock", "--work-id", work_id, "--base", base]
+    if modifiers:
+        args.extend(["--modifiers", ",".join(modifiers)])
+    args.append("--confirm")
+    return _workflow_cli_command(base_path, args)
+
+
 # ---------------------------------------------------------------------------
 # Subcommand handlers
 # ---------------------------------------------------------------------------
@@ -223,7 +262,7 @@ def _cmd_continue(ns: argparse.Namespace, base_path: Path) -> None:
         if s == RunStatus.ACTIVE_STAGE_DRAFT:
             if record.tier_locked is None:
                 print(f"stop: tier_not_locked\nstage: {stage}\n"
-                      f"next: tier-lock --work-id {work_id} --base <light|standard> --confirm\n")
+                      f"next: {_tier_lock_command(base_path, work_id, record)}\n")
                 sys.exit(0)
             aa = get_active_artifact(record, record.current_stage)
             try:
@@ -235,8 +274,13 @@ def _cmd_continue(ns: argparse.Namespace, base_path: Path) -> None:
                       f"next: produce {stage} content\n")
                 sys.exit(0)
             if aa.status != "ready":
+                ready_cmd = _workflow_cli_command(
+                    base_path,
+                    ["stage-ready", "--work-id", work_id, "--stage", stage],
+                )
                 print(f"stop: needs_ready\nstage: {stage}\n"
-                      f"next: review the artifact, then stage-ready --work-id {work_id} --stage {stage}\n")
+                      "next: review the artifact, then "
+                      f"{ready_cmd}\n")
                 sys.exit(0)
             code = _run_cli(["gate-quality", "--work-id", work_id, "--stage", stage], base_path)
             if code != 0 and manager.load().status == RunStatus.ACTIVE_STAGE_DRAFT:
@@ -251,17 +295,46 @@ def _cmd_continue(ns: argparse.Namespace, base_path: Path) -> None:
             code = _run_cli(["review-checkpoint", "--work-id", work_id, "--stage", stage], base_path)
             if code != 0:
                 sys.exit(code)
+            approve_cmd = _workflow_cli_command(
+                base_path,
+                [
+                    "checkpoint-decide",
+                    "--work-id", work_id,
+                    "--stage", stage,
+                    "--decision", "approved",
+                    "--confirm",
+                ],
+            )
+            changes_cmd = _workflow_cli_command(
+                base_path,
+                [
+                    "checkpoint-decide",
+                    "--work-id", work_id,
+                    "--stage", stage,
+                    "--decision", "changes_requested",
+                ],
+            )
             print(f"stop: needs_human_approval\nstage: {stage}\n"
-                  f"next: checkpoint-decide --work-id {work_id} --stage {stage} "
-                  "--decision approved --confirm\n"
-                  f"alt: checkpoint-decide --work-id {work_id} --stage {stage} "
-                  "--decision changes_requested\n")
+                  "next: "
+                  f"{approve_cmd}\n"
+                  "alt: "
+                  f"{changes_cmd}\n")
             sys.exit(0)
 
         if s == RunStatus.CHECKPOINT_REVIEW:
+            approve_cmd = _workflow_cli_command(
+                base_path,
+                [
+                    "checkpoint-decide",
+                    "--work-id", work_id,
+                    "--stage", stage,
+                    "--decision", "approved",
+                    "--confirm",
+                ],
+            )
             print(f"stop: needs_human_approval\nstage: {stage}\n"
-                  f"next: checkpoint-decide --work-id {work_id} --stage {stage} "
-                  "--decision approved --confirm\n")
+                  "next: "
+                  f"{approve_cmd}\n")
             sys.exit(0)
 
         if s == RunStatus.CHECKPOINT_APPROVED:
@@ -278,20 +351,35 @@ def _cmd_continue(ns: argparse.Namespace, base_path: Path) -> None:
         if s == RunStatus.NEXT_STAGE:
             code = _run_cli(["gate-entry", "--work-id", work_id, "--stage", stage], base_path)
             if code != 0:
+                retry_cmd = _workflow_cli_command(
+                    base_path,
+                    ["gate-entry", "--work-id", work_id, "--stage", stage],
+                )
                 print(f"stop: entry_gate_failed\nstage: {stage}\n"
-                      f"next: repair upstream and rerun gate-entry --work-id {work_id} --stage {stage}\n")
+                      "next: repair upstream and rerun "
+                      f"{retry_cmd}\n")
                 sys.exit(code)
             print(f"stop: entered_stage\nstage: {stage}\nnext: produce {stage} content\n")
             sys.exit(0)
 
         if s == RunStatus.ENTRY_GATE_FAILED:
+            retry_cmd = _workflow_cli_command(
+                base_path,
+                ["gate-entry", "--work-id", work_id, "--stage", stage],
+            )
             print(f"stop: entry_gate_failed\nstage: {stage}\n"
-                  f"next: repair upstream checkpoints, then gate-entry --work-id {work_id} --stage {stage}\n")
+                  "next: repair upstream checkpoints, then "
+                  f"{retry_cmd}\n")
             sys.exit(0)
 
         if s in (RunStatus.QUALITY_GATE_FAILED, RunStatus.CHECKPOINT_CHANGES_REQUESTED):
+            update_cmd = _workflow_cli_command(
+                base_path,
+                ["stage-update", "--work-id", work_id, "--stage", stage],
+            )
             print(f"stop: needs_repair\nstatus: {s.value}\nstage: {stage}\n"
-                  f"next: address the issue, then stage-update --work-id {work_id} --stage {stage}\n")
+                  "next: address the issue, then "
+                  f"{update_cmd}\n")
             sys.exit(0)
 
         # Fallback: read-only resume context.
@@ -344,6 +432,21 @@ def _cmd_reopen(ns: argparse.Namespace, base_path: Path) -> None:
     sys.exit(exit_code)
 
 
+def _cmd_tier_lock(ns: argparse.Namespace, base_path: Path) -> None:
+    args = [
+        "tier-lock",
+        "--work-id", ns.work_id,
+        "--base", ns.base,
+    ]
+    if ns.modifiers:
+        args.extend(["--modifiers", ns.modifiers])
+    if ns.override_floor:
+        args.append("--override-floor")
+    if ns.confirm:
+        args.append("--confirm")
+    sys.exit(_run_cli(args, base_path))
+
+
 # ---------------------------------------------------------------------------
 # Argument parser
 # ---------------------------------------------------------------------------
@@ -370,6 +473,13 @@ def _build_parser() -> argparse.ArgumentParser:
     p_reopen.add_argument("--stage", required=True)
     p_reopen.add_argument("--reason", required=True)
 
+    p_tier_lock = sub.add_parser("tier-lock")
+    p_tier_lock.add_argument("--work-id", dest="work_id", required=True)
+    p_tier_lock.add_argument("--base", required=True, choices=["light", "standard"])
+    p_tier_lock.add_argument("--modifiers", default=None)
+    p_tier_lock.add_argument("--override-floor", action="store_true")
+    p_tier_lock.add_argument("--confirm", action="store_true")
+
     return parser
 
 
@@ -390,6 +500,7 @@ def main(args: list[str] | None = None, base_path: Path | None = None) -> None:
         "status": _cmd_status,
         "switch": _cmd_switch,
         "reopen": _cmd_reopen,
+        "tier-lock": _cmd_tier_lock,
     }
     handlers[ns.subcommand](ns, bp)
     sys.exit(0)

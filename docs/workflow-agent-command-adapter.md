@@ -12,7 +12,7 @@ The dashed shortcuts in this document (`r2p-*`) are daily session shortcuts that
 
 This document covers:
 
-- The five public project shortcut commands.
+- The six public project shortcut commands.
 - Active run and workspace pointer semantics.
 - Automatic `work-id` generation.
 - Multi-run start and switch behavior.
@@ -123,7 +123,7 @@ Rules:
 - If the generated ID already exists, append a stable suffix such as `-2` or a short hash.
 - Store artifacts under `.req-to-plan/<work-id>/`.
 
-Only `r2p-switch` accepts an explicit `--work-id`. `r2p-start` creates a new `work-id` internally.
+Only `r2p-switch` and `r2p-tier-lock` accept an explicit `--work-id`. `r2p-start` creates a new `work-id` internally.
 
 ## Public Project Shortcuts
 
@@ -132,12 +132,13 @@ The public command set is intentionally small:
 ```text
 r2p-start [--separate] "<raw requirement>"
 r2p-continue
+r2p-tier-lock --work-id <id> --base <light|standard> --confirm
 r2p-status [--all]
 r2p-switch --work-id <id>
 r2p-reopen --from <work-id> --stage <stage> --reason "<short>"
 ```
 
-`r2p-reopen` maps to `CMD-RUN-REOPEN` and creates a new lineage run from a closed source run; it does not modify the source run.
+`r2p-reopen` maps to `CMD-RUN-REOPEN` and creates a new lineage run from a closed source run; it does not modify the source run. `r2p-tier-lock` maps to `CMD-TIER-LOCK` so the first `r2p-continue` stop after a fresh start emits an installed, invocable command.
 
 Project shortcuts compose internal `CMD-*` command intents, but they must preserve all authority, confirmation, stop, and state-eligibility rules in `workflow-command-surface.md`.
 
@@ -204,10 +205,10 @@ Behavior:
 - Loads `run.md`, active artifact, `Resume Context`, open routes, and stale/superseded markers.
 - If the selected run is open, inspects the next allowed operation.
 - May compose only safe unambiguous operations that do not create semantic stage content, grant approval, choose route ownership, or invent confirmation evidence.
-- In the local concrete wrapper, safe composition is intentionally narrow: it delegates `run resume` and `run close` when those are the next valid operation, and otherwise prints the next internal `workflow ...` command for the operator or agent to run explicitly.
+- In the local concrete wrapper, safe composition is intentionally narrow: it delegates `run resume` and `run close` when those are the next valid operation, and otherwise prints the next explicit command for the operator or agent to run.
 - May close only by composing `CMD-RUN-CLOSE` after an approved PLAN Checkpoint, no open route, and no stale or superseded final references.
 - Stops whenever user confirmation, checkpoint approval, route ownership, upstream repair, ambiguous state, or stale input is required.
-- When the tier is unlocked, surfaces `workflow tier-lock` as the next required command instead of advancing the stage.
+- When the tier is unlocked, surfaces `r2p-tier-lock` as the next required command instead of advancing the stage.
 - When Risk Discovery or DESIGN has surfaced modifier candidates that are not yet recorded in the locked tier, surfaces `workflow tier-escalate` with the candidate modifier and reason.
 
 If the selected run is terminal:
@@ -226,6 +227,18 @@ Forbidden:
 - Do not bypass Quality Gates or checkpoint reviews.
 - Do not write route records into a closed source run.
 - Do not run implementation execution.
+
+### `r2p-tier-lock --work-id <id> --base <light|standard> --confirm`
+
+Locks the complexity tier for the selected run by delegating to `CMD-TIER-LOCK`.
+
+Behavior:
+
+- Requires an explicit `--work-id`.
+- Requires `--confirm`, preserving the underlying tier-lock confirmation requirement.
+- Accepts the same base tier values as the concrete CLI: `light` or `standard`.
+- May pass through optional tier modifiers and floor override flags supported by the concrete CLI.
+- Does not advance the workflow stage; resume with `r2p-continue` after a successful lock.
 
 ### `r2p-status [--all]`
 

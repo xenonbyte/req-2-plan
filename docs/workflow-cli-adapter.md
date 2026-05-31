@@ -79,12 +79,13 @@ This repository also exposes optional project-level shortcut wrappers:
 ```text
 r2p-start [--separate] "<raw requirement>"
 r2p-continue
+r2p-tier-lock --work-id <id> --base <light|standard> --confirm
 r2p-status [--all]
 r2p-switch --work-id <id>
 r2p-reopen --from <work-id> --stage <stage>
 ```
 
-These wrappers are concrete carrier aliases for the shortcut surface defined in `docs/workflow-agent-command-adapter.md`. Four of these (`start`, `continue`, `status`, `switch`) compose existing requirement-to-PLAN `CMD-*` intents; `r2p-reopen` maps to `CMD-RUN-REOPEN`. None of these wrappers add workflow authority.
+These wrappers are concrete carrier aliases for the shortcut surface defined in `docs/workflow-agent-command-adapter.md`. The wrappers compose existing requirement-to-PLAN `CMD-*` intents; `r2p-reopen` maps to `CMD-RUN-REOPEN`, and `r2p-tier-lock` maps to `CMD-TIER-LOCK`. None of these wrappers add workflow authority.
 
 Implementation binding:
 
@@ -92,6 +93,7 @@ Implementation binding:
 |---|---|
 | `tools/r2p-start` | `python3 -m tools.workflow_cli.agent_shortcuts start` |
 | `tools/r2p-continue` | `python3 -m tools.workflow_cli.agent_shortcuts continue` |
+| `tools/r2p-tier-lock` | `python3 -m tools.workflow_cli.agent_shortcuts tier-lock` |
 | `tools/r2p-status` | `python3 -m tools.workflow_cli.agent_shortcuts status` |
 | `tools/r2p-switch` | `python3 -m tools.workflow_cli.agent_shortcuts switch` |
 | `tools/r2p-reopen` | `python3 -m tools.workflow_cli.agent_shortcuts reopen` |

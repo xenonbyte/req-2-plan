@@ -22,7 +22,7 @@ Use `workflow-execution-guide.md` when operating a workflow run, resuming from a
 Use `workflow-operation-surface.md` when designing or reviewing operation entry semantics for commands, tools, skills, APIs, or UI actions.
 Use `workflow-command-surface.md` when mapping operation semantics into carrier-neutral command intents before designing concrete command syntax.
 Use `workflow-cli-adapter.md` when designing a concrete CLI carrier for those command intents.
-Use `workflow-agent-command-adapter.md` when exposing the workflow to agents as the compact project shortcuts `r2p-start`, `r2p-continue`, `r2p-status`, `r2p-switch`, and `r2p-reopen`.
+Use `workflow-agent-command-adapter.md` when exposing the workflow to agents as the compact project shortcuts `r2p-start`, `r2p-continue`, `r2p-tier-lock`, `r2p-status`, `r2p-switch`, and `r2p-reopen`.
 Use `workflow-operator-runbook.md` when operating the local CLI end to end from raw requirement through PLAN closure.
 
 ## Document Map

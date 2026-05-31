@@ -1,0 +1,4 @@
+name = "r2p-tier-lock"
+description = "Lock the complexity tier for an active requirement-to-PLAN workflow run"
+command = "{{R2P_BIN_DIR}}/r2p-tier-lock"
+version = "{{R2P_VERSION}}"

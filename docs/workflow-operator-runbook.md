@@ -249,12 +249,13 @@ For agent-oriented operation, the repository also exposes:
 ```text
 r2p-start "<raw requirement>"
 r2p-continue
+r2p-tier-lock --work-id <work-id> --base <light|standard> --confirm
 r2p-status [--all]
 r2p-switch --work-id <work-id>
 r2p-reopen --from <work-id> --stage <stage> --reason "<short>"
 ```
 
-These shortcuts are intentionally small. `r2p-continue` may perform safe `run resume` or `run close` delegation, but it stops and prints the next internal `workflow ...` command when stage content, Quality Gate readiness, review merge, confirmation, checkpoint decision, route repair, or re-import work is required.
+These shortcuts are intentionally small. `r2p-continue` may perform safe `run resume` or `run close` delegation, but it stops and prints the next explicit command when stage content, tier locking, Quality Gate readiness, review merge, confirmation, checkpoint decision, route repair, or re-import work is required.
 
 ## Close The Run
 

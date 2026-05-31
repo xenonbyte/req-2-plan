@@ -733,6 +733,10 @@ def _resolve_content(args) -> str:
 def _cmd_stage_produce(args):
     record, mgr, run_dir = _load_run(args.work_id, args.base_path)
     stage = _parse_stage(args.stage)
+    repair_state = record.status in (
+        RunStatus.CHECKPOINT_CHANGES_REQUESTED,
+        RunStatus.QUALITY_GATE_FAILED,
+    )
 
     if record.status in (RunStatus.NEXT_STAGE, RunStatus.ENTRY_GATE_FAILED):
         next_step = "gate-entry first to enter the stage draft"
@@ -763,7 +767,8 @@ def _cmd_stage_produce(args):
         record.bundle_authorizations,
     )
     if not entry_result.passed:
-        record = update_run_status(record, RunStatus.ENTRY_GATE_FAILED)
+        if not repair_state:
+            record = update_run_status(record, RunStatus.ENTRY_GATE_FAILED)
         update_resume_context(
             record,
             last_operation=f"entry_gate_failed_{stage.value}",
@@ -780,10 +785,6 @@ def _cmd_stage_produce(args):
 
     am = ArtifactManager(run_dir)
     artifact_file = STAGE_ARTIFACT_MAP[stage]
-    repair_state = record.status in (
-        RunStatus.CHECKPOINT_CHANGES_REQUESTED,
-        RunStatus.QUALITY_GATE_FAILED,
-    )
     try:
         if repair_state:
             path = am.stage_update(stage, content)
@@ -899,6 +900,16 @@ def _cmd_stage_update(args):
 def _cmd_stage_ready(args):
     record, mgr, run_dir = _load_run(args.work_id, args.base_path)
     stage = _parse_stage(args.stage)
+
+    if record.status == RunStatus.CHECKPOINT_APPROVED:
+        print_and_exit(
+            format_error(
+                "Cannot mark artifacts ready after checkpoint approval; "
+                "use stage-advance or run-close",
+                exit_code=EXIT_CONFLICT,
+            ),
+            EXIT_CONFLICT,
+        )
 
     am = ArtifactManager(run_dir)
     try:

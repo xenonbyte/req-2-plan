@@ -517,6 +517,23 @@ class TestPlanCodeBlockGate(unittest.TestCase):
             self.assertFalse(r.passed)
             self.assertEqual(r.exit_code, 3)
 
+    def test_standard_plan_without_plan_task_heading_fails(self):
+        import tempfile
+        from pathlib import Path
+        plan = (
+            "# PLAN\n\n"
+            "### Task 1: do thing\n"
+            "TDD Applicable: yes\n"
+            "Skeleton:\n"
+            "(prose only)\n"
+            "Steps:\n- [ ] go\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            r = self.check(Path(tmp), self.Stage.PLAN, self.standard, [], plan)
+            self.assertFalse(r.passed)
+            self.assertEqual(r.exit_code, 3)
+            self.assertTrue(any("PLAN-TASK" in issue for issue in r.issues))
+
     def test_standard_plan_code_block_outside_skeleton_fails(self):
         import tempfile
         from pathlib import Path

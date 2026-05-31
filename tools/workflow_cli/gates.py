@@ -291,7 +291,12 @@ def check_quality_gate(
         # Check 5 (PLAN, standard tier): TDD-applicable tasks must carry a code block.
         from tools.workflow_cli.models import TierBase
         if stage == Stage.PLAN and tier.base == TierBase.STANDARD:
-            if _plan_tasks_missing_code(artifact_content):
+            if not _PLAN_TASK_RE.search(artifact_content):
+                issues.append(
+                    "PLAN is missing '### PLAN-TASK-*' sections; standard tier requires "
+                    "machine-parseable executable anchors."
+                )
+            elif _plan_tasks_missing_code(artifact_content):
                 issues.append(
                     "PLAN has a 'TDD Applicable: yes' task with no fenced code block; "
                     "add a Skeleton code block (standard tier requires executable anchors)."

@@ -705,6 +705,28 @@ class TestStageReady:
             text = artifact.read_text()
             assert "r2p_status: ready" in text
 
+    def test_refuses_after_checkpoint_approval_without_resetting_artifact(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work_id = "WF-20260527-ready-approved"
+            invoke(["run-start", "--work-id", work_id, "--requirement", "foo"], base_path=tmp)
+            invoke(["tier-lock", "--work-id", work_id, "--base", "light", "--confirm"], base_path=tmp)
+            invoke(["stage-produce", "--work-id", work_id, "--stage", "raw_requirement",
+                    "--content", "real"], base_path=tmp)
+            invoke(["stage-ready", "--work-id", work_id, "--stage", "raw_requirement"], base_path=tmp)
+            invoke(["gate-quality", "--work-id", work_id, "--stage", "raw_requirement"], base_path=tmp)
+            invoke(["review-checkpoint", "--work-id", work_id, "--stage", "raw_requirement"],
+                   base_path=tmp)
+            invoke(["checkpoint-decide", "--work-id", work_id, "--stage", "raw_requirement",
+                    "--decision", "approved", "--confirm"], base_path=tmp)
+
+            invoke(["stage-ready", "--work-id", work_id, "--stage", "raw_requirement"],
+                   base_path=tmp, expect_exit=6)
+
+            record = load_record(tmp, work_id)
+            assert record.status == RunStatus.CHECKPOINT_APPROVED
+            assert record.active_artifacts[0].status == "approved"
+            invoke(["stage-advance", "--work-id", work_id], base_path=tmp)
+
 
 # ---------------------------------------------------------------------------
 # install_cli
@@ -974,6 +996,38 @@ class TestRepairLoops:
             aa = get_active_artifact(record, Stage.RAW_REQUIREMENT)
             assert aa.version == 2
             assert aa.status == "draft"
+
+    def test_stage_produce_returns_entry_gate_failure_from_quality_failed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work_id = "WF-20260527-rpegq"
+            invoke(["run-start", "--work-id", work_id, "--requirement", "foo"], base_path=tmp)
+            record = load_record(tmp, work_id)
+            record.current_stage = Stage.RISK_DISCOVERY
+            record.status = RunStatus.QUALITY_GATE_FAILED
+            save_record(tmp, record)
+
+            invoke(["stage-produce", "--work-id", work_id, "--stage", "risk_discovery",
+                    "--content", "repaired risk discovery"],
+                   base_path=tmp, expect_exit=3)
+
+            record = load_record(tmp, work_id)
+            assert record.status == RunStatus.QUALITY_GATE_FAILED
+
+    def test_stage_produce_returns_entry_gate_failure_from_changes_requested(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work_id = "WF-20260527-rpegc"
+            invoke(["run-start", "--work-id", work_id, "--requirement", "foo"], base_path=tmp)
+            record = load_record(tmp, work_id)
+            record.current_stage = Stage.RISK_DISCOVERY
+            record.status = RunStatus.CHECKPOINT_CHANGES_REQUESTED
+            save_record(tmp, record)
+
+            invoke(["stage-produce", "--work-id", work_id, "--stage", "risk_discovery",
+                    "--content", "repaired risk discovery"],
+                   base_path=tmp, expect_exit=3)
+
+            record = load_record(tmp, work_id)
+            assert record.status == RunStatus.CHECKPOINT_CHANGES_REQUESTED
 
 
 # ---------------------------------------------------------------------------

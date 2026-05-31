@@ -15,6 +15,7 @@ Run each via Bash using the scripts in `{{R2P_BIN_DIR}}`:
 |---|---|
 | `{{R2P_BIN_DIR}}/r2p-start [--separate] "<requirement>"` | Start a new workflow run |
 | `{{R2P_BIN_DIR}}/r2p-continue` | Continue the active run |
+| `{{R2P_BIN_DIR}}/r2p-tier-lock --work-id <id> --base <light\|standard> --confirm` | Lock the tier for a run |
 | `{{R2P_BIN_DIR}}/r2p-status [--all]` | Inspect run state (read-only) |
 | `{{R2P_BIN_DIR}}/r2p-switch --work-id <id>` | Switch active run pointer |
 | `{{R2P_BIN_DIR}}/r2p-reopen --from <work-id> --stage <stage> --reason "<text>"` | Reopen a closed run |
@@ -23,7 +24,8 @@ Run each via Bash using the scripts in `{{R2P_BIN_DIR}}`:
 
 1. `r2p-start "<requirement>"` — start a new run
 2. `r2p-continue` — repeatedly; runs safe automatic steps, stops and suggests the next command when a human action is needed
-   - Stops at: tier not locked, needs stage artifact content, needs stage ready mark (you run `stage-ready`), needs human checkpoint approval (you run `checkpoint-decide`), entry gate failed, needs repair (Quality Gate failed or changes requested)
+   - Stops at: tier not locked, needs stage artifact content, needs stage ready mark, needs human checkpoint approval, entry gate failed, needs repair (Quality Gate failed or changes requested)
+   - When stopped, run the printed `next:` command exactly; if an `alt:` command is shown, use it only when that alternate decision is intended
    - Auto-runs: eligible entry gates, eligible Quality Gates, opens checkpoint review (`review-checkpoint`)
    - Auto-advances: moves to the next stage after non-PLAN checkpoint approval, then runs that stage's entry gate
    - Auto-closes: closes the run when the PLAN checkpoint is approved and no open routes remain

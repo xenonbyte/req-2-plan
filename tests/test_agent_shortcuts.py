@@ -295,6 +295,40 @@ class TestCmdContinue:
 
 
 # ---------------------------------------------------------------------------
+# TestCmdTierLock
+# ---------------------------------------------------------------------------
+
+
+class TestCmdTierLock:
+    def test_tier_lock_delegates_to_workflow_cli(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            with patch(
+                "tools.workflow_cli.agent_shortcuts._run_cli",
+                return_value=0,
+            ) as run_cli:
+                _invoke(
+                    [
+                        "tier-lock",
+                        "--work-id", "WF-20260531-tier-lock",
+                        "--base", "standard",
+                        "--confirm",
+                    ],
+                    base,
+                )
+
+            run_cli.assert_called_once_with(
+                [
+                    "tier-lock",
+                    "--work-id", "WF-20260531-tier-lock",
+                    "--base", "standard",
+                    "--confirm",
+                ],
+                base,
+            )
+
+
+# ---------------------------------------------------------------------------
 # TestCmdStatus
 # ---------------------------------------------------------------------------
 
@@ -369,7 +403,13 @@ class TestContinueDriver:
                 A.main(["continue"], base_path=base)
             out = capsys.readouterr().out
             assert "stage-ready" in out
-            assert f"stage-ready --work-id {pointer['selected_work_id']} --stage raw_requirement" in out
+            assert "PYTHONPATH=" in out
+            assert "python3 -m tools.workflow_cli" in out
+            assert f"--base-path {base}" in out
+            assert (
+                f"stage-ready --work-id {pointer['selected_work_id']} "
+                "--stage raw_requirement"
+            ) in out
 
     def test_continue_new_stage_without_artifact_asks_for_production(self, capsys):
         import tempfile
@@ -425,6 +465,9 @@ class TestContinueDriver:
                 A.main(["continue"], base_path=base)
             out = capsys.readouterr().out
             assert "needs_repair" in out
+            assert "PYTHONPATH=" in out
+            assert "python3 -m tools.workflow_cli" in out
+            assert f"--base-path {base}" in out
             assert f"stage-update --work-id {work_id} --stage raw_requirement" in out
             assert exc.value.code == 0
             record = RunStateManager(base / ".req-to-plan" / work_id).load()
@@ -438,14 +481,44 @@ class TestContinueDriver:
             base = Path(tmp)
             with pytest.raises(SystemExit):
                 A.main(["start", "Add rate limiting"], base_path=base)
+            work_id = A.read_active_pointer(base)["selected_work_id"]
             with pytest.raises(SystemExit):
                 A.main(["continue"], base_path=base)
             out = capsys.readouterr().out
             assert "tier_not_locked" in out
-            # The suggested next step must be the real workflow command, not the
-            # lifecycle `r2p` binary (which has no tier-lock subcommand).
+            # The suggested next step must be invocable without relying on the
+            # wrapper directory being present on PATH.
+            assert "PYTHONPATH=" in out
+            assert "python3 -m tools.workflow_cli" in out
+            assert f"--base-path {base}" in out
             assert "r2p tier-lock" not in out
-            assert "tier-lock --work-id" in out
+            assert "r2p-tier-lock" not in out
+            assert f"tier-lock --work-id {work_id}" in out
+            assert "<light|standard>" not in out
+
+    def test_continue_tier_not_locked_includes_required_modifiers(self, capsys):
+        import tempfile
+        from pathlib import Path
+        from tools.workflow_cli import agent_shortcuts as A
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            with pytest.raises(SystemExit):
+                A.main(["start", "Migrate database and delete production data"], base_path=base)
+            work_id = A.read_active_pointer(base)["selected_work_id"]
+
+            with pytest.raises(SystemExit):
+                A.main(["continue"], base_path=base)
+
+            out = capsys.readouterr().out
+            assert "tier_not_locked" in out
+            assert "PYTHONPATH=" in out
+            assert "python3 -m tools.workflow_cli" in out
+            assert f"--base-path {base}" in out
+            assert (
+                f"tier-lock --work-id {work_id} --base standard "
+                "--modifiers migration,safety --confirm"
+            ) in out
+            assert "r2p-tier-lock" not in out
 
     def test_continue_checkpoint_review_prints_executable_next(self, capsys):
         import tempfile
@@ -468,6 +541,9 @@ class TestContinueDriver:
 
             out = capsys.readouterr().out
             assert "needs_human_approval" in out
+            assert "PYTHONPATH=" in out
+            assert "python3 -m tools.workflow_cli" in out
+            assert f"--base-path {base}" in out
             assert (
                 f"checkpoint-decide --work-id {work_id} --stage raw_requirement "
                 "--decision approved --confirm"
@@ -497,6 +573,9 @@ class TestContinueDriver:
             out = capsys.readouterr().out
             assert exc.value.code == 2
             assert "entry_gate_failed" in out
+            assert "PYTHONPATH=" in out
+            assert "python3 -m tools.workflow_cli" in out
+            assert f"--base-path {base}" in out
             assert f"gate-entry --work-id {work_id} --stage requirement_brief" in out
 
     def test_continue_entry_gate_failed_prints_executable_retry(self, capsys):
@@ -521,4 +600,7 @@ class TestContinueDriver:
 
             out = capsys.readouterr().out
             assert "entry_gate_failed" in out
+            assert "PYTHONPATH=" in out
+            assert "python3 -m tools.workflow_cli" in out
+            assert f"--base-path {base}" in out
             assert f"gate-entry --work-id {work_id} --stage requirement_brief" in out

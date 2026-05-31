@@ -377,6 +377,7 @@ class TestInstallService:
             "r2p-start",
             "r2p-status",
             "r2p-switch",
+            "r2p-tier-lock",
         ]:
             skill = ph_root / "codex" / "skills" / command / "SKILL.md"
             assert skill.exists(), f"{command} SKILL.md should be installed for codex"
