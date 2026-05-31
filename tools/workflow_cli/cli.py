@@ -552,7 +552,7 @@ def _cmd_gate_quality(args):
     )
 
     if not result.passed:
-        record.status = RunStatus.QUALITY_GATE_FAILED
+        record = update_run_status(record, RunStatus.QUALITY_GATE_FAILED)
         update_resume_context(
             record,
             last_operation=f"quality_gate_failed_{stage.value}",
@@ -571,7 +571,7 @@ def _cmd_gate_quality(args):
             EXIT_REVIEW_REQ,
         )
 
-    record.status = RunStatus.READY_FOR_CHECKPOINT_REVIEW
+    record = update_run_status(record, RunStatus.READY_FOR_CHECKPOINT_REVIEW)
     update_resume_context(
         record,
         last_operation=f"quality_gate_passed_{stage.value}",
@@ -672,7 +672,7 @@ def _cmd_stage_produce(args):
         record.bundle_authorizations,
     )
     if not entry_result.passed:
-        record.status = RunStatus.ENTRY_GATE_FAILED
+        record = update_run_status(record, RunStatus.ENTRY_GATE_FAILED)
         update_resume_context(
             record,
             last_operation=f"entry_gate_failed_{stage.value}",
@@ -694,7 +694,7 @@ def _cmd_stage_produce(args):
         print_and_exit(format_error(str(e), exit_code=EXIT_CONFLICT), EXIT_CONFLICT)
 
     # Update run record active artifacts
-    record.status = RunStatus.ACTIVE_STAGE_DRAFT
+    record = update_run_status(record, RunStatus.ACTIVE_STAGE_DRAFT)
     artifact_file = STAGE_ARTIFACT_MAP[stage]
     upsert_active_artifact(record, stage, artifact_file, 1, "draft")
     update_resume_context(record, last_operation=f"produce_{stage.value}")

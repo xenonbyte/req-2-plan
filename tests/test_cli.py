@@ -711,3 +711,23 @@ class TestInstallCli:
         install_main(["doctor"])
         out = capsys.readouterr().out
         assert len(out.strip()) > 0
+
+
+# ---------------------------------------------------------------------------
+# State Authority Tests
+# ---------------------------------------------------------------------------
+
+
+class TestStateAuthority:
+    def test_gate_quality_uses_validated_transition(self):
+        """gate-quality must reach READY via update_run_status, not a raw write."""
+        with tempfile.TemporaryDirectory() as tmp:
+            work_id = "WF-20260527-auth"
+            invoke(["run-start", "--work-id", work_id, "--requirement", "foo"], base_path=tmp)
+            invoke(["tier-lock", "--work-id", work_id, "--base", "light", "--confirm"], base_path=tmp)
+            invoke(["stage-produce", "--work-id", work_id, "--stage", "raw_requirement",
+                    "--content", "Some real content here."], base_path=tmp)
+            invoke(["stage-ready", "--work-id", work_id, "--stage", "raw_requirement"], base_path=tmp)
+            invoke(["gate-quality", "--work-id", work_id, "--stage", "raw_requirement"], base_path=tmp)
+            record = load_record(tmp, work_id)
+            assert record.status == RunStatus.READY_FOR_CHECKPOINT_REVIEW
