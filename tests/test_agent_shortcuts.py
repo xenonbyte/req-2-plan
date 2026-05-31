@@ -319,42 +319,6 @@ class TestCmdStatus:
 
 
 # ---------------------------------------------------------------------------
-# TestCmdAdapt
-# ---------------------------------------------------------------------------
-
-
-class TestCmdAdapt:
-    def test_missing_run_record_stops_before_adapter(self, capsys):
-        with tempfile.TemporaryDirectory() as tmp:
-            base = Path(tmp)
-            work_id = "WF-20260527-missing-run"
-            run_dir = base / ".req-to-plan" / work_id
-            run_dir.mkdir(parents=True)
-            (run_dir / "07-plan.md").write_text("# Plan: WF-20260527-missing-run\n", encoding="utf-8")
-            write_active_pointer(base, work_id)
-
-            with patch("tools.workflow_cli.adapters.get_adapter") as mock_get_adapter:
-                _invoke(["adapt", "--executor", "superpowers"], base, expect_exit=7)
-
-            mock_get_adapter.assert_not_called()
-
-    def test_malformed_run_record_stops_before_adapter(self, capsys):
-        with tempfile.TemporaryDirectory() as tmp:
-            base = Path(tmp)
-            work_id = "WF-20260527-bad-run"
-            run_dir = base / ".req-to-plan" / work_id
-            run_dir.mkdir(parents=True)
-            (run_dir / "run.md").write_text("not a valid run record", encoding="utf-8")
-            (run_dir / "07-plan.md").write_text("# Plan: WF-20260527-bad-run\n", encoding="utf-8")
-            write_active_pointer(base, work_id)
-
-            with patch("tools.workflow_cli.adapters.get_adapter") as mock_get_adapter:
-                _invoke(["adapt", "--executor", "superpowers"], base, expect_exit=1)
-
-            mock_get_adapter.assert_not_called()
-
-
-# ---------------------------------------------------------------------------
 # TestCmdReopen
 # ---------------------------------------------------------------------------
 

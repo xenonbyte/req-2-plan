@@ -372,7 +372,6 @@ class TestInstallService:
         svc, manifest_root, ph_root = make_service(tmp_path)
         svc.install("codex")
         for command in [
-            "r2p-adapt",
             "r2p-continue",
             "r2p-reopen",
             "r2p-start",

@@ -156,21 +156,6 @@ class TestCommandEligibility(unittest.TestCase):
             self.is_command_allowed(self.RunStatus.NOT_STARTED, "CMD-TIER-STATUS")
         )
 
-    def test_cmd_exec_list_adapters_allowed_in_any_state(self):
-        from tools.workflow_cli.models import RunStatus
-        for status in RunStatus:
-            self.assertTrue(
-                self.is_command_allowed(status, "CMD-EXEC-LIST-ADAPTERS"),
-                f"CMD-EXEC-LIST-ADAPTERS should be allowed in {status}",
-            )
-
-    def test_cmd_exec_adapt_allowed_in_closed_at_plan_checkpoint(self):
-        self.assertTrue(
-            self.is_command_allowed(
-                self.RunStatus.CLOSED_AT_PLAN_CHECKPOINT, "CMD-EXEC-ADAPT"
-            )
-        )
-
     def test_cmd_run_reopen_allowed_in_closed_at_plan_checkpoint(self):
         self.assertTrue(
             self.is_command_allowed(

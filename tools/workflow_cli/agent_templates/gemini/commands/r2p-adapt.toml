@@ -1,4 +1,0 @@
-name = "r2p-adapt"
-description = "Generate an executor-specific plan from an approved PLAN artifact"
-command = "{{R2P_BIN_DIR}}/r2p-adapt"
-version = "{{R2P_VERSION}}"

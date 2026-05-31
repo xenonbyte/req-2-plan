@@ -327,45 +327,6 @@ def _cmd_switch(ns: argparse.Namespace, base_path: Path) -> None:
     print(f"selected_run: .req-to-plan/{work_id}/run.md\nnext: r2p-continue\n")
 
 
-def _cmd_adapt(ns: argparse.Namespace, base_path: Path) -> None:
-    pointer = read_active_pointer(base_path)
-    if not pointer:
-        print("no_selected_run: true\nnext: r2p-status --all\n")
-        sys.exit(1)
-
-    work_id = pointer["selected_work_id"]
-    run_path = base_path / ".req-to-plan" / work_id / "run.md"
-    if not run_path.exists():
-        print(f"blocked: source_run_not_found\nwork_id: {work_id}\n")
-        sys.exit(7)
-
-    from tools.workflow_cli.state import RunStateManager
-    try:
-        mgr = RunStateManager(run_path.parent)
-        record = mgr.load()
-    except Exception as e:
-        print(f"blocked: run_not_terminal\nwork_id: {work_id}\nreason: {e}\n")
-        sys.exit(1)
-
-    if not is_terminal(record.status):
-        print(f"blocked: run_not_closed\nwork_id: {work_id}\nnext: r2p-continue\n")
-        sys.exit(1)
-
-    plan_path = base_path / ".req-to-plan" / work_id / "07-plan.md"
-    output_path = base_path / ".req-to-plan" / work_id / f"{ns.executor}-plan.md"
-
-    from tools.workflow_cli.adapters import get_adapter
-    try:
-        adapter = get_adapter(ns.executor)
-    except ValueError:
-        print(f"unsupported_executor: {ns.executor}\n")
-        sys.exit(2)
-
-    result = adapter.adapt_plan(plan_path, output_path)
-    print(result)
-    print(f"output: {output_path}\n")
-
-
 def _cmd_reopen(ns: argparse.Namespace, base_path: Path) -> None:
     exit_code = _run_cli(
         [
@@ -400,9 +361,6 @@ def _build_parser() -> argparse.ArgumentParser:
     p_switch = sub.add_parser("switch")
     p_switch.add_argument("--work-id", dest="work_id", required=True)
 
-    p_adapt = sub.add_parser("adapt")
-    p_adapt.add_argument("--executor", required=True)
-
     p_reopen = sub.add_parser("reopen")
     p_reopen.add_argument("--from", dest="from_id", required=True)
     p_reopen.add_argument("--stage", required=True)
@@ -427,7 +385,6 @@ def main(args: list[str] | None = None, base_path: Path | None = None) -> None:
         "continue": _cmd_continue,
         "status": _cmd_status,
         "switch": _cmd_switch,
-        "adapt": _cmd_adapt,
         "reopen": _cmd_reopen,
     }
     handlers[ns.subcommand](ns, bp)

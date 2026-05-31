@@ -165,7 +165,6 @@ READ_ONLY_COMMANDS: set[str] = {
     "CMD-STATUS-ROUTES",
     "CMD-STATUS-ARTIFACTS",
     "CMD-TIER-STATUS",
-    "CMD-EXEC-LIST-ADAPTERS",
     "CMD-RUN-RESUME",
 }
 
@@ -268,7 +267,6 @@ ALLOWED_COMMANDS_BY_RUN_STATE: dict[RunStatus, set[str]] = {
         "CMD-TIER-STATUS",
     },
     RunStatus.CLOSED_AT_PLAN_CHECKPOINT: {
-        "CMD-EXEC-ADAPT",
         "CMD-RUN-REOPEN",
         "CMD-TIER-STATUS",
     },
