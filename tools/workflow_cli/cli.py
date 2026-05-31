@@ -26,6 +26,7 @@ from tools.workflow_cli.state import (
     upsert_active_artifact,
     update_resume_context,
     get_active_artifact,
+    add_checkpoint,
 )
 from tools.workflow_cli.artifact import ArtifactManager, write_artifact, read_artifact, get_artifact_version
 from tools.workflow_cli.gates import check_entry_gate, check_quality_gate, check_forced_subagent_review
@@ -1032,11 +1033,145 @@ def _register_stage_commands(subparsers):
     p.set_defaults(func=_cmd_stage_ready)
 
 
+def _cmd_checkpoint_decide(args):
+    record, mgr, run_dir = _load_run(args.work_id, args.base_path)
+    stage = _parse_stage(args.stage)
+
+    if record.status != RunStatus.CHECKPOINT_REVIEW:
+        print_and_exit(
+            format_error(
+                f"Cannot decide in status {record.status.value!r}; must be checkpoint_review",
+                exit_code=EXIT_CONFLICT,
+            ),
+            EXIT_CONFLICT,
+        )
+    if stage != record.current_stage:
+        print_and_exit(
+            format_error(
+                f"Stage {stage.value!r} is not the current stage {record.current_stage.value!r}",
+                exit_code=EXIT_CONFLICT,
+            ),
+            EXIT_CONFLICT,
+        )
+
+    aa = get_active_artifact(record, stage)
+    if aa is None:
+        print_and_exit(
+            format_error(f"No active artifact for stage {stage.value!r}", exit_code=EXIT_CONFLICT),
+            EXIT_CONFLICT,
+        )
+    if aa.status != "ready":
+        print_and_exit(
+            format_error(
+                f"Stage {stage.value!r} artifact must be ready before checkpoint decision",
+                exit_code=EXIT_CONFLICT,
+            ),
+            EXIT_CONFLICT,
+        )
+    version = get_artifact_version(run_dir, stage)
+    if version != aa.version:
+        print_and_exit(
+            format_error(
+                f"Active artifact version v{aa.version} does not match on-disk v{version}",
+                exit_code=EXIT_CONFLICT,
+            ),
+            EXIT_CONFLICT,
+        )
+
+    if args.decision == "changes_requested":
+        record = update_run_status(record, RunStatus.CHECKPOINT_CHANGES_REQUESTED)
+        update_resume_context(
+            record,
+            last_operation=f"changes_requested_{stage.value}",
+            next_operation="repair_stage_artifact",
+            active_item=stage.value,
+        )
+        mgr.save(record)
+        print_and_exit(
+            format_success(
+                {"work_id": str(record.work_id), "stage": stage.value, "decision": "changes_requested"},
+                message=f"Changes requested: {stage.value}",
+            ),
+            EXIT_OK,
+        )
+
+    # decision == "approved"
+    if not args.confirm:
+        print_and_exit(
+            format_error(
+                "Approval requires --confirm",
+                exit_code=EXIT_REVIEW_REQ,
+            ),
+            EXIT_REVIEW_REQ,
+        )
+
+    # Duplicate-approval guard.
+    if any(cp.stage == stage and cp.version == aa.version for cp in record.approved_checkpoints):
+        print_and_exit(
+            format_error(
+                f"Stage {stage.value!r} v{aa.version} already has an approved checkpoint",
+                exit_code=EXIT_CONFLICT,
+            ),
+            EXIT_CONFLICT,
+        )
+
+    reviews_dir = run_dir / "reviews"
+    # Precondition: checkpoint-review marker for this version must exist (GR5).
+    marker = reviews_dir / f"{stage.value}-checkpoint-review-v{aa.version}.md"
+    if not marker.exists():
+        print_and_exit(
+            format_error(
+                f"Missing checkpoint-review marker for {stage.value} v{aa.version}; "
+                "run review-checkpoint first",
+                exit_code=EXIT_REVIEW_REQ,
+            ),
+            EXIT_REVIEW_REQ,
+        )
+
+    # Forced-review guard (version-aware; subagent file required).
+    review_result = check_forced_subagent_review(stage, record.tier_locked, reviews_dir, aa.version)
+    if not review_result.passed:
+        print_and_exit(
+            format_gate_result(review_result, gate_type="subagent-review"),
+            EXIT_REVIEW_REQ,
+        )
+
+    from tools.workflow_cli.models import NEXT_STAGE_MAP
+    next_stage = NEXT_STAGE_MAP.get(stage)
+    downstream = args.downstream_authorization or (next_stage.value if next_stage else "close_workflow_run")
+    artifact_file = STAGE_ARTIFACT_MAP[stage]
+    add_checkpoint(record, stage, artifact_file, aa.version, downstream)
+    upsert_active_artifact(record, stage, artifact_file, aa.version, "approved")
+    record = update_run_status(record, RunStatus.CHECKPOINT_APPROVED)
+    update_resume_context(
+        record,
+        last_operation=f"approved_{stage.value}",
+        next_operation="stage_advance" if next_stage else "run_close",
+        active_item=stage.value,
+    )
+    mgr.save(record)
+    print_and_exit(
+        format_success(
+            {"work_id": str(record.work_id), "stage": stage.value, "decision": "approved"},
+            message=f"Checkpoint approved: {stage.value}",
+        ),
+        EXIT_OK,
+    )
+
+
 def _register_checkpoint_commands(subparsers):
     p = subparsers.add_parser("review-checkpoint", help="Open checkpoint review for a stage")
     p.add_argument("--work-id", required=True)
     p.add_argument("--stage", required=True)
     p.set_defaults(func=_cmd_review_checkpoint)
+
+    p = subparsers.add_parser("checkpoint-decide", help="Approve or request changes on a checkpoint")
+    p.add_argument("--work-id", required=True)
+    p.add_argument("--stage", required=True)
+    p.add_argument("--decision", required=True, choices=["approved", "changes_requested"])
+    p.add_argument("--confirm", action="store_true")
+    p.add_argument("--downstream-authorization", default=None)
+    p.set_defaults(func=_cmd_checkpoint_decide)
 
 
 # ---------------------------------------------------------------------------

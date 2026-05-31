@@ -1000,3 +1000,126 @@ class TestReviewCheckpoint:
                 "---\nr2p_version: 2\n---\nfoo", encoding="utf-8")
             invoke(["review-checkpoint", "--work-id", work_id, "--stage", "raw_requirement"],
                    base_path=tmp, expect_exit=6)
+
+
+# ---------------------------------------------------------------------------
+# checkpoint-decide
+# ---------------------------------------------------------------------------
+
+
+class TestCheckpointDecide:
+    def _to_review(self, tmp, work_id, base="light", modifiers=None, stage="raw_requirement"):
+        invoke(["run-start", "--work-id", work_id, "--requirement", "foo"], base_path=tmp)
+        lock = ["tier-lock", "--work-id", work_id, "--base", base, "--confirm"]
+        if modifiers:
+            lock += ["--modifiers", modifiers]
+        invoke(lock, base_path=tmp)
+        invoke(["stage-produce", "--work-id", work_id, "--stage", stage, "--content", "real"], base_path=tmp)
+        invoke(["stage-ready", "--work-id", work_id, "--stage", stage], base_path=tmp)
+        invoke(["gate-quality", "--work-id", work_id, "--stage", stage], base_path=tmp)
+        invoke(["review-checkpoint", "--work-id", work_id, "--stage", stage], base_path=tmp)
+
+    def test_approve_requires_confirm(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work_id = "WF-20260527-cd1"
+            self._to_review(tmp, work_id)
+            invoke(["checkpoint-decide", "--work-id", work_id, "--stage", "raw_requirement",
+                    "--decision", "approved"], base_path=tmp, expect_exit=5)
+
+    def test_approve_non_forced_passes_with_marker(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work_id = "WF-20260527-cd2"
+            self._to_review(tmp, work_id)
+            invoke(["checkpoint-decide", "--work-id", work_id, "--stage", "raw_requirement",
+                    "--decision", "approved", "--confirm"], base_path=tmp)
+            record = load_record(tmp, work_id)
+            assert record.status == RunStatus.CHECKPOINT_APPROVED
+            assert any(cp.stage == Stage.RAW_REQUIREMENT for cp in record.approved_checkpoints)
+
+    def test_approve_preserves_downstream_authorization(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work_id = "WF-20260527-cd2a"
+            self._to_review(tmp, work_id)
+            invoke(["checkpoint-decide", "--work-id", work_id, "--stage", "raw_requirement",
+                    "--decision", "approved", "--confirm",
+                    "--downstream-authorization", "custom_next"], base_path=tmp)
+            record = load_record(tmp, work_id)
+            checkpoint = next(cp for cp in record.approved_checkpoints if cp.stage == Stage.RAW_REQUIREMENT)
+            assert checkpoint.downstream_authorization == "custom_next"
+
+    def test_changes_requested_transitions_and_sets_resume(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work_id = "WF-20260527-cd3"
+            self._to_review(tmp, work_id)
+            invoke(["checkpoint-decide", "--work-id", work_id, "--stage", "raw_requirement",
+                    "--decision", "changes_requested"], base_path=tmp)
+            record = load_record(tmp, work_id)
+            assert record.status == RunStatus.CHECKPOINT_CHANGES_REQUESTED
+
+    def test_forced_modifier_needs_subagent_review(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work_id = "WF-20260527-cd4"
+            invoke(["run-start", "--work-id", work_id, "--requirement", "foo"], base_path=tmp)
+            invoke(["tier-lock", "--work-id", work_id, "--base", "standard",
+                    "--modifiers", "safety", "--confirm"], base_path=tmp)
+            record = load_record(tmp, work_id)
+            record.current_stage = Stage.DESIGN
+            record.status = RunStatus.CHECKPOINT_REVIEW
+            from tools.workflow_cli.models import ActiveArtifact
+            record.active_artifacts = [ActiveArtifact(
+                stage=Stage.DESIGN, artifact="05-design.md", version=1, status="ready")]
+            save_record(tmp, record)
+            run_dir = Path(tmp) / ".req-to-plan" / work_id
+            (run_dir / "05-design.md").write_text("---\nr2p_version: 1\n---\nbody", encoding="utf-8")
+            reviews = run_dir / "reviews"; reviews.mkdir(parents=True, exist_ok=True)
+            (reviews / "design-checkpoint-review-v1.md").write_text("marker", encoding="utf-8")
+            # marker alone -> exit 5 (forced needs subagent review)
+            invoke(["checkpoint-decide", "--work-id", work_id, "--stage", "design",
+                    "--decision", "approved", "--confirm"], base_path=tmp, expect_exit=5)
+            (reviews / "design-subagent-review-v1.md").write_text("findings", encoding="utf-8")
+            invoke(["checkpoint-decide", "--work-id", work_id, "--stage", "design",
+                    "--decision", "approved", "--confirm"], base_path=tmp)
+            record = load_record(tmp, work_id)
+            assert record.status == RunStatus.CHECKPOINT_APPROVED
+
+    def test_forced_modifier_gate_quality_passes_but_approve_requires_review(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work_id = "WF-20260527-cd5"
+            invoke(["run-start", "--work-id", work_id, "--requirement", "foo"], base_path=tmp)
+            invoke(["tier-lock", "--work-id", work_id, "--base", "standard",
+                    "--modifiers", "safety", "--confirm"], base_path=tmp)
+            record = load_record(tmp, work_id)
+            record.current_stage = Stage.DESIGN
+            record.status = RunStatus.ACTIVE_STAGE_DRAFT
+            from tools.workflow_cli.models import ActiveArtifact
+            record.active_artifacts = [ActiveArtifact(
+                stage=Stage.DESIGN, artifact="05-design.md", version=1, status="ready")]
+            save_record(tmp, record)
+            run_dir = Path(tmp) / ".req-to-plan" / work_id
+            (run_dir / "05-design.md").write_text("---\nr2p_version: 1\n---\nbody", encoding="utf-8")
+            invoke(["gate-quality", "--work-id", work_id, "--stage", "design"], base_path=tmp)
+            invoke(["review-checkpoint", "--work-id", work_id, "--stage", "design"], base_path=tmp)
+            invoke(["checkpoint-decide", "--work-id", work_id, "--stage", "design",
+                    "--decision", "approved", "--confirm"], base_path=tmp, expect_exit=5)
+            reviews = run_dir / "reviews"
+            (reviews / "design-subagent-review-v1.md").write_text("findings", encoding="utf-8")
+            invoke(["checkpoint-decide", "--work-id", work_id, "--stage", "design",
+                    "--decision", "approved", "--confirm"], base_path=tmp)
+
+    def test_checkpoint_decide_refuses_unready_or_stale_artifact(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work_id = "WF-20260527-cds"
+            self._to_review(tmp, work_id)
+            record = load_record(tmp, work_id)
+            record.active_artifacts[0].status = "draft"
+            save_record(tmp, record)
+            invoke(["checkpoint-decide", "--work-id", work_id, "--stage", "raw_requirement",
+                    "--decision", "changes_requested"], base_path=tmp, expect_exit=6)
+            record = load_record(tmp, work_id)
+            record.active_artifacts[0].status = "ready"
+            save_record(tmp, record)
+            run_dir = Path(tmp) / ".req-to-plan" / work_id
+            (run_dir / "00-raw-requirement.md").write_text(
+                "---\nr2p_version: 2\n---\nfoo", encoding="utf-8")
+            invoke(["checkpoint-decide", "--work-id", work_id, "--stage", "raw_requirement",
+                    "--decision", "changes_requested"], base_path=tmp, expect_exit=6)
