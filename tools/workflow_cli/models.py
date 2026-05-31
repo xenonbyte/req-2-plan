@@ -259,6 +259,7 @@ ALLOWED_COMMANDS_BY_RUN_STATE: dict[RunStatus, set[str]] = {
     },
     RunStatus.CHECKPOINT_APPROVED: {
         "CMD-RUN-CLOSE",
+        "CMD-STAGE-ADVANCE",
         "CMD-TIER-STATUS",
     },
     RunStatus.NEXT_STAGE: {

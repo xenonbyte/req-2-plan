@@ -390,5 +390,13 @@ def test_run_resume_is_read_only():
     assert "CMD-RUN-RESUME" in READ_ONLY_COMMANDS
 
 
+def test_new_command_intents_allowed_states():
+    from tools.workflow_cli.models import is_command_allowed, RunStatus
+    assert is_command_allowed(RunStatus.READY_FOR_CHECKPOINT_REVIEW, "CMD-REVIEW-CHECKPOINT")
+    assert is_command_allowed(RunStatus.CHECKPOINT_REVIEW, "CMD-CHECKPOINT-DECIDE")
+    assert is_command_allowed(RunStatus.CHECKPOINT_APPROVED, "CMD-STAGE-ADVANCE")
+    assert not is_command_allowed(RunStatus.ACTIVE_STAGE_DRAFT, "CMD-STAGE-ADVANCE")
+
+
 if __name__ == "__main__":
     unittest.main()
