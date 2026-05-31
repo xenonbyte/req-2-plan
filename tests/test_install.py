@@ -423,3 +423,84 @@ class TestInstallService:
         svc2.uninstall("claude")
         backup_dir = manifest_root / "install" / "backups" / "claude"
         assert not backup_dir.exists()
+
+
+# ---------------------------------------------------------------------------
+# Stale shared-wrapper cleanup (Part 2, Task 6)
+# ---------------------------------------------------------------------------
+
+
+def seed_stale_wrapper_in_manifests(manifest_root: Path, stale: Path, platforms) -> None:
+    """Record `stale` in each platform manifest's installed_paths, mimicking an
+    old install that managed the now-obsolete shared wrapper."""
+    from tools.workflow_cli.install import _load_manifest, _dump_manifest
+    for platform in platforms:
+        mpath = manifest_root / "install" / f"{platform}.yaml"
+        manifest = _load_manifest(mpath)
+        paths = manifest.setdefault("installed_paths", [])
+        if str(stale) not in paths:
+            paths.append(str(stale))
+        mpath.write_text(_dump_manifest(manifest), encoding="utf-8")
+
+
+def assert_no_manifest_references(manifest_root: Path, stale: Path) -> None:
+    """No installed platform manifest may list `stale` in installed_paths, and no
+    backups entry may target it."""
+    from tools.workflow_cli.install import _load_manifest
+    install_dir = manifest_root / "install"
+    for mpath in sorted(install_dir.glob("*.yaml")):
+        manifest = _load_manifest(mpath)
+        assert str(stale) not in manifest.get("installed_paths", []), (
+            f"{mpath.name} still lists stale wrapper in installed_paths"
+        )
+        for bk in manifest.get("backups", []):
+            assert str(bk.get("target")) != str(stale), (
+                f"{mpath.name} still has a backups entry targeting the stale wrapper"
+            )
+
+
+class TestStaleWrapperCleanup:
+    def test_upgrade_removes_stale_shared_wrapper_from_all_manifests(self, tmp_path):
+        svc, manifest_root, ph_root = make_service(tmp_path)
+        svc.install("claude")
+        svc.install("codex")
+        bin_dir = manifest_root / "bin"
+        stale = bin_dir / "r2p-adapt"
+        stale.write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+        seed_stale_wrapper_in_manifests(manifest_root, stale, platforms=("claude", "codex"))
+
+        # Reinstall should deterministically remove the stale wrapper and manifest refs.
+        svc.install("claude", confirm=True)
+        assert not stale.exists(), "stale r2p-adapt wrapper must be removed on upgrade"
+        assert_no_manifest_references(manifest_root, stale)
+
+    def test_uninstall_removes_stale_shared_wrapper_from_all_manifests(self, tmp_path):
+        svc, manifest_root, ph_root = make_service(tmp_path)
+        svc.install("claude")
+        svc.install("codex")
+        bin_dir = manifest_root / "bin"
+        stale = bin_dir / "r2p-adapt"
+        stale.write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+        seed_stale_wrapper_in_manifests(manifest_root, stale, platforms=("claude", "codex"))
+
+        # Uninstall must also clean obsolete managed shared wrappers even when another
+        # platform remains installed and normal uninstall would skip shared bin paths.
+        svc.uninstall("claude")
+        assert not stale.exists(), "stale r2p-adapt wrapper must be removed on uninstall"
+        assert_no_manifest_references(manifest_root, stale)
+
+    def test_stale_shared_wrapper_cleanup_preserves_unmanaged_r2p_wrapper(self, tmp_path):
+        svc, manifest_root, ph_root = make_service(tmp_path)
+        svc.install("claude")
+        svc.install("codex")
+        bin_dir = manifest_root / "bin"
+        stale = bin_dir / "r2p-adapt"
+        unmanaged = bin_dir / "r2p-local"
+        stale.write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+        unmanaged.write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+        seed_stale_wrapper_in_manifests(manifest_root, stale, platforms=("claude", "codex"))
+
+        svc.install("claude", confirm=True)
+        assert not stale.exists(), "managed stale wrapper should be removed"
+        assert unmanaged.exists(), "unmanaged r2p-* files in bin must be preserved"
+        assert_no_manifest_references(manifest_root, stale)

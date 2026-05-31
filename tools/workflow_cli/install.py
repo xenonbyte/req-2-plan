@@ -155,6 +155,10 @@ class InstallService:
             }
             manifest_path.parent.mkdir(parents=True, exist_ok=True)
             manifest_path.write_text(_dump_manifest(manifest), encoding="utf-8")
+
+            # Remove obsolete managed shared wrappers (e.g. a 0.1.2 r2p-adapt) that
+            # are no longer part of the current template set, across all manifests.
+            self._cleanup_obsolete_managed_wrappers()
             return manifest
 
         except Exception:
@@ -231,6 +235,10 @@ class InstallService:
         # Remove the manifest itself
         manifest_path.unlink(missing_ok=True)
 
+        # Clean obsolete managed shared wrappers even when another platform remains
+        # installed (normal uninstall skips shared bin/ paths in that case).
+        self._cleanup_obsolete_managed_wrappers()
+
         return {"removed": removed, "restored": restored, "platform": platform}
 
     def installed(self) -> list[dict]:
@@ -297,6 +305,69 @@ class InstallService:
             if self._manifest_path(platform).exists():
                 return True
         return False
+
+    def _cleanup_obsolete_managed_wrappers(self) -> None:
+        """Remove managed shared bin/r2p-* wrappers that are no longer part of the
+        current template set, across every installed platform manifest.
+
+        Obsolete candidates are discovered only from manifest references (so
+        unmanaged files in bin/ are never touched): every ``installed_paths``
+        entry and every ``backups[*].target`` under ``install/``. A reference is
+        obsolete when it points inside ``bin/``, its filename starts with ``r2p-``,
+        and that filename is not in the current ``tools/r2p-*`` wrapper set.
+        """
+        current_wrappers = {
+            p.name for p in sorted(self.repo_root.glob("tools/r2p-*")) if p.is_file()
+        }
+        bin_dir = self.manifest_root / "bin"
+        install_dir = self.manifest_root / "install"
+        if not install_dir.exists():
+            return
+
+        # Discover obsolete managed wrapper paths from manifest references only.
+        obsolete: set[str] = set()
+        for mpath in sorted(install_dir.glob("*.yaml")):
+            manifest = _load_manifest(mpath)
+            refs = list(manifest.get("installed_paths", []))
+            refs += [str(bk.get("target")) for bk in manifest.get("backups", [])]
+            for ref in refs:
+                p = Path(ref)
+                if (
+                    p.parent == bin_dir
+                    and p.name.startswith("r2p-")
+                    and p.name not in current_wrappers
+                ):
+                    obsolete.add(str(p))
+
+        if not obsolete:
+            return
+
+        # Strip every obsolete path from all manifests and delete the files.
+        for mpath in sorted(install_dir.glob("*.yaml")):
+            for path_str in obsolete:
+                self._strip_path_from_manifest(mpath, path_str)
+        for path_str in obsolete:
+            Path(path_str).unlink(missing_ok=True)
+
+    def _strip_path_from_manifest(self, manifest_path: Path, path_str: str) -> None:
+        """Remove ``path_str`` from a manifest's installed_paths and any matching
+        backups entry, rewriting the file only when it changed."""
+        manifest = _load_manifest(manifest_path)
+        changed = False
+
+        paths = manifest.get("installed_paths", [])
+        if path_str in paths:
+            manifest["installed_paths"] = [p for p in paths if p != path_str]
+            changed = True
+
+        backups = manifest.get("backups", [])
+        kept = [bk for bk in backups if str(bk.get("target")) != path_str]
+        if len(kept) != len(backups):
+            manifest["backups"] = kept
+            changed = True
+
+        if changed:
+            manifest_path.write_text(_dump_manifest(manifest), encoding="utf-8")
 
 
 # ---------------------------------------------------------------------------
