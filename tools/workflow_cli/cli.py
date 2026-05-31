@@ -1159,6 +1159,86 @@ def _cmd_checkpoint_decide(args):
     )
 
 
+def _cmd_stage_advance(args):
+    record, mgr, run_dir = _load_run(args.work_id, args.base_path)
+
+    if record.status != RunStatus.CHECKPOINT_APPROVED:
+        print_and_exit(
+            format_error(
+                f"Cannot advance in status {record.status.value!r}; must be checkpoint_approved",
+                exit_code=EXIT_CONFLICT,
+            ),
+            EXIT_CONFLICT,
+        )
+
+    stage = record.current_stage
+    if stage == Stage.PLAN:
+        print_and_exit(
+            format_error(
+                "Cannot advance past plan; use run-close",
+                exit_code=EXIT_CONFLICT,
+            ),
+            EXIT_CONFLICT,
+        )
+
+    aa = get_active_artifact(record, stage)
+    if aa is None:
+        print_and_exit(
+            format_error(
+                f"No active artifact for stage {stage.value!r}",
+                exit_code=EXIT_CONFLICT,
+            ),
+            EXIT_CONFLICT,
+        )
+    if aa.status != "approved":
+        print_and_exit(
+            format_error(
+                f"Stage {stage.value!r} artifact must be approved before stage-advance",
+                exit_code=EXIT_CONFLICT,
+            ),
+            EXIT_CONFLICT,
+        )
+    version = get_artifact_version(run_dir, stage)
+    if version != aa.version:
+        print_and_exit(
+            format_error(
+                f"Active artifact version v{aa.version} does not match on-disk v{version}",
+                exit_code=EXIT_CONFLICT,
+            ),
+            EXIT_CONFLICT,
+        )
+    if not any(
+        cp.stage == stage and cp.artifact == aa.artifact and cp.version == aa.version
+        for cp in record.approved_checkpoints
+    ):
+        print_and_exit(
+            format_error(
+                f"No approved checkpoint matching {stage.value} v{aa.version}",
+                exit_code=EXIT_CONFLICT,
+            ),
+            EXIT_CONFLICT,
+        )
+
+    from tools.workflow_cli.models import NEXT_STAGE_MAP
+    next_stage = NEXT_STAGE_MAP[stage]
+    record = update_run_status(record, RunStatus.NEXT_STAGE)
+    record.current_stage = next_stage
+    update_resume_context(
+        record,
+        last_operation=f"advance_to_{next_stage.value}",
+        next_operation="gate_entry",
+        active_item=next_stage.value,
+    )
+    mgr.save(record)
+    print_and_exit(
+        format_success(
+            {"work_id": str(record.work_id), "current_stage": next_stage.value},
+            message=f"Advanced to {next_stage.value}",
+        ),
+        EXIT_OK,
+    )
+
+
 def _register_checkpoint_commands(subparsers):
     p = subparsers.add_parser("review-checkpoint", help="Open checkpoint review for a stage")
     p.add_argument("--work-id", required=True)
@@ -1172,6 +1252,10 @@ def _register_checkpoint_commands(subparsers):
     p.add_argument("--confirm", action="store_true")
     p.add_argument("--downstream-authorization", default=None)
     p.set_defaults(func=_cmd_checkpoint_decide)
+
+    p = subparsers.add_parser("stage-advance", help="Advance an approved stage to the next stage")
+    p.add_argument("--work-id", required=True)
+    p.set_defaults(func=_cmd_stage_advance)
 
 
 # ---------------------------------------------------------------------------

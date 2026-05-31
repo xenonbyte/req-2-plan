@@ -1123,3 +1123,113 @@ class TestCheckpointDecide:
                 "---\nr2p_version: 2\n---\nfoo", encoding="utf-8")
             invoke(["checkpoint-decide", "--work-id", work_id, "--stage", "raw_requirement",
                     "--decision", "changes_requested"], base_path=tmp, expect_exit=6)
+
+
+# ---------------------------------------------------------------------------
+# stage-advance
+# ---------------------------------------------------------------------------
+
+
+class TestStageAdvance:
+    def _to_approved(self, tmp, work_id, stage="raw_requirement"):
+        invoke(["run-start", "--work-id", work_id, "--requirement", "foo"], base_path=tmp)
+        invoke(["tier-lock", "--work-id", work_id, "--base", "light", "--confirm"], base_path=tmp)
+        invoke(["stage-produce", "--work-id", work_id, "--stage", stage, "--content", "real"], base_path=tmp)
+        invoke(["stage-ready", "--work-id", work_id, "--stage", stage], base_path=tmp)
+        invoke(["gate-quality", "--work-id", work_id, "--stage", stage], base_path=tmp)
+        invoke(["review-checkpoint", "--work-id", work_id, "--stage", stage], base_path=tmp)
+        invoke(["checkpoint-decide", "--work-id", work_id, "--stage", stage,
+                "--decision", "approved", "--confirm"], base_path=tmp)
+
+    def test_advance_moves_to_next_stage(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work_id = "WF-20260527-adv"
+            self._to_approved(tmp, work_id)
+            invoke(["stage-advance", "--work-id", work_id], base_path=tmp)
+            record = load_record(tmp, work_id)
+            assert record.status == RunStatus.NEXT_STAGE
+            assert record.current_stage == Stage.REQUIREMENT_BRIEF
+
+    def test_advance_refused_without_matching_checkpoint(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work_id = "WF-20260527-sa2"
+            invoke(["run-start", "--work-id", work_id, "--requirement", "foo"], base_path=tmp)
+            record = load_record(tmp, work_id)
+            record.status = RunStatus.CHECKPOINT_APPROVED  # hand-edited, no checkpoint row
+            record.active_artifacts[0].status = "approved"
+            save_record(tmp, record)
+            invoke(["stage-advance", "--work-id", work_id], base_path=tmp, expect_exit=6)
+
+    def test_advance_refused_at_plan(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work_id = "WF-20260527-sa3"
+            invoke(["run-start", "--work-id", work_id, "--requirement", "foo"], base_path=tmp)
+            record = load_record(tmp, work_id)
+            record.status = RunStatus.CHECKPOINT_APPROVED
+            record.current_stage = Stage.PLAN
+            record.approved_checkpoints = [plan_checkpoint()]
+            from tools.workflow_cli.models import ActiveArtifact
+            record.active_artifacts = [ActiveArtifact(
+                stage=Stage.PLAN, artifact="07-plan.md", version=1, status="approved")]
+            save_record(tmp, record)
+            invoke(["stage-advance", "--work-id", work_id], base_path=tmp, expect_exit=6)
+
+    def test_advance_refuses_non_approved_active_artifact(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work_id = "WF-20260527-sa4"
+            self._to_approved(tmp, work_id)
+            record = load_record(tmp, work_id)
+            record.active_artifacts[0].status = "ready"
+            save_record(tmp, record)
+            invoke(["stage-advance", "--work-id", work_id], base_path=tmp, expect_exit=6)
+            record = load_record(tmp, work_id)
+            record.active_artifacts[0].status = "approved"
+            save_record(tmp, record)
+            run_dir = Path(tmp) / ".req-to-plan" / work_id
+            (run_dir / "00-raw-requirement.md").write_text(
+                "---\nr2p_version: 2\n---\nfoo", encoding="utf-8")
+            invoke(["stage-advance", "--work-id", work_id], base_path=tmp, expect_exit=6)
+
+
+# ---------------------------------------------------------------------------
+# run-close checkpoint matching
+# ---------------------------------------------------------------------------
+
+
+class TestRunCloseCheckpointMatch:
+    def test_run_close_refuses_mismatched_plan_checkpoint(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work_id = "WF-20260527-rcm"
+            invoke(["run-start", "--work-id", work_id, "--requirement", "foo"], base_path=tmp)
+            record = load_record(tmp, work_id)
+            record.status = RunStatus.CHECKPOINT_APPROVED
+            record.current_stage = Stage.PLAN
+            from tools.workflow_cli.models import ActiveArtifact, CheckpointRecord
+            record.active_artifacts = [ActiveArtifact(
+                stage=Stage.PLAN, artifact="07-plan.md", version=2, status="approved")]
+            record.approved_checkpoints = [CheckpointRecord(
+                stage=Stage.PLAN, artifact="07-plan.md", version=1,
+                approved_at="2026-05-27T00:00:00+00:00",
+                downstream_authorization="close_workflow_run")]
+            save_record(tmp, record)
+            invoke(["run-close", "--work-id", work_id], base_path=tmp, expect_exit=6)
+
+    def test_run_close_refuses_stale_plan_artifact_on_disk(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work_id = "WF-20260527-rcmd"
+            invoke(["run-start", "--work-id", work_id, "--requirement", "foo"], base_path=tmp)
+            record = load_record(tmp, work_id)
+            record.status = RunStatus.CHECKPOINT_APPROVED
+            record.current_stage = Stage.PLAN
+            from tools.workflow_cli.models import ActiveArtifact, CheckpointRecord
+            record.active_artifacts = [ActiveArtifact(
+                stage=Stage.PLAN, artifact="07-plan.md", version=1, status="approved")]
+            record.approved_checkpoints = [CheckpointRecord(
+                stage=Stage.PLAN, artifact="07-plan.md", version=1,
+                approved_at="2026-05-27T00:00:00+00:00",
+                downstream_authorization="close_workflow_run")]
+            save_record(tmp, record)
+            run_dir = Path(tmp) / ".req-to-plan" / work_id
+            (run_dir / "07-plan.md").write_text(
+                "---\nr2p_version: 2\n---\nfoo", encoding="utf-8")
+            invoke(["run-close", "--work-id", work_id], base_path=tmp, expect_exit=6)
