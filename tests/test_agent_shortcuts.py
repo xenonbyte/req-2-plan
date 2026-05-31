@@ -429,3 +429,54 @@ class TestContinueDriver:
             out = capsys.readouterr().out
             assert "needs_content" in out
             assert "produce requirement_brief content" in out
+
+    def test_continue_surfaces_repair_after_failed_quality_gate(self, capsys):
+        import tempfile
+        from pathlib import Path
+        from tools.workflow_cli import agent_shortcuts as A
+        from tools.workflow_cli.cli import main as cli_main
+        from tools.workflow_cli.models import RunStatus
+        from tools.workflow_cli.state import RunStateManager
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            with pytest.raises(SystemExit):
+                A.main(["start", "Add rate limiting"], base_path=base)
+            work_id = A.read_active_pointer(base)["selected_work_id"]
+            # Lock tier, then make the artifact ready with content that fails the
+            # quality gate (an unclosed upstream reference).
+            with pytest.raises(SystemExit):
+                cli_main(["--base-path", str(base), "tier-lock", "--work-id", work_id,
+                          "--base", "light", "--confirm"])
+            with pytest.raises(SystemExit):
+                cli_main(["--base-path", str(base), "stage-update", "--work-id", work_id,
+                          "--stage", "raw_requirement",
+                          "--content", "Depends on REQ-AUTH-1 with no closure tag"])
+            with pytest.raises(SystemExit):
+                cli_main(["--base-path", str(base), "stage-ready", "--work-id", work_id,
+                          "--stage", "raw_requirement"])
+            # A single continue must auto-run gate-quality (which fails) AND surface the
+            # repair stop in the same call — not exit at the raw gate output.
+            with pytest.raises(SystemExit) as exc:
+                A.main(["continue"], base_path=base)
+            out = capsys.readouterr().out
+            assert "needs_repair" in out
+            assert exc.value.code == 0
+            record = RunStateManager(base / ".req-to-plan" / work_id).load()
+            assert record.status == RunStatus.QUALITY_GATE_FAILED
+
+    def test_continue_tier_not_locked_prints_executable_next(self, capsys):
+        import tempfile
+        from pathlib import Path
+        from tools.workflow_cli import agent_shortcuts as A
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            with pytest.raises(SystemExit):
+                A.main(["start", "Add rate limiting"], base_path=base)
+            with pytest.raises(SystemExit):
+                A.main(["continue"], base_path=base)
+            out = capsys.readouterr().out
+            assert "tier_not_locked" in out
+            # The suggested next step must be the real workflow command, not the
+            # lifecycle `r2p` binary (which has no tier-lock subcommand).
+            assert "r2p tier-lock" not in out
+            assert "tier-lock --work-id" in out

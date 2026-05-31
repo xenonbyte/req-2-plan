@@ -222,7 +222,8 @@ def _cmd_continue(ns: argparse.Namespace, base_path: Path) -> None:
 
         if s == RunStatus.ACTIVE_STAGE_DRAFT:
             if record.tier_locked is None:
-                print(f"stop: tier_not_locked\nnext: r2p tier-lock\n")
+                print(f"stop: tier_not_locked\nstage: {stage}\n"
+                      f"next: tier-lock --work-id {work_id} --base <light|standard> --confirm\n")
                 sys.exit(0)
             aa = get_active_artifact(record, record.current_stage)
             try:
@@ -238,9 +239,13 @@ def _cmd_continue(ns: argparse.Namespace, base_path: Path) -> None:
                       f"next: review the artifact, then stage-ready --stage {stage}\n")
                 sys.exit(0)
             code = _run_cli(["gate-quality", "--work-id", work_id, "--stage", stage], base_path)
-            if code != 0:
+            if code != 0 and manager.load().status == RunStatus.ACTIVE_STAGE_DRAFT:
+                # The gate did not change state (e.g. a precondition conflict); surface
+                # its output directly instead of looping on the same unchanged status.
                 sys.exit(code)
-            continue  # reload and run review-checkpoint before stopping for human approval
+            # On pass -> ready_for_checkpoint_review (opens review-checkpoint below);
+            # on structural failure -> quality_gate_failed (surfaced as stop: needs_repair).
+            continue
 
         if s == RunStatus.READY_FOR_CHECKPOINT_REVIEW:
             code = _run_cli(["review-checkpoint", "--work-id", work_id, "--stage", stage], base_path)
