@@ -17,7 +17,6 @@ Run each via Bash using the scripts in `{{R2P_BIN_DIR}}`:
 | `{{R2P_BIN_DIR}}/r2p-continue` | Continue the active run |
 | `{{R2P_BIN_DIR}}/r2p-status [--all]` | Inspect run state (read-only) |
 | `{{R2P_BIN_DIR}}/r2p-switch --work-id <id>` | Switch active run pointer |
-| `{{R2P_BIN_DIR}}/r2p-adapt --executor <name>` | Generate executor-specific plan from approved PLAN |
 | `{{R2P_BIN_DIR}}/r2p-reopen --from <work-id> --stage <stage> --reason "<text>"` | Reopen a closed run |
 
 ## Usage Pattern
@@ -29,4 +28,4 @@ Run each via Bash using the scripts in `{{R2P_BIN_DIR}}`:
    - Auto-advances: moves to the next stage after non-PLAN checkpoint approval, then runs that stage's entry gate
    - Auto-closes: closes the run when the PLAN checkpoint is approved and no open routes remain
    - Does NOT auto-mark artifacts ready and does NOT auto-approve checkpoints — those are human steps
-3. `r2p-adapt --executor superpowers` — generate executor-specific plan from approved PLAN
+3. When the run closes, hand the approved PLAN at `07-plan.md` directly to your executor — the PLAN is executor-neutral and needs no adaptation step.

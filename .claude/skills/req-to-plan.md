@@ -5,7 +5,7 @@ description: Developer guide for extending and maintaining the req-to-plan CLI a
 
 # req-to-plan Developer Skill
 
-This skill is for contributors working on the req-to-plan implementation itself — adding commands, adapters, tests, or tier keywords. For the user-facing skill that drives workflow runs, see `tools/workflow_cli/agent_templates/claude/SKILL.md`.
+This skill is for contributors working on the req-to-plan implementation itself — adding commands, tests, or tier keywords. For the user-facing skill that drives workflow runs, see `tools/workflow_cli/agent_templates/claude/SKILL.md`.
 
 ## Module Responsibilities
 
@@ -20,12 +20,9 @@ tools/workflow_cli/
 ├── gates.py           # check_entry_gate, check_quality_gate, check_forced_subagent_review
 ├── output.py          # Exit codes, format_success/error/gate_result, is_json_mode
 ├── cli.py             # argparse router: run/tier/gate/status/stage command groups
-├── agent_shortcuts.py # r2p-* shortcut surface: start/continue/status/switch/adapt/reopen
+├── agent_shortcuts.py # r2p-* shortcut surface: start/continue/status/switch/reopen
 ├── install_cli.py     # r2p lifecycle binary stub (full impl: Task 14)
 ├── version.py         # R2P_VERSION = "v1"
-├── adapters/
-│   ├── __init__.py    # ADAPTER_REGISTRY, get_adapter(), list_adapters()
-│   └── superpowers.py # PLAN → Superpowers format adapter
 └── agent_templates/   # Install templates (rendered by r2p install)
     ├── claude/        # SKILL.md + commands/r2p-*.md
     ├── codex/         # AGENTS.md
@@ -49,7 +46,7 @@ Use the project `.venv` (system Python lacks PyYAML due to PEP 668):
 .venv/bin/python -m pytest tests/ --cov=tools/workflow_cli
 ```
 
-Test count baseline: 530 passing. All tests must stay green after any change.
+Test count baseline: 514 passing. All tests must stay green after any change.
 
 ## Adding a New CLI Command
 
@@ -87,48 +84,6 @@ _register_mygroup_commands(subparsers)
    - `EXIT_NOT_FOUND = 7` — run or artifact missing
 
 5. **Add tests** in `tests/test_cli.py` following the `invoke()` helper pattern.
-
-## Adding a New Adapter
-
-1. **Create the module** at `tools/workflow_cli/adapters/<name>.py`:
-
-```python
-from __future__ import annotations
-from pathlib import Path
-
-ADAPTER_NAME = "<name>"
-ADAPTER_RULE_VERSION = "v1"
-SUPPORTED_PLAN_SECTIONS: set[str] = {"PLAN-TASK"}  # sections you handle
-
-def adapt_plan(plan_path: Path, output_path: Path) -> str:
-    """Convert approved PLAN to executor-specific format.
-    
-    Returns one of:
-    - "derived_plan_written" — success
-    - "adapter_gap_detected" — gap found; writes output_path.with_suffix('.repair.md')
-    - "stale_source_detected" — source plan is stale
-    """
-    content = plan_path.read_text(encoding="utf-8")
-    # ... transform content ...
-    output_path.write_text(derived, encoding="utf-8")
-    return "derived_plan_written"
-```
-
-2. **Register** in `tools/workflow_cli/adapters/__init__.py`:
-
-```python
-ADAPTER_REGISTRY: dict[str, str] = {
-    "superpowers": "tools.workflow_cli.adapters.superpowers",
-    "<name>": "tools.workflow_cli.adapters.<name>",
-}
-```
-
-3. **Add tests** in `tests/test_adapters_<name>.py`. See `tests/test_adapters_superpowers.py` for the pattern.
-
-Adapter contract rules (from `tools/workflow_cli/adapters/README.md`):
-- Never mutate the source PLAN artifact.
-- Write a `.repair.md` file (not raise) when content is unadaptable.
-- Return exactly one of the four result strings.
 
 ## Extending the Tier Keyword Bank
 

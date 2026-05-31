@@ -101,7 +101,6 @@ r2p-start "Add rate limiting"
 r2p-continue
 r2p-status
 r2p-switch --work-id WF-YYYYMMDD-slug
-r2p-adapt --executor superpowers
 r2p-reopen --from WF-YYYYMMDD-slug --stage spec --reason "Fix upstream gap"
 ```
 

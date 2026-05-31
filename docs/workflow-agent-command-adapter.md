@@ -134,15 +134,12 @@ r2p-start [--separate] "<raw requirement>"
 r2p-continue
 r2p-status [--all]
 r2p-switch --work-id <id>
-r2p-adapt --executor <name>
 r2p-reopen --from <work-id> --stage <stage> --reason "<short>"
 ```
 
-`r2p-adapt` is a post-PLAN carrier. It is not part of the requirement-to-PLAN `CMD-*` state machine and maps to the post-PLAN command intents defined in `workflow-post-plan-adapter-surface.md`.
-
 `r2p-reopen` maps to `CMD-RUN-REOPEN` and creates a new lineage run from a closed source run; it does not modify the source run.
 
-Project shortcuts may compose internal `CMD-*` command intents (or post-PLAN command intents for `adapt`), but they must preserve all authority, confirmation, stop, and state-eligibility rules in `workflow-command-surface.md` and `workflow-post-plan-adapter-surface.md`.
+Project shortcuts compose internal `CMD-*` command intents, but they must preserve all authority, confirmation, stop, and state-eligibility rules in `workflow-command-surface.md`.
 
 ## Command Semantics
 
@@ -264,47 +261,8 @@ This is the only public project shortcut that accepts `--work-id`.
 Forbidden:
 
 - Do not create a run.
-- Do not resume, approve, route, adapt, or execute work.
+- Do not resume, approve, route, or execute work.
 - Do not switch to a missing or inconsistent run.
-
-### `r2p-adapt --executor <name>`
-
-Generates an executor-specific derived plan from the approved PLAN of the selected run.
-
-This shortcut is post-PLAN. It is not part of the requirement-to-PLAN `CMD-*` state machine and does not change the source run's artifacts or `run.md` status. It maps to the post-PLAN command intent `CMD-EXEC-ADAPT` in `workflow-post-plan-adapter-surface.md`.
-
-Behavior:
-
-- Reads `.req-to-plan/.workflow-active` to find the selected run.
-- Requires the selected run to be `closed_at_plan_checkpoint` with no open route and no stale final references.
-- Resolves the approved PLAN artifact (default `.req-to-plan/<work-id>/07-plan.md`).
-- Invokes the executor adapter named by `--executor` (e.g. `superpowers`).
-- Writes the derived plan to `.req-to-plan/<work-id>/<executor>-plan.md` on success.
-- Writes `.req-to-plan/<work-id>/<executor>-plan.repair.md` (a Post-PLAN Gap Repair Request) when the PLAN cannot be adapted.
-
-Forbidden:
-
-- Do not mutate the approved source PLAN or any other source artifact.
-- Do not change `run.md` status.
-- Do not execute the derived plan; adaptation only writes the derived plan file.
-- Do not infer or guess missing SPEC references, TDD applicability, or rollback handling — record a repair request instead.
-
-Common stops:
-
-Run is not closed:
-
-```text
-blocked: run_not_closed
-next: complete the workflow run and approve PLAN Checkpoint first
-```
-
-PLAN content is unadaptable:
-
-```text
-result: adapter_gap_detected
-repair_request: .req-to-plan/<work-id>/<executor>-plan.repair.md
-next: address the repair request before re-running r2p-adapt
-```
 
 ### `r2p-reopen --from <work-id> --stage <stage> --reason "<short>"`
 
@@ -423,7 +381,6 @@ next: r2p-continue
 | `r2p-continue` | Stateful macro over allowed `CMD-*` intents according to run state and stop rules. | Surfaces `workflow tier-lock` or `workflow tier-escalate` when tier work is required. |
 | `r2p-status` | `CMD-STATUS-*`; read-only. | |
 | `r2p-switch` | Active pointer update only; no stage command intent. | |
-| `r2p-adapt` | Post-PLAN `CMD-EXEC-ADAPT` from `workflow-post-plan-adapter-surface.md`; does not write the source run. | |
 | `r2p-reopen` | `CMD-RUN-REOPEN` | Does not modify source run. |
 
 ## Safety Rules
@@ -434,4 +391,3 @@ next: r2p-continue
 - Only `r2p-switch` accepts `--work-id`.
 - `r2p-start --separate` is the explicit signal to create a second open run.
 - A terminal run remains available for status and switch, but it is not active for `r2p-continue`.
-- `r2p-adapt` runs only against terminal runs; it must not mutate source artifacts and must not change `run.md` status.

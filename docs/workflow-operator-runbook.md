@@ -251,7 +251,6 @@ r2p-start "<raw requirement>"
 r2p-continue
 r2p-status [--all]
 r2p-switch --work-id <work-id>
-r2p-adapt --executor superpowers
 r2p-reopen --from <work-id> --stage <stage> --reason "<short>"
 ```
 
@@ -301,31 +300,9 @@ env PYTHONDONTWRITEBYTECODE=1 python3 -m tools.workflow_cli run-reopen \
 
 The reopen creates `.req-to-plan/<source-work-id>-rN/` with a new `run.md` whose lineage references the source. The source run stays `closed_at_plan_checkpoint` and its approved artifacts are not modified. Stages preceding `<stage>` are copied; the target stage is left empty so the operator can produce a new version.
 
-## Adapt The Approved PLAN
+## Hand Off The Approved PLAN
 
-Executor adaptation is optional and post-PLAN. It is not part of the requirement-to-PLAN `CMD-*` state machine.
-
-Command: `workflow executor-adapt`.
-
-```bash
-env PYTHONDONTWRITEBYTECODE=1 python3 -m tools.workflow_cli executor-adapt \
-  --work-id <work-id> \
-  --plan .req-to-plan/<work-id>/07-plan.md@v1#PLAN-Checkpoint \
-  --executor superpowers \
-  --adapter-rule superpowers-v1 \
-  --output docs/superpowers/plans/<date>-<work-id>.md \
-  --json
-```
-
-The adapter may write:
-
-| Result | Write |
-|---|---|
-| `derived_plan_written` | One derived executor plan. |
-| `adapter_gap_detected` | `<output>.repair.md` as a Post-PLAN Gap Repair Request. |
-| `stale_source_detected` | `<output>.repair.md` as a Post-PLAN Gap Repair Request. |
-
-The adapter must not mutate the approved source run or execute PLAN tasks.
+The approved PLAN at `07-plan.md` is executor-neutral. After the run closes, hand it directly to your executor (for example, superpowers reads the neutral PLAN as-is). There is no post-PLAN adaptation step.
 
 ## Resume And Stop Handling
 
@@ -347,8 +324,6 @@ Common stops:
 | `checkpoint_confirmation_missing` | Record or link the required confirmation, then decide again. |
 | `open_route` | Route, repair, and re-import before downstream work continues. |
 | `stale_artifact` | Re-import repaired input or start a repair/superseding workflow. |
-| `adapter_gap_detected` | Use the generated Post-PLAN Gap Repair Request. |
-| `stale_source_detected` | Adapt from a new approved PLAN after repair or supersession. |
 
 ## Live End-To-End Check
 
@@ -360,7 +335,6 @@ After implementing the workflow per `docs/superpowers/plans/2026-05-27-req-to-pl
 | Migration path (e.g. `"把项目改成 rust 实现"`) | Tier floor enforces `+migration +cross_project`; bundle refused; subagent review required at DESIGN/SPEC/PLAN |
 | Escalation path | New modifier added mid-run via `tier-escalate`; bundled checkpoints revoked |
 | Reopen path | `run-reopen --from <closed-id> --stage <stage>` creates `<id>-rN` new run with lineage |
-| Adapter contract | `executor-adapt --executor superpowers` writes derived plan with adapter rule version |
 
 Record the smoke run date and host-agnostic artifact paths here after running:
 

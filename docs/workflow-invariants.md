@@ -842,7 +842,6 @@ Use this map to choose the right workflow document before editing or generating 
 | Map operation semantics into carrier-neutral command intents before designing concrete CLI, slash command, MCP, API, skill, or UI syntax | `workflow-command-surface.md` |
 | Design concrete CLI command names, flags, output, dry-run, confirmation, and exit semantics | `workflow-cli-adapter.md` |
 | Expose the workflow to agents as `r2p-*` project shortcuts | `workflow-agent-command-adapter.md` |
-| Design post-PLAN executor adaptation command intents (`CMD-EXEC-*`) | `workflow-post-plan-adapter-surface.md` |
 | Install, uninstall, verify, or audit the `r2p` lifecycle binary on a host | `workflow-install-surface.md` |
 | Understand cross-stage order, invariants, checkpoints, subagent shared rules, and traceability rules | `workflow-invariants.md` |
 | Capture raw requirement, clarify scope, source provenance, acceptance, and module/capability coverage | `requirement-brief-workflow.md` |
@@ -869,8 +868,7 @@ Use this map to choose the right workflow document before editing or generating 
 | Command Surface | Carrier-neutral command intent layer that maps operation semantics to operator-facing workflow actions. | `workflow-command-surface.md` | `Purpose` |
 | Command Intent | Stable workflow action ID, such as `CMD-RUN-START`, that a later concrete command carrier may expose. | `workflow-command-surface.md` | `Command Intent Catalog` |
 | Command Contract | Required semantic contract for each command intent, including operation intents, canonical operations, inputs, writes, confirmations, stops, and results. | `workflow-command-surface.md` | `Command Contract Schema` |
-| Agent Command Adapter | Compact project shortcut carrier with `r2p-start`, `r2p-continue`, `r2p-status`, `r2p-switch`, and `r2p-adapt`. | `workflow-agent-command-adapter.md` | `Purpose` |
-| Post-PLAN Adapter Surface | Carrier-neutral post-PLAN executor adaptation command intent layer (`CMD-EXEC-*`); outside the requirement-to-PLAN `CMD-*` state machine. | `workflow-post-plan-adapter-surface.md` | `Purpose` |
+| Agent Command Adapter | Compact project shortcut carrier with `r2p-start`, `r2p-continue`, `r2p-status`, `r2p-switch`, and `r2p-reopen`. | `workflow-agent-command-adapter.md` | `Purpose` |
 | Active Run | Selected nonterminal workflow run used by `r2p-continue`. | `workflow-agent-command-adapter.md` | `Run Selection Model` |
 | Workspace Active Pointer | Workspace-level pointer at `.req-to-plan/.workflow-active` that selects the default run for project shortcuts. | `workflow-agent-command-adapter.md` | `Workspace Active Pointer` |
 | Work ID | Stable generated workflow run ID used in artifact paths and `r2p-switch`. | `workflow-agent-command-adapter.md` | `Work ID Rule` |

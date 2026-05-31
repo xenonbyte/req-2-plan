@@ -22,8 +22,7 @@ Use `workflow-execution-guide.md` when operating a workflow run, resuming from a
 Use `workflow-operation-surface.md` when designing or reviewing operation entry semantics for commands, tools, skills, APIs, or UI actions.
 Use `workflow-command-surface.md` when mapping operation semantics into carrier-neutral command intents before designing concrete command syntax.
 Use `workflow-cli-adapter.md` when designing a concrete CLI carrier for those command intents.
-Use `workflow-agent-command-adapter.md` when exposing the workflow to agents as the compact project shortcuts `r2p-start`, `r2p-continue`, `r2p-status`, `r2p-switch`, and `r2p-adapt`.
-Use `workflow-post-plan-adapter-surface.md` when designing post-PLAN executor adaptation entry points (`CMD-EXEC-*`).
+Use `workflow-agent-command-adapter.md` when exposing the workflow to agents as the compact project shortcuts `r2p-start`, `r2p-continue`, `r2p-status`, `r2p-switch`, and `r2p-reopen`.
 Use `workflow-operator-runbook.md` when operating the local CLI end to end from raw requirement through PLAN closure.
 
 ## Document Map
@@ -36,7 +35,6 @@ Use `workflow-operator-runbook.md` when operating the local CLI end to end from 
 | Map operation semantics into carrier-neutral command intents before designing concrete CLI, slash command, MCP, API, skill, or UI syntax | `workflow-command-surface.md` |
 | Design concrete CLI command names, flags, output, dry-run, confirmation, and exit semantics | `workflow-cli-adapter.md` |
 | Expose the workflow to agents as `r2p-*` project shortcuts | `workflow-agent-command-adapter.md` |
-| Design post-PLAN executor adaptation command intents (`CMD-EXEC-*`) | `workflow-post-plan-adapter-surface.md` |
 | Install, uninstall, verify, or audit the `r2p` lifecycle binary on a host | `workflow-install-surface.md` |
 | Cross-stage rules, artifact lifecycle, upstream routing, shared definitions, and concept index | `workflow-invariants.md` |
 | Requirement capture, discovery, assumptions, source provenance, acceptance, and scope inventory | `requirement-brief-workflow.md` |

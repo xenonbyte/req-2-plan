@@ -71,7 +71,6 @@ Groups:
 | `gap` | Record, route, or re-import upstream gaps. |
 | `artifact` | Mark downstream artifacts stale or superseded. |
 | `status` | Inspect run state without writing. |
-| `executor` | Post-PLAN executor adaptation (`CMD-EXEC-*`). Outside the requirement-to-PLAN `CMD-*` state machine. |
 
 ## Project Shortcut Wrappers
 
@@ -82,11 +81,10 @@ r2p-start [--separate] "<raw requirement>"
 r2p-continue
 r2p-status [--all]
 r2p-switch --work-id <id>
-r2p-adapt --executor <name>
 r2p-reopen --from <work-id> --stage <stage>
 ```
 
-These wrappers are concrete carrier aliases for the shortcut surface defined in `docs/workflow-agent-command-adapter.md`. Four of these (`start`, `continue`, `status`, `switch`) compose existing requirement-to-PLAN `CMD-*` intents; `r2p-adapt` maps to post-PLAN `CMD-EXEC-ADAPT` in `docs/workflow-post-plan-adapter-surface.md`; `r2p-reopen` maps to `CMD-RUN-REOPEN`. None of these wrappers add workflow authority.
+These wrappers are concrete carrier aliases for the shortcut surface defined in `docs/workflow-agent-command-adapter.md`. Four of these (`start`, `continue`, `status`, `switch`) compose existing requirement-to-PLAN `CMD-*` intents; `r2p-reopen` maps to `CMD-RUN-REOPEN`. None of these wrappers add workflow authority.
 
 Implementation binding:
 
@@ -96,7 +94,6 @@ Implementation binding:
 | `tools/r2p-continue` | `python3 -m tools.workflow_cli.agent_shortcuts continue` |
 | `tools/r2p-status` | `python3 -m tools.workflow_cli.agent_shortcuts status` |
 | `tools/r2p-switch` | `python3 -m tools.workflow_cli.agent_shortcuts switch` |
-| `tools/r2p-adapt` | `python3 -m tools.workflow_cli.agent_shortcuts adapt` |
 | `tools/r2p-reopen` | `python3 -m tools.workflow_cli.agent_shortcuts reopen` |
 
 Each wrapper resolves the repository root from its own script path, prepends that root to PYTHONPATH, then invokes python3 with a python fallback.
@@ -347,25 +344,6 @@ route_upstream
 | `workflow status-routes` | `CMD-STATUS-ROUTES` | `--work-id` or `--run` | Shows open routes and required owner actions. |
 | `workflow status-artifacts` | `CMD-STATUS-ARTIFACTS` | `--work-id` or `--run` | Shows active, approved, stale, and superseded artifact versions. |
 
-### Executor (Post-PLAN)
-
-These commands map to `workflow-post-plan-adapter-surface.md`. They are outside the requirement-to-PLAN `CMD-*` state machine and must not change source run artifacts or `run.md` status.
-
-| CLI command | Command intent | Required CLI inputs | Notes |
-|---|---|---|---|
-| `workflow executor-adapt` | `CMD-EXEC-ADAPT` | `--work-id` or `--run`, `--executor`, plus `--plan` and `--output` when not derivable from the run record, plus `--confirm` when overwriting an existing derived plan or repair-request file | Runs only when the run is `closed_at_plan_checkpoint`, PLAN Checkpoint is approved, and no open route remains. Writes `<output>` on success or `<output>.repair.md` on `adapter_gap_detected` / `stale_source_detected`. Does not mutate the source PLAN or `run.md`. |
-| `workflow executor-list-adapters` | `CMD-EXEC-LIST-ADAPTERS` | none | Read-only registry listing. |
-
-Allowed `workflow executor-adapt` results:
-
-```text
-derived_plan_written
-adapter_gap_detected
-stale_source_detected
-unsupported_executor
-run_not_terminal
-```
-
 ## Lifecycle Binary (`r2p <subcommand>`)
 
 The lifecycle binary is a separate carrier from the daily `workflow ...` and `r2p-*` commands. It manages installing, uninstalling, and verifying the requirement-to-PLAN agent integration on a host.
@@ -402,8 +380,6 @@ If the command is not allowed in the current state:
 4. Suggest `workflow status-next <run-locator>` or the safe next command if it is unambiguous. Preserve the current resolved run locator: prefer the caller's original `--run <path>` when supplied; otherwise use `--work-id <id>` when the work ID is known.
 
 Inspection commands are allowed in any readable state and remain read-only.
-
-Post-PLAN executor commands (`workflow executor *`) use their own preconditions from `workflow-post-plan-adapter-surface.md` and do not consume the requirement-to-PLAN run-state matrix. They must still refuse to run when the source run is not terminal or has open routes.
 
 ## Resume Context Rule
 
