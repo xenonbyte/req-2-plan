@@ -342,12 +342,38 @@ class InstallService:
         if not obsolete:
             return
 
-        # Strip every obsolete path from all manifests and delete the files.
-        for mpath in sorted(install_dir.glob("*.yaml")):
-            for path_str in obsolete:
-                self._strip_path_from_manifest(mpath, path_str)
         for path_str in obsolete:
-            Path(path_str).unlink(missing_ok=True)
+            # If an older manifest backed up the user's pre-existing file at this
+            # path, restore it before dropping the metadata — otherwise the user's
+            # only copy is orphaned and can never be restored by uninstall.
+            restored = self._restore_managed_wrapper_backup(path_str)
+            for mpath in sorted(install_dir.glob("*.yaml")):
+                self._strip_path_from_manifest(mpath, path_str)
+            # Delete the obsolete managed wrapper only when there was no user
+            # original to restore in its place.
+            if not restored:
+                Path(path_str).unlink(missing_ok=True)
+
+    def _restore_managed_wrapper_backup(self, path_str: str) -> bool:
+        """Restore a user's pre-existing file from any manifest backup whose target
+        is ``path_str``, consuming the backup. Returns True if a backup was restored.
+
+        Mirrors the uninstall restore step so cleaning up an obsolete managed
+        wrapper never destroys the user's original file."""
+        target = Path(path_str)
+        restored = False
+        for mpath in sorted((self.manifest_root / "install").glob("*.yaml")):
+            manifest = _load_manifest(mpath)
+            for bk in manifest.get("backups", []):
+                if str(bk.get("target")) != path_str:
+                    continue
+                backup_path = Path(bk.get("backup", ""))
+                if backup_path.exists():
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(str(backup_path), str(target))
+                    backup_path.unlink(missing_ok=True)
+                    restored = True
+        return restored
 
     def _strip_path_from_manifest(self, manifest_path: Path, path_str: str) -> None:
         """Remove ``path_str`` from a manifest's installed_paths and any matching

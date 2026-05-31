@@ -504,3 +504,37 @@ class TestStaleWrapperCleanup:
         assert not stale.exists(), "managed stale wrapper should be removed"
         assert unmanaged.exists(), "unmanaged r2p-* files in bin must be preserved"
         assert_no_manifest_references(manifest_root, stale)
+
+    def test_cleanup_restores_user_backup_before_dropping_obsolete_wrapper(self, tmp_path):
+        svc, manifest_root, ph_root = make_service(tmp_path)
+        svc.install("codex")  # keep one platform installed so manifests exist
+        bin_dir = manifest_root / "bin"
+        bin_dir.mkdir(parents=True, exist_ok=True)
+        stale = bin_dir / "r2p-adapt"
+        # The obsolete managed wrapper currently sits at the target...
+        stale.write_text("MANAGED WRAPPER\n", encoding="utf-8")
+        # ...and the user's ORIGINAL file was saved as a backup by an old install.
+        backups_dir = manifest_root / "install" / "backups" / "codex"
+        backups_dir.mkdir(parents=True, exist_ok=True)
+        backup_file = backups_dir / "r2p-adapt.bak"
+        backup_file.write_text("USER ORIGINAL\n", encoding="utf-8")
+        # Seed the manifest: r2p-adapt is both installed and backed up.
+        from tools.workflow_cli.install import _load_manifest, _dump_manifest
+        mpath = manifest_root / "install" / "codex.yaml"
+        manifest = _load_manifest(mpath)
+        manifest.setdefault("installed_paths", []).append(str(stale))
+        manifest.setdefault("backups", []).append(
+            {"target": str(stale), "backup": str(backup_file)}
+        )
+        mpath.write_text(_dump_manifest(manifest), encoding="utf-8")
+
+        svc._cleanup_obsolete_managed_wrappers()
+
+        # The user's original must be restored at the target, not lost.
+        assert stale.exists(), "user's original file must survive cleanup"
+        assert stale.read_text() == "USER ORIGINAL\n", (
+            "user's backed-up original must be restored before metadata is dropped"
+        )
+        # Obsolete-wrapper metadata is cleaned and the consumed backup is gone.
+        assert_no_manifest_references(manifest_root, stale)
+        assert not backup_file.exists(), "restored backup file should be consumed"
