@@ -312,6 +312,10 @@ class TestGateFlow:
                 ["stage-produce", "--work-id", _WORK_ID, "--stage", "raw_requirement", "--content", "Some content"],
                 base_path=base,
             )
+            invoke(
+                ["stage-ready", "--work-id", _WORK_ID, "--stage", "raw_requirement"],
+                base_path=base,
+            )
             # exit 0 (pass) or 3 (quality fail) are both acceptable structural outcomes
             with pytest.raises(SystemExit) as exc:
                 main(["--base-path", str(base), "gate-quality", "--work-id", _WORK_ID, "--stage", "raw_requirement"])
@@ -326,6 +330,10 @@ class TestGateFlow:
             _start_run(base, _WORK_ID, _REQUIREMENT)
             invoke(
                 ["stage-produce", "--work-id", _WORK_ID, "--stage", "raw_requirement", "--content", "Content"],
+                base_path=base,
+            )
+            invoke(
+                ["stage-ready", "--work-id", _WORK_ID, "--stage", "raw_requirement"],
                 base_path=base,
             )
             # Tier not locked — quality gate must fail with exit 3
