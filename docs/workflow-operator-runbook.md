@@ -221,13 +221,26 @@ env PYTHONDONTWRITEBYTECODE=1 python3 -m tools.workflow_cli checkpoint-decide \
   --json
 ```
 
-For non-PLAN stages, resume to create or select the next-stage draft:
+For non-PLAN stages after checkpoint approval, advance to the next stage:
+
+Command: `workflow stage-advance`.
 
 ```bash
-env PYTHONDONTWRITEBYTECODE=1 python3 -m tools.workflow_cli run-resume \
+env PYTHONDONTWRITEBYTECODE=1 python3 -m tools.workflow_cli stage-advance \
   --work-id <work-id> \
   --json
 ```
+
+Then run the next stage's entry gate:
+
+```bash
+env PYTHONDONTWRITEBYTECODE=1 python3 -m tools.workflow_cli gate-entry \
+  --work-id <work-id> \
+  --stage <next-stage> \
+  --json
+```
+
+For PLAN stage checkpoint approval, close the run instead (no stage-advance for PLAN).
 
 ## Project Shortcut Path
 

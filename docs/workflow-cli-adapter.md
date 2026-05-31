@@ -285,18 +285,21 @@ If a required input is not provided as a flag, the CLI may derive it only from `
 | `workflow stage-produce` | `CMD-STAGE-PRODUCE` | `--work-id` or `--run`, `--stage` | Produces current-stage owned content only. |
 | `workflow stage-update` | `CMD-STAGE-UPDATE` | `--work-id` or `--run`, `--stage`, `--change`, `--reason`, plus `--confirm` when updating an approved artifact or changing a user-confirmed decision | Updates an unapproved draft or creates a new version when allowed. |
 | `workflow stage-ready` | `CMD-STAGE-READY` | `--work-id` or `--run`, `--stage` | Marks the current active draft artifact explicitly ready for Quality Gate evaluation; it does not pass the gate or approve a checkpoint. |
+| `workflow stage-advance` | `CMD-STAGE-ADVANCE` | `--work-id` or `--run` | Advances to the next stage after checkpoint approval; allowed for non-PLAN stages only. Refused for PLAN stages (use `workflow run-close` instead). |
 
 `workflow stage-ready` reports command intent "`CMD-STAGE-READY`" in human-readable output.
+
+`workflow stage-advance` reports command intent "`CMD-STAGE-ADVANCE`" in human-readable output.
 
 ### Gate, Review, And Checkpoint
 
 | CLI command | Command intent | Required CLI inputs | Notes |
 |---|---|---|---|
-| `workflow gate-entry` | `CMD-GATE-ENTRY` | `--work-id` or `--run`, `--stage` | Runs the stage entry gate. |
-| `workflow gate-quality` | `CMD-GATE-QUALITY` | `--work-id` or `--run`, `--stage` | Runs the current stage Quality Gate. |
-| `workflow review-checkpoint` | `CMD-REVIEW-CHECKPOINT` | `--work-id` or `--run`, `--stage` | Writes checkpoint review findings after Quality Gate `ready`. |
-| `workflow review-merge` | `CMD-REVIEW-MERGE` | `--work-id` or `--run`, `--stage`, plus `--finding` when findings are not already registered in `run.md` | Merges review findings before checkpoint decision. |
-| `workflow checkpoint-decide` | `CMD-CHECKPOINT-DECIDE` | `--work-id` or `--run`, `--stage`, `--decision`, `--confirm` | Records approval, change request, block, or route. |
+| `workflow gate-entry` | `CMD-GATE-ENTRY` | `--work-id` or `--run`, `--stage` | Runs the stage entry gate. Implemented. |
+| `workflow gate-quality` | `CMD-GATE-QUALITY` | `--work-id` or `--run`, `--stage` | Runs the current stage Quality Gate. Implemented. |
+| `workflow review-checkpoint` | `CMD-REVIEW-CHECKPOINT` | `--work-id` or `--run`, `--stage` | Writes checkpoint review findings after Quality Gate `ready`. Implemented. |
+| `workflow review-merge` | `CMD-REVIEW-MERGE` | `--work-id` or `--run`, `--stage`, plus `--finding` when findings are not already registered in `run.md` | Merges review findings before checkpoint decision. Implemented. |
+| `workflow checkpoint-decide` | `CMD-CHECKPOINT-DECIDE` | `--work-id` or `--run`, `--stage`, `--decision`, `--confirm` | Records approval, change request, block, or route. Implemented. |
 | `workflow checkpoint-bundle` | `CMD-CHECKPOINT-BUNDLE` | `--work-id` or `--run`, repeated `--stage` for each bundled stage, `--confirm` | Approves multiple eligible no-modifier checkpoint stages in one decision; refused for any-modifier tiers or ineligible stage sets. |
 
 Allowed checkpoint decisions:
