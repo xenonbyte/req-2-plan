@@ -166,6 +166,7 @@ READ_ONLY_COMMANDS: set[str] = {
     "CMD-STATUS-ARTIFACTS",
     "CMD-TIER-STATUS",
     "CMD-EXEC-LIST-ADAPTERS",
+    "CMD-RUN-RESUME",
 }
 
 ALLOWED_COMMANDS_BY_RUN_STATE: dict[RunStatus, set[str]] = {

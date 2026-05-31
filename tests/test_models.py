@@ -385,5 +385,10 @@ class TestBundleAuthorization(unittest.TestCase):
         self.assertFalse(bundle.covers(self.Stage.DESIGN))
 
 
+def test_run_resume_is_read_only():
+    from tools.workflow_cli.models import READ_ONLY_COMMANDS
+    assert "CMD-RUN-RESUME" in READ_ONLY_COMMANDS
+
+
 if __name__ == "__main__":
     unittest.main()
