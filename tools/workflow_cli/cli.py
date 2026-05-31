@@ -516,12 +516,36 @@ def _cmd_gate_entry(args):
     record, mgr, run_dir = _load_run(args.work_id, args.base_path)
     stage = _parse_stage(args.stage)
 
+    # Precondition: if in NEXT_STAGE or ENTRY_GATE_FAILED, stage must match current_stage
+    if record.status in (RunStatus.NEXT_STAGE, RunStatus.ENTRY_GATE_FAILED) and stage != record.current_stage:
+        print_and_exit(
+            format_error(
+                f"Cannot run entry gate for {stage.value!r}; current stage is {record.current_stage.value!r}",
+                exit_code=EXIT_CONFLICT,
+            ),
+            EXIT_CONFLICT,
+        )
+
     result = check_entry_gate(
         run_dir,
         stage,
         record.approved_checkpoints,
         record.bundle_authorizations,
     )
+
+    # Persist state if in NEXT_STAGE or ENTRY_GATE_FAILED
+    if record.status in (RunStatus.NEXT_STAGE, RunStatus.ENTRY_GATE_FAILED):
+        target = RunStatus.ACTIVE_STAGE_DRAFT if result.passed else RunStatus.ENTRY_GATE_FAILED
+        if target != record.status:
+            record = update_run_status(record, target)
+        update_resume_context(
+            record,
+            last_operation=f"entry_gate_{'passed' if result.passed else 'failed'}_{stage.value}",
+            next_operation="produce_stage_artifact" if result.passed else "repair_upstream_checkpoint",
+            active_item=stage.value,
+        )
+        mgr.save(record)
+
     output = format_gate_result(result, gate_type="entry-gate")
     exit_code = EXIT_OK if result.passed else result.exit_code
     print_and_exit(output, exit_code)

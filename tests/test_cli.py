@@ -863,3 +863,43 @@ class TestStateAuthority:
             invoke(["gate-quality", "--work-id", work_id, "--stage", "raw_requirement"], base_path=tmp)
             record = load_record(tmp, work_id)
             assert record.status == RunStatus.READY_FOR_CHECKPOINT_REVIEW
+
+
+# ---------------------------------------------------------------------------
+# gate-entry Persistence Tests
+# ---------------------------------------------------------------------------
+
+
+class TestGateEntryPersistence:
+    def test_gate_entry_persists_from_next_stage(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work_id = "WF-20260527-nsp"
+            invoke(["run-start", "--work-id", work_id, "--requirement", "foo"], base_path=tmp)
+            record = load_record(tmp, work_id)
+            # raw_requirement has no required upstream checkpoints, so entry gate passes.
+            record.status = RunStatus.NEXT_STAGE
+            save_record(tmp, record)
+            invoke(["gate-entry", "--work-id", work_id, "--stage", "raw_requirement"], base_path=tmp)
+            record = load_record(tmp, work_id)
+            assert record.status == RunStatus.ACTIVE_STAGE_DRAFT
+
+    def test_gate_entry_readonly_outside_those_states(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work_id = "WF-20260527-rop"
+            invoke(["run-start", "--work-id", work_id, "--requirement", "foo"], base_path=tmp)
+            invoke(["gate-entry", "--work-id", work_id, "--stage", "raw_requirement"], base_path=tmp)
+            record = load_record(tmp, work_id)
+            assert record.status == RunStatus.ACTIVE_STAGE_DRAFT  # unchanged from run-start
+
+    def test_gate_entry_refuses_wrong_stage_in_stateful_modes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work_id = "WF-20260527-wsm"
+            invoke(["run-start", "--work-id", work_id, "--requirement", "foo"], base_path=tmp)
+            record = load_record(tmp, work_id)
+            record.current_stage = Stage.REQUIREMENT_BRIEF
+            record.status = RunStatus.NEXT_STAGE
+            save_record(tmp, record)
+            invoke(["gate-entry", "--work-id", work_id, "--stage", "raw_requirement"],
+                   base_path=tmp, expect_exit=6)
+            record = load_record(tmp, work_id)
+            assert record.status == RunStatus.NEXT_STAGE
