@@ -4,6 +4,8 @@
 
 This document records the agreed workflow for the PLAN stage. PLAN converts an approved SPEC into executor-neutral, verification-driven implementation steps.
 
+The PLAN artifact is a step-by-step checkable plan: each per-task step is expressed as a `- [ ]` checkbox so executors can tick off progress top-to-bottom during execution.
+
 PLAN is clean and executor-neutral in this workflow. It does not discuss, choose, or format for GSD, Superpowers, or any other executor.
 
 Executor-specific adaptation, orchestration, and management are out of scope for this requirement-to-PLAN workflow. They belong to a later, larger execution workflow.
@@ -245,14 +247,12 @@ Purpose: turn testable SPEC contracts into test-first execution steps where appr
 
 TDD is required for tasks where the referenced SPEC behavior can be verified before implementation. If TDD is not used, PLAN must state why TDD does not fit and what alternative verification replaces it.
 
-Default TDD shape:
+Default TDD shape (expressed as checkboxes — tick each step during execution):
 
 ```text
-1. Write failing test.
-2. Run test and confirm failure.
-3. Implement minimal change.
-4. Run test and confirm pass.
-5. Refactor if needed.
+- [ ] red: Write failing test and confirm it fails.
+- [ ] green: Implement minimal change and confirm test passes.
+- [ ] refactor: Refactor if needed; confirm tests still pass.
 ```
 
 Not every task fits TDD. Documentation-only work, mechanical configuration, generated artifacts, or one-time migration operations may use alternative verification, but PLAN must state the reason and the verification method.
@@ -304,6 +304,8 @@ Task granularity rule:
 
 Task template:
 
+Each task is self-contained: it carries its own spec references, behavior goal, checkable steps, verification commands, and rollback/safety anchor so an executor can read one task top-to-bottom without cross-referencing other sections.
+
 ```markdown
 ### Task N: <task title>
 
@@ -317,10 +319,11 @@ What this task accomplishes.
 add | modify | replace | remove | preserve | no-op
 
 **Steps**
-Executor-neutral implementation steps.
+- [ ] <executor-neutral step>
+- [ ] <executor-neutral step>
 
 **Verification**
-Checks, commands, or methods that verify the task.
+Checks, commands, or methods that verify the task. Reference the SPEC contract or acceptance scenario confirmed by each check.
 
 **Rollback / Safety**
 Task-specific rollback, safety notes, or stop conditions.
@@ -341,12 +344,12 @@ Keep the existing import behavior compatible while adding the new parser boundar
 preserve
 
 **Steps**
-1. Add or update compatibility coverage for the legacy import case.
-2. Make the minimal implementation change needed for the new boundary.
-3. Run the compatibility and regression checks named in the Verification Plan.
+- [ ] Add or update compatibility coverage for the legacy import case.
+- [ ] Make the minimal implementation change needed for the new boundary.
+- [ ] Run the compatibility and regression checks named in the Verification Plan.
 
 **Verification**
-The compatibility check proves SPEC-COMPAT-003 still passes.
+The compatibility check proves SPEC-COMPAT-003 still passes. Run the named regression suite and confirm no regressions against SPEC-COMPAT-003.
 
 **Rollback / Safety**
 Stop if the implementation requires changing the legacy file format without a new SPEC compatibility decision.
@@ -379,13 +382,13 @@ Introduce the document-open boundary needed by the approved DESIGN while preserv
 modify
 
 **Steps**
-1. Add failing compatibility/golden test for opening a supported existing design document.
-2. Add failing error-path test for unsupported parse behavior.
-3. Implement the minimal document-open integration path.
-4. Run targeted compatibility, error-path, and regression checks.
+- [ ] red: Add failing compatibility/golden test for opening a supported existing design document (covers SPEC-FR-001, SPEC-COMPAT-001).
+- [ ] red: Add failing error-path test for unsupported parse behavior (covers SPEC-ERR-001).
+- [ ] green: Implement the minimal document-open integration path until both tests pass.
+- [ ] verify: Run targeted compatibility, error-path, and regression checks.
 
 **Verification**
-Targeted tests prove SPEC-FR-001, SPEC-COMPAT-001, and SPEC-ERR-001.
+Targeted tests prove SPEC-FR-001, SPEC-COMPAT-001, and SPEC-ERR-001. All three tests must pass; no existing regression may fail.
 
 **Rollback / Safety**
 Stop if the implementation requires mutating existing documents before read-only compatibility tests pass.

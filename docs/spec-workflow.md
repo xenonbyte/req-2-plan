@@ -135,25 +135,27 @@ Suggested template:
 
 Purpose: convert design inputs into precise behavior contracts.
 
-Contract categories:
+Each contract is self-contained: it states the observable behavior, its trace to Requirement Brief or DESIGN, and enough detail for PLAN to derive a verification check — without requiring an executor to cross-reference other sections.
+
+Contract categories (with the anchor each contract must carry):
 
 ```text
-Functional Requirements
-Interfaces
-Data / State
-Error Behavior
-Permissions / Safety
-Compatibility
-Observability
-Acceptance Scenarios
-Edge Cases
+Functional Requirements   — traceable to Requirement Brief or DESIGN; observable user/operator outcome
+Interfaces                — traceable to Change Point or Boundary; inputs, outputs, error behavior
+Data / State              — traceable to DESIGN data/state decision; state transitions or persistence semantics
+Error Behavior            — traceable to Requirement Brief or boundary; recoverable/non-recoverable; no hidden side effects
+Permissions / Safety      — traceable to Requirement Brief or DESIGN; destructive-operation guard; data safety
+Compatibility             — traceable to Requirement Brief or DESIGN; what stays compatible or intentionally changes
+Observability             — traceable to Requirement Brief or DESIGN; log/metric/trace/status output
+Acceptance Scenarios      — traceable to Requirement Brief acceptance criteria; Given/When/Then or equivalent
+Edge Cases                — traceable to Risk Discovery or boundary analysis; boundary inputs, partial failures
 ```
 
 Every contract must be:
 
 - Specific.
 - Testable.
-- Traceable to Requirement Brief or DESIGN.
+- Traceable to Requirement Brief or DESIGN (inline trace anchor required, e.g. `SPEC-FR-001`).
 - Free of implementation-task language.
 - Free of unresolved design choice.
 
