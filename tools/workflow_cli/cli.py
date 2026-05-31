@@ -233,10 +233,31 @@ def _cmd_run_close(args):
             ),
             EXIT_CONFLICT,
         )
-    if not any(cp.stage == Stage.PLAN for cp in record.approved_checkpoints):
+    aa = get_active_artifact(record, Stage.PLAN)
+    if aa is None or aa.status != "approved":
+        print_and_exit(
+            format_error("PLAN active artifact must be approved before run-close", exit_code=EXIT_CONFLICT),
+            EXIT_CONFLICT,
+        )
+    disk_version = get_artifact_version(run_dir, Stage.PLAN)
+    if disk_version != aa.version:
         print_and_exit(
             format_error(
-                "Cannot close run without an approved plan checkpoint",
+                f"Active artifact version v{aa.version} does not match on-disk v{disk_version}",
+                exit_code=EXIT_CONFLICT,
+            ),
+            EXIT_CONFLICT,
+        )
+    has_matching_plan_checkpoint = any(
+        cp.stage == Stage.PLAN
+        and cp.artifact == aa.artifact
+        and cp.version == aa.version
+        for cp in record.approved_checkpoints
+    )
+    if not has_matching_plan_checkpoint:
+        print_and_exit(
+            format_error(
+                f"No approved PLAN checkpoint matching {aa.artifact} v{aa.version}",
                 exit_code=EXIT_CONFLICT,
             ),
             EXIT_CONFLICT,

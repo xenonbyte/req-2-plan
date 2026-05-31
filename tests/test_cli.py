@@ -388,6 +388,9 @@ class TestRunClose:
             record.status = RunStatus.CHECKPOINT_APPROVED
             record.current_stage = Stage.PLAN
             record.approved_checkpoints = [plan_checkpoint()]
+            from tools.workflow_cli.models import ActiveArtifact
+            record.active_artifacts = [ActiveArtifact(
+                stage=Stage.PLAN, artifact="07-plan.md", version=1, status="approved")]
             record.open_routes = [
                 OpenRoute(
                     route_id="GAP-001",
@@ -398,6 +401,8 @@ class TestRunClose:
                 )
             ]
             save_record(tmp, record)
+            run_dir = Path(tmp) / ".req-to-plan" / work_id
+            (run_dir / "07-plan.md").write_text("---\nr2p_version: 1\n---\nplan content", encoding="utf-8")
 
             invoke(["run-close", "--work-id", work_id], base_path=tmp, expect_exit=6)
 
@@ -413,7 +418,12 @@ class TestRunClose:
             record.status = RunStatus.CHECKPOINT_APPROVED
             record.current_stage = Stage.PLAN
             record.approved_checkpoints = [plan_checkpoint()]
+            from tools.workflow_cli.models import ActiveArtifact
+            record.active_artifacts = [ActiveArtifact(
+                stage=Stage.PLAN, artifact="07-plan.md", version=1, status="approved")]
             save_record(tmp, record)
+            run_dir = Path(tmp) / ".req-to-plan" / work_id
+            (run_dir / "07-plan.md").write_text("---\nr2p_version: 1\n---\nplan content", encoding="utf-8")
 
             invoke(["run-close", "--work-id", work_id], base_path=tmp)
 
