@@ -28,7 +28,7 @@
 
 In `docs/plan-workflow.md`, before the TDD Decomposition section, add a "PLAN Task Schema" subsection specifying each task as:
 
-```
+````
 ### PLAN-TASK-001: <title>
 Spec References: SPEC-...
 Change Type: add | modify | remove
@@ -42,7 +42,7 @@ Steps:
 - [ ] red: ...
 - [ ] green: ...
 Verification: ...
-```
+````
 
 State the rules: task headings match `^### PLAN-TASK-\d+`; `TDD Applicable` is `yes`/`no`; a `yes` task must include at least one fenced code block under `Skeleton`; steps use `- [ ]`.
 
@@ -78,8 +78,17 @@ class TestPlanCodeBlockGate(unittest.TestCase):
         self.standard = TierEstimate(base=TierBase.STANDARD, modifiers=frozenset())
         self.light = TierEstimate(base=TierBase.LIGHT, modifiers=frozenset())
 
-    def _plan(self, with_code: bool, outside_skeleton_code: bool = False) -> str:
-        skeleton = "```python\ndef f():\n    ...\n```\n" if with_code else "(prose only)\n"
+    def _plan(
+        self,
+        with_code: bool,
+        outside_skeleton_code: bool = False,
+        indented_skeleton_code: bool = False,
+    ) -> str:
+        if with_code:
+            fence_prefix = "  " if indented_skeleton_code else ""
+            skeleton = f"{fence_prefix}```python\ndef f():\n    ...\n{fence_prefix}```\n"
+        else:
+            skeleton = "(prose only)\n"
         verification = (
             "Verification:\n```python\nassert True\n```\n"
             if outside_skeleton_code
@@ -123,6 +132,19 @@ class TestPlanCodeBlockGate(unittest.TestCase):
             r = self.check(Path(tmp), self.Stage.PLAN, self.standard, [], self._plan(True))
             self.assertTrue(r.passed)
 
+    def test_standard_plan_with_indented_skeleton_code_block_passes_this_check(self):
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as tmp:
+            r = self.check(
+                Path(tmp),
+                self.Stage.PLAN,
+                self.standard,
+                [],
+                self._plan(True, indented_skeleton_code=True),
+            )
+            self.assertTrue(r.passed)
+
     def test_light_plan_without_code_block_exempt(self):
         import tempfile
         from pathlib import Path
@@ -151,7 +173,7 @@ In `gates.py`, add a helper:
 ```python
 _PLAN_TASK_RE = re.compile(r"^### PLAN-TASK-\d+", re.MULTILINE)
 _TDD_YES_RE = re.compile(r"TDD Applicable:\s*yes", re.IGNORECASE)
-_CODE_FENCE_RE = re.compile(r"^```", re.MULTILINE)
+_CODE_FENCE_RE = re.compile(r"^[ \t]{0,3}```", re.MULTILINE)
 _PLAN_TASK_FIELD_RE = re.compile(
     r"^(Spec References|Change Type|TDD Applicable|Files|Skeleton|Steps|Verification):",
     re.MULTILINE,
@@ -392,15 +414,26 @@ git commit -m "docs: checkbox-tracked PLAN steps and linear self-contained task/
 
 Per the Agent/CLI separation invariant, the CLI never generates SPEC/PLAN content — the Agent does. So this is a gate-integration test, not a generation test: it **writes** well-formed standard-tier SPEC and PLAN artifacts to a temp run, marks them ready, runs `gate-quality`, and asserts the gate's verdict on real artifact structure (not just the unit helpers).
 
-In `tests/test_integration.py`, add a standard-tier test (e.g. `TestStandardTierArtifactStructure::test_well_formed_spec_and_plan_pass_quality_gate`) that, for a `tier-lock --base standard` run:
+In `tests/test_integration.py`, add a standard-tier test named `TestStandardTierArtifactStructure::test_well_formed_spec_and_plan_pass_quality_gate`.
+
+Use real workflow state, not direct helper calls:
+
+- create a temp run with `run-start`;
+- lock it with `tier-lock --base standard --confirm`;
+- use the existing integration-test flow style (`stage-produce` -> `stage-ready` -> `gate-quality` -> review/approval -> `stage-advance` -> `gate-entry --stage <next_stage>`) to advance through upstream stages until `spec`;
+- produce and mark ready the SPEC artifact, run `gate-quality --stage spec`, approve the SPEC checkpoint, then `stage-advance` to `plan` and run `gate-entry --stage plan`;
+- produce and mark ready the PLAN artifact, then run `gate-quality --stage plan`.
+
+The passing flow asserts that:
 
 - writes a SPEC artifact whose `## External Documentation Checked` section has at least one real dependency-inventory row or the `N/A — no external dependencies` row, marks it ready, and asserts `gate-quality --stage spec` passes (exit 0);
 - writes a PLAN artifact with `PLAN-TASK-*` headings where every `TDD Applicable: yes` task has a fenced code block inside its `Skeleton` field and steps use `- [ ]` checkboxes, marks it ready, and asserts `gate-quality --stage plan` passes (exit 0);
-- as a negative guard, asserts a PLAN whose TDD-applicable task has its only fenced code block outside `Skeleton` fails `gate-quality` with exit 3.
+
+Add the negative PLAN guard in a separate temp run driven to the `plan` stage with the same `stage-advance` + `gate-entry` setup, then produce a PLAN whose TDD-applicable task has its only fenced code block outside `Skeleton`; assert `gate-quality --stage plan` fails with exit 3. This keeps `active_stage_draft` and current-stage checks aligned for each assertion.
 
 - [ ] **Step 2: Run the focused gate check**
 
-Run the focused test with `.venv/bin/python -m pytest tests/test_integration.py::<new-test-node> -v`.
+Run the focused test with `.venv/bin/python -m pytest tests/test_integration.py::TestStandardTierArtifactStructure::test_well_formed_spec_and_plan_pass_quality_gate -v`.
 Expected: PASS.
 
 - [ ] **Step 3: Run the whole suite**
@@ -422,12 +455,22 @@ git commit -m "docs: update test baseline after Part 3"
 
 ---
 
+## Safety, rollback, and stop conditions
+
+**Blast radius / data safety:** Part 3 changes only stage-spec documentation, `tools/workflow_cli/gates.py`, tests, and test-count baseline docs. It does not change `run.md` format, `RunRecord` fields, persisted run layout, production data, credentials, or external services. Existing runs remain readable; generated artifacts are only newly rejected when the relevant stage gate is rerun at the affected tier/stage.
+
+**Rollback:** revert the Part 3 commits in reverse order. Because there is no data migration or persistent format change, rollback is a normal `git revert` of the doc/gate/test/baseline commits.
+
+**Stop conditions:** stop and re-plan instead of guessing if the red test unexpectedly passes before the gate change, the green test still fails after the planned gate change, `gate-quality` fails because the test did not advance to the correct current stage or did not set `active_stage_draft`, the full suite fails outside the touched Part 3 behavior, the collected baseline cannot be reproduced, or unrelated worktree changes appear before a commit.
+
+---
+
 ## Self-Review
 
-**Spec coverage (Part 3):** machine-parseable schema (Task 1, §3.0); code-block hard-fail gate at standard tier, light/N-A exempt, scoped to `Skeleton` (Task 2, §3.1 + decision); SPEC External-Docs heading + non-empty inventory gate and doc (Task 3, §3.2 + TR7); checkbox steps + linear readability (Task 4, §3.3/§3.4); standard-tier artifact flow check + baseline (Task 5). ✓
+**Spec coverage (Part 3):** machine-parseable schema (Task 1, §3.0); code-block hard-fail gate at standard tier, light/N-A exempt, scoped to `Skeleton` (Task 2, §3.1 + decision); SPEC External-Docs heading + non-empty inventory gate and doc (Task 3, §3.2 + TR7); checkbox steps + linear readability (Task 4, §3.3/§3.4); standard-tier artifact flow check + baseline (Task 5); rollback and stop conditions (Safety section). ✓
 
 **Placeholder scan:** Tasks 1/4 are doc-structure edits (no code to inline beyond the schema example, which is shown); Tasks 2/3 carry full helper code and tests. No TBD/TODO.
 
 **Type consistency:** `_plan_tasks_missing_code`, `_has_external_docs_inventory`, `_is_external_docs_inventory_row`, and their regex constants are defined once in `gates.py`; `check_quality_gate` signature unchanged (uses existing `stage`, `tier.base`); `Stage.PLAN`/`Stage.SPEC`/`TierBase.STANDARD` are existing symbols.
 
-**Gate-firing scope:** Check 5 fires only for `stage == PLAN` and only accepts code in the task `Skeleton`; Check 6 only for `stage == SPEC` and rejects missing, empty, or prose-only External-Docs sections while accepting explicit `N/A` and dependency inventory rows — verified by `test_non_plan_stage_unaffected`, `test_standard_plan_code_block_outside_skeleton_fails`, `test_plan_stage_not_required_to_have_section`, `test_spec_empty_external_docs_section_fails`, `test_spec_external_docs_prose_only_fails`, and `test_spec_with_dependency_inventory_row_passes`.
+**Gate-firing scope:** Check 5 fires only for `stage == PLAN` and only accepts code in the task `Skeleton`, including Markdown-valid indented fences; Check 6 only for `stage == SPEC` and rejects missing, empty, or prose-only External-Docs sections while accepting explicit `N/A` and dependency inventory rows — verified by `test_non_plan_stage_unaffected`, `test_standard_plan_code_block_outside_skeleton_fails`, `test_standard_plan_with_indented_skeleton_code_block_passes_this_check`, `test_plan_stage_not_required_to_have_section`, `test_spec_empty_external_docs_section_fails`, `test_spec_external_docs_prose_only_fails`, and `test_spec_with_dependency_inventory_row_passes`.
