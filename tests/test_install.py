@@ -504,6 +504,20 @@ class TestStaleWrapperCleanup:
         assert not stale.exists(), "stale r2p-adapt wrapper must be removed on uninstall"
         assert_no_manifest_references(manifest_root, stale)
 
+    def test_uninstall_removes_stale_wrapper_referenced_only_by_removed_manifest(self, tmp_path):
+        svc, manifest_root, ph_root = make_service(tmp_path)
+        svc.install("claude")
+        svc.install("codex")
+        bin_dir = manifest_root / "bin"
+        stale = bin_dir / "r2p-adapt"
+        stale.write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+        seed_stale_wrapper_in_manifests(manifest_root, stale, platforms=("claude",))
+
+        svc.uninstall("claude")
+
+        assert not stale.exists(), "stale wrapper must be removed before its only manifest ref is dropped"
+        assert_no_manifest_references(manifest_root, stale)
+
     def test_uninstall_preserves_restored_user_backup_for_obsolete_shared_wrapper(self, tmp_path):
         svc, manifest_root, ph_root = make_service(tmp_path)
         svc.install("claude")

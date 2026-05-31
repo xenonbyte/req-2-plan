@@ -18,6 +18,7 @@ from tools.workflow_cli.models import (
     TierModifier,
     WorkId,
     STAGE_ARTIFACT_MAP,
+    is_command_allowed,
 )
 from tools.workflow_cli.state import (
     RunStateManager,
@@ -413,6 +414,16 @@ def _cmd_tier_estimate(args):
 
 def _cmd_tier_lock(args):
     record, mgr, run_dir = _load_run(args.work_id, args.base_path)
+
+    if not is_command_allowed(record.status, "CMD-TIER-LOCK"):
+        print_and_exit(
+            format_error(
+                f"Cannot tier-lock in status {record.status.value!r}; "
+                "must be active_stage_draft",
+                exit_code=EXIT_CONFLICT,
+            ),
+            EXIT_CONFLICT,
+        )
 
     if not args.confirm:
         print_and_exit(
@@ -901,11 +912,26 @@ def _cmd_stage_ready(args):
     record, mgr, run_dir = _load_run(args.work_id, args.base_path)
     stage = _parse_stage(args.stage)
 
-    if record.status == RunStatus.CHECKPOINT_APPROVED:
+    stage_ready_statuses = {
+        RunStatus.ACTIVE_STAGE_DRAFT,
+        RunStatus.QUALITY_GATE_FAILED,
+        RunStatus.CHECKPOINT_CHANGES_REQUESTED,
+    }
+    if record.status not in stage_ready_statuses:
         print_and_exit(
             format_error(
-                "Cannot mark artifacts ready after checkpoint approval; "
-                "use stage-advance or run-close",
+                f"Cannot mark artifacts ready in status {record.status.value!r}; "
+                "stage-ready is only allowed while drafting or repairing the current stage",
+                exit_code=EXIT_CONFLICT,
+            ),
+            EXIT_CONFLICT,
+        )
+
+    if stage != record.current_stage:
+        print_and_exit(
+            format_error(
+                f"Cannot mark stage {stage.value!r} ready while current stage is "
+                f"{record.current_stage.value!r}",
                 exit_code=EXIT_CONFLICT,
             ),
             EXIT_CONFLICT,

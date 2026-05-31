@@ -223,6 +223,10 @@ class InstallService:
                     restored_targets.add(str(target_path))
                 backup_path.unlink(missing_ok=True)
 
+        # Clean obsolete managed shared wrappers while this manifest can still
+        # prove ownership of stale shared bin paths.
+        self._cleanup_obsolete_managed_wrappers(preserve_paths=restored_targets)
+
         # Reference-count bin dir: only remove when no other platform manifests exist
         if not other_platforms_installed:
             if bin_dir.exists():
@@ -238,10 +242,6 @@ class InstallService:
 
         # Remove the manifest itself
         manifest_path.unlink(missing_ok=True)
-
-        # Clean obsolete managed shared wrappers even when another platform remains
-        # installed (normal uninstall skips shared bin/ paths in that case).
-        self._cleanup_obsolete_managed_wrappers(preserve_paths=restored_targets)
 
         return {"removed": removed, "restored": restored, "platform": platform}
 

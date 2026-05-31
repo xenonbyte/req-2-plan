@@ -3,6 +3,7 @@ Tests for tools/workflow_cli/agent_shortcuts.py
 """
 from __future__ import annotations
 
+import shlex
 import sys
 import tempfile
 from pathlib import Path
@@ -19,6 +20,15 @@ from tools.workflow_cli.agent_shortcuts import (
     write_active_pointer,
     main,
 )
+
+
+def _expected_workflow_cli_prefix(base: Path) -> str:
+    from tools.workflow_cli import agent_shortcuts as A
+
+    return (
+        f"env PYTHONPATH={shlex.quote(str(A._repo_root()))} "
+        f"{shlex.quote(sys.executable)} -m tools.workflow_cli --base-path {shlex.quote(str(base))}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -303,6 +313,7 @@ class TestCmdTierLock:
     def test_tier_lock_delegates_to_workflow_cli(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
+            _make_run(base, "WF-20260531-tier-lock")
             with patch(
                 "tools.workflow_cli.agent_shortcuts._run_cli",
                 return_value=0,
@@ -326,6 +337,33 @@ class TestCmdTierLock:
                 ],
                 base,
             )
+
+    def test_tier_lock_rejects_non_active_stage_before_delegating(self, capsys):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            work_id = "WF-20260531-tier-lock"
+            _make_run(base, work_id, RunStatus.CHECKPOINT_APPROVED)
+
+            with patch(
+                "tools.workflow_cli.agent_shortcuts._run_cli",
+                return_value=0,
+            ) as run_cli:
+                _invoke(
+                    [
+                        "tier-lock",
+                        "--work-id", work_id,
+                        "--base", "standard",
+                        "--confirm",
+                    ],
+                    base,
+                    expect_exit=6,
+                )
+
+            run_cli.assert_not_called()
+            out = capsys.readouterr().out
+            assert "blocked: tier_lock_not_allowed" in out
+            assert "status: checkpoint_approved" in out
+            assert "must_be: active_stage_draft" in out
 
 
 # ---------------------------------------------------------------------------
@@ -383,6 +421,29 @@ class TestCmdReopen:
 
 
 class TestContinueDriver:
+    def test_workflow_cli_command_uses_active_python_executable(self):
+        from tools.workflow_cli import agent_shortcuts as A
+
+        command = A._workflow_cli_command(
+            Path("/tmp/r2p-root"),
+            ["stage-ready", "--work-id", "WF-20260527-test", "--stage", "raw_requirement"],
+        )
+
+        assert f"{shlex.quote(sys.executable)} -m tools.workflow_cli" in command
+        assert "python3 -m tools.workflow_cli" not in command
+
+    def test_workflow_cli_command_uses_patched_active_python_executable(self):
+        from tools.workflow_cli import agent_shortcuts as A
+
+        with patch.object(A.sys, "executable", "python"):
+            command = A._workflow_cli_command(
+                Path("/tmp/r2p-root"),
+                ["stage-ready", "--work-id", "WF-20260527-test", "--stage", "raw_requirement"],
+            )
+
+        assert "python -m tools.workflow_cli" in command
+        assert "python3 -m tools.workflow_cli" not in command
+
     def test_continue_stops_at_unready_artifact(self, capsys):
         import tempfile
         from pathlib import Path
@@ -403,9 +464,7 @@ class TestContinueDriver:
                 A.main(["continue"], base_path=base)
             out = capsys.readouterr().out
             assert "stage-ready" in out
-            assert "PYTHONPATH=" in out
-            assert "python3 -m tools.workflow_cli" in out
-            assert f"--base-path {base}" in out
+            assert _expected_workflow_cli_prefix(base) in out
             assert (
                 f"stage-ready --work-id {pointer['selected_work_id']} "
                 "--stage raw_requirement"
@@ -465,9 +524,7 @@ class TestContinueDriver:
                 A.main(["continue"], base_path=base)
             out = capsys.readouterr().out
             assert "needs_repair" in out
-            assert "PYTHONPATH=" in out
-            assert "python3 -m tools.workflow_cli" in out
-            assert f"--base-path {base}" in out
+            assert _expected_workflow_cli_prefix(base) in out
             assert f"stage-update --work-id {work_id} --stage raw_requirement" in out
             assert exc.value.code == 0
             record = RunStateManager(base / ".req-to-plan" / work_id).load()
@@ -488,9 +545,7 @@ class TestContinueDriver:
             assert "tier_not_locked" in out
             # The suggested next step must be invocable without relying on the
             # wrapper directory being present on PATH.
-            assert "PYTHONPATH=" in out
-            assert "python3 -m tools.workflow_cli" in out
-            assert f"--base-path {base}" in out
+            assert _expected_workflow_cli_prefix(base) in out
             assert "r2p tier-lock" not in out
             assert "r2p-tier-lock" not in out
             assert f"tier-lock --work-id {work_id}" in out
@@ -511,9 +566,7 @@ class TestContinueDriver:
 
             out = capsys.readouterr().out
             assert "tier_not_locked" in out
-            assert "PYTHONPATH=" in out
-            assert "python3 -m tools.workflow_cli" in out
-            assert f"--base-path {base}" in out
+            assert _expected_workflow_cli_prefix(base) in out
             assert (
                 f"tier-lock --work-id {work_id} --base standard "
                 "--modifiers migration,safety --confirm"
@@ -541,9 +594,7 @@ class TestContinueDriver:
 
             out = capsys.readouterr().out
             assert "needs_human_approval" in out
-            assert "PYTHONPATH=" in out
-            assert "python3 -m tools.workflow_cli" in out
-            assert f"--base-path {base}" in out
+            assert _expected_workflow_cli_prefix(base) in out
             assert (
                 f"checkpoint-decide --work-id {work_id} --stage raw_requirement "
                 "--decision approved --confirm"
@@ -573,9 +624,7 @@ class TestContinueDriver:
             out = capsys.readouterr().out
             assert exc.value.code == 2
             assert "entry_gate_failed" in out
-            assert "PYTHONPATH=" in out
-            assert "python3 -m tools.workflow_cli" in out
-            assert f"--base-path {base}" in out
+            assert _expected_workflow_cli_prefix(base) in out
             assert f"gate-entry --work-id {work_id} --stage requirement_brief" in out
 
     def test_continue_entry_gate_failed_prints_executable_retry(self, capsys):
@@ -600,7 +649,5 @@ class TestContinueDriver:
 
             out = capsys.readouterr().out
             assert "entry_gate_failed" in out
-            assert "PYTHONPATH=" in out
-            assert "python3 -m tools.workflow_cli" in out
-            assert f"--base-path {base}" in out
+            assert _expected_workflow_cli_prefix(base) in out
             assert f"gate-entry --work-id {work_id} --stage requirement_brief" in out

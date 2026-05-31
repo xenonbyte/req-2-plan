@@ -8,12 +8,14 @@ from __future__ import annotations
 
 import argparse
 import re
+import shutil
 import shlex
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
 from tools.workflow_cli.models import RunStatus
+from tools.workflow_cli.output import EXIT_CONFLICT
 
 ACTIVE_POINTER_FILE = ".workflow-active"
 
@@ -165,12 +167,18 @@ def _repo_root() -> Path:
     return Path(__file__).resolve().parents[2]
 
 
+def _python_executable() -> str:
+    if sys.executable:
+        return sys.executable
+    return "python3" if shutil.which("python3") else "python"
+
+
 def _workflow_cli_command(base_path: Path, args_list: list[str]) -> str:
     return _shell_join(
         [
             "env",
             f"PYTHONPATH={_repo_root()}",
-            "python3",
+            _python_executable(),
             "-m",
             "tools.workflow_cli",
             "--base-path",
@@ -433,6 +441,22 @@ def _cmd_reopen(ns: argparse.Namespace, base_path: Path) -> None:
 
 
 def _cmd_tier_lock(ns: argparse.Namespace, base_path: Path) -> None:
+    run_path = base_path / ".req-to-plan" / ns.work_id / "run.md"
+    if not run_path.exists():
+        print(f"blocked: source_run_not_found\nwork_id: {ns.work_id}\n")
+        sys.exit(7)
+
+    from tools.workflow_cli.state import RunStateManager
+    record = RunStateManager(run_path.parent).load()
+    if record.status != RunStatus.ACTIVE_STAGE_DRAFT:
+        print(
+            "blocked: tier_lock_not_allowed\n"
+            f"work_id: {ns.work_id}\n"
+            f"status: {record.status.value}\n"
+            "must_be: active_stage_draft\n"
+        )
+        sys.exit(EXIT_CONFLICT)
+
     args = [
         "tier-lock",
         "--work-id", ns.work_id,
