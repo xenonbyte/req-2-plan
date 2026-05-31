@@ -199,22 +199,95 @@ def _cmd_continue(ns: argparse.Namespace, base_path: Path) -> None:
     if not pointer:
         print("no_selected_run: true\nnext: r2p-status --all\n")
         sys.exit(1)
-
     work_id = pointer["selected_work_id"]
     run_path = base_path / ".req-to-plan" / work_id / "run.md"
-    if run_path.exists():
-        from tools.workflow_cli.state import RunStateManager
-        try:
-            mgr = RunStateManager(run_path.parent)
-            record = mgr.load()
-            if is_terminal(record.status):
-                print(f"blocked: run_already_closed\nwork_id: {work_id}\nnext: r2p-adapt --executor superpowers\n")
-                sys.exit(1)
-        except Exception as e:
-            print(f"warning: could not load run state for {work_id!r}: {e}", file=sys.stderr)
+    if not run_path.exists():
+        print(f"blocked: source_run_not_found\nwork_id: {work_id}\n")
+        sys.exit(7)
 
-    exit_code = _run_cli(["run-resume", "--work-id", work_id], base_path)
-    sys.exit(exit_code)
+    from tools.workflow_cli.artifact import read_artifact
+    from tools.workflow_cli.state import RunStateManager, get_active_artifact
+    from tools.workflow_cli.models import RunStatus, Stage
+    manager = RunStateManager(run_path.parent)
+
+    while True:
+        record = manager.load()
+        s = record.status
+        stage = record.current_stage.value
+
+        if s == RunStatus.CLOSED_AT_PLAN_CHECKPOINT:
+            print(f"done: run_closed\nwork_id: {work_id}\nplan: 07-plan.md\n"
+                  "next: hand the PLAN to your executor\n")
+            sys.exit(0)
+
+        if s == RunStatus.ACTIVE_STAGE_DRAFT:
+            if record.tier_locked is None:
+                print(f"stop: tier_not_locked\nnext: r2p tier-lock\n")
+                sys.exit(0)
+            aa = get_active_artifact(record, record.current_stage)
+            try:
+                body = read_artifact(run_path.parent, record.current_stage).strip()
+            except FileNotFoundError:
+                body = ""
+            if aa is None or not body:
+                print(f"stop: needs_content\nstage: {stage}\n"
+                      f"next: produce {stage} content\n")
+                sys.exit(0)
+            if aa.status != "ready":
+                print(f"stop: needs_ready\nstage: {stage}\n"
+                      f"next: review the artifact, then stage-ready --stage {stage}\n")
+                sys.exit(0)
+            code = _run_cli(["gate-quality", "--work-id", work_id, "--stage", stage], base_path)
+            if code != 0:
+                sys.exit(code)
+            continue  # reload and run review-checkpoint before stopping for human approval
+
+        if s == RunStatus.READY_FOR_CHECKPOINT_REVIEW:
+            code = _run_cli(["review-checkpoint", "--work-id", work_id, "--stage", stage], base_path)
+            if code != 0:
+                sys.exit(code)
+            print(f"stop: needs_human_approval\nstage: {stage}\n"
+                  f"next: checkpoint-decide --stage {stage} --decision approved --confirm "
+                  "(or --decision changes_requested)\n")
+            sys.exit(0)
+
+        if s == RunStatus.CHECKPOINT_REVIEW:
+            print(f"stop: needs_human_approval\nstage: {stage}\n"
+                  f"next: checkpoint-decide --stage {stage} --decision approved --confirm\n")
+            sys.exit(0)
+
+        if s == RunStatus.CHECKPOINT_APPROVED:
+            if record.current_stage == Stage.PLAN:
+                code = _run_cli(["run-close", "--work-id", work_id], base_path)
+                if code == 0:
+                    print("done: closing\nplan: 07-plan.md\nnext: hand the PLAN to your executor\n")
+                sys.exit(code)
+            code = _run_cli(["stage-advance", "--work-id", work_id], base_path)
+            if code != 0:
+                sys.exit(code)
+            continue  # reload and run the NEXT_STAGE entry gate in the same continue call
+
+        if s == RunStatus.NEXT_STAGE:
+            code = _run_cli(["gate-entry", "--work-id", work_id, "--stage", stage], base_path)
+            if code != 0:
+                print(f"stop: entry_gate_failed\nstage: {stage}\nnext: repair upstream and rerun gate-entry\n")
+                sys.exit(code)
+            print(f"stop: entered_stage\nstage: {stage}\nnext: produce {stage} content\n")
+            sys.exit(0)
+
+        if s == RunStatus.ENTRY_GATE_FAILED:
+            print(f"stop: entry_gate_failed\nstage: {stage}\n"
+                  f"next: repair upstream checkpoints, then gate-entry --stage {stage}\n")
+            sys.exit(0)
+
+        if s in (RunStatus.QUALITY_GATE_FAILED, RunStatus.CHECKPOINT_CHANGES_REQUESTED):
+            print(f"stop: needs_repair\nstatus: {s.value}\nstage: {stage}\n"
+                  f"next: address the issue, then stage-update --stage {stage}\n")
+            sys.exit(0)
+
+        # Fallback: read-only resume context.
+        code = _run_cli(["run-resume", "--work-id", work_id], base_path)
+        sys.exit(code)
 
 
 def _cmd_status(ns: argparse.Namespace, base_path: Path) -> None:

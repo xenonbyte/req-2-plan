@@ -284,15 +284,14 @@ class TestCmdContinue:
             out = capsys.readouterr().out
             assert "no_selected_run" in out
 
-    def test_calls_run_resume_and_exits_0_for_open_run(self, capsys):
+    def test_stops_at_tier_not_locked_for_open_run(self, capsys):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
             _make_run(base, "WF-20260527-continue-target")
             write_active_pointer(base, "WF-20260527-continue-target")
-            with patch("tools.workflow_cli.agent_shortcuts._run_cli", return_value=0) as mock_cli:
-                _invoke(["continue"], base)
-            called_args = mock_cli.call_args[0][0]
-            assert "run-resume" in called_args
+            _invoke(["continue"], base, expect_exit=0)
+            out = capsys.readouterr().out
+            assert "tier_not_locked" in out
 
 
 # ---------------------------------------------------------------------------
@@ -378,3 +377,55 @@ class TestCmdReopen:
             assert "run-reopen" in called_args
             assert "--from" in called_args
             assert "WF-20260527-source" in called_args
+
+
+# ---------------------------------------------------------------------------
+# TestContinueDriver
+# ---------------------------------------------------------------------------
+
+
+class TestContinueDriver:
+    def test_continue_stops_at_unready_artifact(self, capsys):
+        import tempfile
+        from pathlib import Path
+        from tools.workflow_cli import agent_shortcuts as A
+        from tools.workflow_cli.models import TierBase, TierEstimate
+        from tools.workflow_cli.state import RunStateManager
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            with pytest.raises(SystemExit):
+                A.main(["start", "Add rate limiting"], base_path=base)
+            pointer = A.read_active_pointer(base)
+            manager = RunStateManager(base / ".req-to-plan" / pointer["selected_work_id"])
+            record = manager.load()
+            record.tier_locked = TierEstimate(TierBase.LIGHT)
+            manager.save(record)
+            # after start: ACTIVE_STAGE_DRAFT, raw_requirement artifact is draft (not ready)
+            with pytest.raises(SystemExit):
+                A.main(["continue"], base_path=base)
+            out = capsys.readouterr().out
+            assert "stage-ready" in out
+
+    def test_continue_new_stage_without_artifact_asks_for_production(self, capsys):
+        import tempfile
+        from pathlib import Path
+        from tools.workflow_cli import agent_shortcuts as A
+        from tools.workflow_cli.models import RunStatus, Stage, TierBase, TierEstimate
+        from tools.workflow_cli.state import RunStateManager
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            with pytest.raises(SystemExit):
+                A.main(["start", "Add rate limiting"], base_path=base)
+            pointer = A.read_active_pointer(base)
+            manager = RunStateManager(base / ".req-to-plan" / pointer["selected_work_id"])
+            record = manager.load()
+            record.tier_locked = TierEstimate(TierBase.LIGHT)
+            record.current_stage = Stage.REQUIREMENT_BRIEF
+            record.status = RunStatus.ACTIVE_STAGE_DRAFT
+            record.active_artifacts = []
+            manager.save(record)
+            with pytest.raises(SystemExit):
+                A.main(["continue"], base_path=base)
+            out = capsys.readouterr().out
+            assert "needs_content" in out
+            assert "produce requirement_brief content" in out
