@@ -577,6 +577,19 @@ def _cmd_gate_quality(args):
     record, mgr, run_dir = _load_run(args.work_id, args.base_path)
     stage = _parse_stage(args.stage)
 
+    # Precondition: only an active draft can be quality-gated. Re-running after a
+    # pass (ready_for_checkpoint_review) or failure (quality_gate_failed) would
+    # otherwise attempt an illegal self-transition; return a clean conflict instead.
+    if record.status != RunStatus.ACTIVE_STAGE_DRAFT:
+        print_and_exit(
+            format_error(
+                f"Cannot run quality gate in status {record.status.value!r}; "
+                "must be active_stage_draft",
+                exit_code=EXIT_CONFLICT,
+            ),
+            EXIT_CONFLICT,
+        )
+
     # Precondition: stage must be current and artifact must be ready
     if stage != record.current_stage:
         print_and_exit(
@@ -802,6 +815,22 @@ def _cmd_stage_update(args):
     stage = _parse_stage(args.stage)
     content = _resolve_content(args)
 
+    # In a repair loop, only the current stage may be updated; updating another
+    # stage must not clear the repair state for the unchanged current artifact.
+    repair_state = record.status in (
+        RunStatus.CHECKPOINT_CHANGES_REQUESTED,
+        RunStatus.QUALITY_GATE_FAILED,
+    )
+    if repair_state and stage != record.current_stage:
+        print_and_exit(
+            format_error(
+                f"Cannot update stage {stage.value!r} while repairing "
+                f"{record.current_stage.value!r}",
+                exit_code=EXIT_CONFLICT,
+            ),
+            EXIT_CONFLICT,
+        )
+
     am = ArtifactManager(run_dir)
     path = am.stage_update(stage, content)
 
@@ -812,7 +841,8 @@ def _cmd_stage_update(args):
     upsert_active_artifact(record, stage, artifact_file, new_version, "draft")
 
     # Close repair loops: flip back to ACTIVE_STAGE_DRAFT if in repair state
-    if record.status in (RunStatus.CHECKPOINT_CHANGES_REQUESTED, RunStatus.QUALITY_GATE_FAILED):
+    # (guaranteed above to be the current stage).
+    if repair_state:
         record = update_run_status(record, RunStatus.ACTIVE_STAGE_DRAFT)
 
     update_resume_context(record, last_operation=f"update_{stage.value}")
@@ -1235,6 +1265,16 @@ def _cmd_stage_advance(args):
         print_and_exit(
             format_error(
                 f"No approved checkpoint matching {stage.value} v{aa.version}",
+                exit_code=EXIT_CONFLICT,
+            ),
+            EXIT_CONFLICT,
+        )
+    open_routes = [r.route_id for r in record.open_routes if r.status == "open"]
+    if open_routes:
+        print_and_exit(
+            format_error(
+                "Cannot advance stage while routes remain open",
+                details=open_routes,
                 exit_code=EXIT_CONFLICT,
             ),
             EXIT_CONFLICT,

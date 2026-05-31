@@ -626,6 +626,35 @@ class TestGateQualityReadiness:
                    base_path=tmp, expect_exit=6)
 
 
+class TestGateQualityRepeatGuard:
+    def _to_ready(self, tmp, work_id):
+        invoke(["run-start", "--work-id", work_id, "--requirement", "foo"], base_path=tmp)
+        invoke(["tier-lock", "--work-id", work_id, "--base", "light", "--confirm"], base_path=tmp)
+        invoke(["stage-produce", "--work-id", work_id, "--stage", "raw_requirement",
+                "--content", "real content"], base_path=tmp)
+        invoke(["stage-ready", "--work-id", work_id, "--stage", "raw_requirement"], base_path=tmp)
+
+    def test_gate_quality_refused_when_already_quality_failed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work_id = "WF-20260527-gqr"
+            self._to_ready(tmp, work_id)
+            record = load_record(tmp, work_id)
+            record.status = RunStatus.QUALITY_GATE_FAILED
+            save_record(tmp, record)
+            # Re-running gate-quality from a non-draft state must be a clean conflict, not a traceback.
+            invoke(["gate-quality", "--work-id", work_id, "--stage", "raw_requirement"],
+                   base_path=tmp, expect_exit=6)
+
+    def test_gate_quality_refused_when_already_ready_for_review(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work_id = "WF-20260527-gqr2"
+            self._to_ready(tmp, work_id)
+            invoke(["gate-quality", "--work-id", work_id, "--stage", "raw_requirement"], base_path=tmp)
+            # Now READY_FOR_CHECKPOINT_REVIEW; a duplicate run must not raise an illegal self-transition.
+            invoke(["gate-quality", "--work-id", work_id, "--stage", "raw_requirement"],
+                   base_path=tmp, expect_exit=6)
+
+
 # ---------------------------------------------------------------------------
 # stage-update
 # ---------------------------------------------------------------------------
@@ -821,6 +850,23 @@ class TestRepairLoops:
                     "--content", "addressed changes"], base_path=tmp)
             record = load_record(tmp, work_id)
             assert record.status == RunStatus.ACTIVE_STAGE_DRAFT
+
+    def test_stage_update_rejects_wrong_stage_in_repair_state(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work_id = "WF-20260527-rws"
+            # run-start writes a raw_requirement artifact on disk.
+            invoke(["run-start", "--work-id", work_id, "--requirement", "foo"], base_path=tmp)
+            record = load_record(tmp, work_id)
+            # Repair is requested on requirement_brief (the current stage), not raw_requirement.
+            record.current_stage = Stage.REQUIREMENT_BRIEF
+            record.status = RunStatus.CHECKPOINT_CHANGES_REQUESTED
+            save_record(tmp, record)
+            # Updating a non-current stage must be refused and must NOT clear the repair state.
+            invoke(["stage-update", "--work-id", work_id, "--stage", "raw_requirement",
+                    "--content", "tampering with a different stage"],
+                   base_path=tmp, expect_exit=6)
+            record = load_record(tmp, work_id)
+            assert record.status == RunStatus.CHECKPOINT_CHANGES_REQUESTED
 
     def test_stage_produce_updates_ready_quality_failed_artifact_to_new_draft(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1199,6 +1245,25 @@ class TestStageAdvance:
             (run_dir / "00-raw-requirement.md").write_text(
                 "---\nr2p_version: 2\n---\nfoo", encoding="utf-8")
             invoke(["stage-advance", "--work-id", work_id], base_path=tmp, expect_exit=6)
+
+    def test_advance_refused_with_open_route(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work_id = "WF-20260527-sa5"
+            self._to_approved(tmp, work_id)
+            record = load_record(tmp, work_id)
+            record.open_routes = [
+                OpenRoute(
+                    route_id="GAP-001",
+                    from_stage=Stage.RAW_REQUIREMENT,
+                    owner_stage=Stage.RAW_REQUIREMENT,
+                    required_action="repair traceability",
+                    status="open",
+                )
+            ]
+            save_record(tmp, record)
+            invoke(["stage-advance", "--work-id", work_id], base_path=tmp, expect_exit=6)
+            record = load_record(tmp, work_id)
+            assert record.status == RunStatus.CHECKPOINT_APPROVED  # unchanged; not advanced
 
 
 # ---------------------------------------------------------------------------
