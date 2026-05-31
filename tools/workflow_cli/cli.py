@@ -708,6 +708,18 @@ def _cmd_stage_produce(args):
     record, mgr, run_dir = _load_run(args.work_id, args.base_path)
     stage = _parse_stage(args.stage)
 
+    if record.status in (RunStatus.NEXT_STAGE, RunStatus.ENTRY_GATE_FAILED):
+        next_step = "gate-entry first to enter the stage draft"
+        if record.status == RunStatus.ENTRY_GATE_FAILED:
+            next_step = "gate-entry after repairing upstream checkpoints"
+        print_and_exit(
+            format_error(
+                f"Cannot produce in {record.status.value}; run {next_step}",
+                exit_code=EXIT_CONFLICT,
+            ),
+            EXIT_CONFLICT,
+        )
+
     if stage != record.current_stage:
         print_and_exit(
             format_error(

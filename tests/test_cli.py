@@ -903,3 +903,25 @@ class TestGateEntryPersistence:
                    base_path=tmp, expect_exit=6)
             record = load_record(tmp, work_id)
             assert record.status == RunStatus.NEXT_STAGE
+
+
+class TestNextStageProduceGuard:
+    def test_stage_produce_refused_in_next_stage(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work_id = "WF-20260527-npg"
+            invoke(["run-start", "--work-id", work_id, "--requirement", "foo"], base_path=tmp)
+            record = load_record(tmp, work_id)
+            record.status = RunStatus.NEXT_STAGE
+            save_record(tmp, record)
+            invoke(["stage-produce", "--work-id", work_id, "--stage", "raw_requirement",
+                    "--content", "should be refused"], base_path=tmp, expect_exit=6)
+
+    def test_stage_produce_refused_in_entry_gate_failed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work_id = "WF-20260527-egp"
+            invoke(["run-start", "--work-id", work_id, "--requirement", "foo"], base_path=tmp)
+            record = load_record(tmp, work_id)
+            record.status = RunStatus.ENTRY_GATE_FAILED
+            save_record(tmp, record)
+            invoke(["stage-produce", "--work-id", work_id, "--stage", "raw_requirement",
+                    "--content", "should run gate-entry first"], base_path=tmp, expect_exit=6)

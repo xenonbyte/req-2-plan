@@ -262,7 +262,6 @@ ALLOWED_COMMANDS_BY_RUN_STATE: dict[RunStatus, set[str]] = {
     },
     RunStatus.NEXT_STAGE: {
         "CMD-GATE-ENTRY",
-        "CMD-STAGE-PRODUCE",
         "CMD-TIER-ESCALATE",
         "CMD-TIER-STATUS",
     },
