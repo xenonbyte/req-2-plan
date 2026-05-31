@@ -533,6 +533,9 @@ class TestEndToEndPipeline:
     """True end-to-end test: run-start → all stages → CLOSED via CLI."""
 
     def _drive_stage(self, invoke, tmp, work_id, stage, content):
+        # SPEC quality gate requires an External Documentation Checked section.
+        if stage == "spec" and "## External Documentation Checked" not in content:
+            content = content + "\n\n## External Documentation Checked\n\nN/A — no external dependencies\n"
         invoke(["stage-produce", "--work-id", work_id, "--stage", stage, "--content", content], base_path=tmp)
         invoke(["stage-ready", "--work-id", work_id, "--stage", stage], base_path=tmp)
         invoke(["gate-quality", "--work-id", work_id, "--stage", stage], base_path=tmp)

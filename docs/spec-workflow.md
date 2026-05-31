@@ -336,6 +336,7 @@ Pass conditions:
 - Remaining assumptions are explicit and non-blocking.
 - Risk Discovery Plan Inputs carried through DESIGN are represented as traceable `SPEC-PLAN-*` items where relevant.
 - Optional contract categories are either present or marked `N/A: <reason>` consistent with the locked tier per [Workflow Complexity Tier Rule](workflow-invariants.md#workflow-complexity-tier-rule).
+- The `## External Documentation Checked` section is present and contains either a completed dependency inventory row or the explicit `N/A — no external dependencies` row.
 
 Fail result:
 
@@ -532,6 +533,21 @@ Boundary inputs, missing data, repeated operations, concurrency, interruption, p
 
 ## Traceability
 Mapping from Requirement Brief, DESIGN, Change Point Inventory, and Integration Boundaries to SPEC sections.
+
+## External Documentation Checked
+Dependency inventory for every external library, framework, SDK, API, or CLI tool referenced by SPEC contracts. Verify each entry via Context7 or an authoritative source before finalizing SPEC. If no external dependencies are involved, include the explicit N/A row.
+
+| dependency | version | check date | conclusion |
+|---|---|---|---|
+| _example_ | _x.y_ | _YYYY-MM-DD_ | _Context7 checked / UNCONFIRMED_ |
+
+If there are no external dependencies:
+
+```text
+N/A — no external dependencies
+```
+
+Entries that cannot be verified must be marked `UNCONFIRMED`.
 
 ## Plan Inputs
 Contracts, checks, edge cases, and constraints that PLAN must implement and verify. Use the shared Plan Input schema and `SPEC-PLAN-*` IDs for plan inputs that must be traceable in PLAN, especially Risk Discovery Plan Inputs carried through DESIGN.

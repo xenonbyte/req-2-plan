@@ -140,6 +140,42 @@ def _find_duplicate_ids(content: str) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
+# SPEC External Documentation Checked helpers
+# ---------------------------------------------------------------------------
+
+_EXTERNAL_DOCS_RE = re.compile(r"^## External Documentation Checked\s*$", re.MULTILINE)
+_H2_RE = re.compile(r"^##\s+", re.MULTILINE)
+
+
+def _is_external_docs_inventory_row(line: str) -> bool:
+    if line == "N/A — no external dependencies":
+        return True
+    if not (line.startswith("|") and line.endswith("|")):
+        return False
+    cells = [cell.strip() for cell in line.strip("|").split("|")]
+    if len(cells) != 4:
+        return False
+    if [cell.lower() for cell in cells] == ["dependency", "version", "check date", "conclusion"]:
+        return False
+    if all(set(cell) <= {"-", ":", " "} for cell in cells):
+        return False
+    return all(cells)
+
+
+def _has_external_docs_inventory(content: str) -> bool:
+    match = _EXTERNAL_DOCS_RE.search(content)
+    if not match:
+        return False
+    next_heading = _H2_RE.search(content, match.end())
+    section = content[match.end(): next_heading.start() if next_heading else len(content)]
+    for line in section.splitlines():
+        stripped = line.strip()
+        if stripped and _is_external_docs_inventory_row(stripped):
+            return True
+    return False
+
+
+# ---------------------------------------------------------------------------
 # PLAN code-block gate helpers
 # ---------------------------------------------------------------------------
 
@@ -225,6 +261,15 @@ def check_quality_gate(
                 issues.append(
                     "PLAN has a 'TDD Applicable: yes' task with no fenced code block; "
                     "add a Skeleton code block (standard tier requires executable anchors)."
+                )
+
+        # Check 6 (SPEC): the External Documentation Checked section must be present and non-empty.
+        if stage == Stage.SPEC:
+            if not _has_external_docs_inventory(artifact_content):
+                issues.append(
+                    "SPEC is missing a non-empty '## External Documentation Checked' section. "
+                    "Add it; if there are no external dependencies, include an explicit "
+                    "'N/A — no external dependencies' row."
                 )
 
     return GateResult(

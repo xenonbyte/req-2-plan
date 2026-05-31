@@ -300,7 +300,9 @@ class TestQualityGate(unittest.TestCase):
             tier = self._locked_tier()
             content = (
                 "## REQ-ACC-001 First\nContent A.\n\n"
-                "## REQ-ACC-002 Second\nContent B.\n"
+                "## REQ-ACC-002 Second\nContent B.\n\n"
+                "## External Documentation Checked\n\n"
+                "N/A — no external dependencies\n"
             )
             result = self.check_quality_gate(
                 run_dir, self.Stage.SPEC, tier, [], content
@@ -581,6 +583,74 @@ class TestPlanCodeBlockGate(unittest.TestCase):
             r = self.check(Path(tmp), self.Stage.PLAN, self.standard, [], plan)
             self.assertFalse(r.passed)
             self.assertEqual(r.exit_code, 3)
+
+
+class TestSpecExternalDocsGate(unittest.TestCase):
+    def setUp(self):
+        from tools.workflow_cli.gates import check_quality_gate
+        from tools.workflow_cli.models import Stage, TierBase, TierEstimate
+        self.check = check_quality_gate
+        self.Stage = Stage
+        self.tier = TierEstimate(base=TierBase.STANDARD, modifiers=frozenset())
+
+    def test_spec_missing_external_docs_section_fails(self):
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as tmp:
+            body = "# SPEC\n\nSome contracts here.\n"
+            r = self.check(Path(tmp), self.Stage.SPEC, self.tier, [], body)
+            self.assertFalse(r.passed)
+            self.assertEqual(r.exit_code, 3)
+
+    def test_spec_empty_external_docs_section_fails(self):
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as tmp:
+            body = "# SPEC\n\n## External Documentation Checked\n\n## Next Section\n"
+            r = self.check(Path(tmp), self.Stage.SPEC, self.tier, [], body)
+            self.assertFalse(r.passed)
+            self.assertEqual(r.exit_code, 3)
+
+    def test_spec_external_docs_prose_only_fails(self):
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as tmp:
+            body = "# SPEC\n\n## External Documentation Checked\n\nChecked docs.\n"
+            r = self.check(Path(tmp), self.Stage.SPEC, self.tier, [], body)
+            self.assertFalse(r.passed)
+            self.assertEqual(r.exit_code, 3)
+
+    def test_spec_with_dependency_inventory_row_passes(self):
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as tmp:
+            body = (
+                "# SPEC\n\n## External Documentation Checked\n\n"
+                "| dependency | version | check date | conclusion |\n"
+                "| --- | --- | --- | --- |\n"
+                "| pytest | 8.x | 2026-05-31 | Context7 checked |\n"
+            )
+            r = self.check(Path(tmp), self.Stage.SPEC, self.tier, [], body)
+            self.assertTrue(r.passed)
+
+    def test_spec_with_na_row_passes(self):
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as tmp:
+            body = (
+                "# SPEC\n\n## External Documentation Checked\n\n"
+                "N/A — no external dependencies\n"
+            )
+            r = self.check(Path(tmp), self.Stage.SPEC, self.tier, [], body)
+            self.assertTrue(r.passed)
+
+    def test_plan_stage_not_required_to_have_section(self):
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as tmp:
+            body = "# PLAN\n\n### PLAN-TASK-001: x\nTDD Applicable: no\nSteps:\n- [ ] go\n"
+            r = self.check(Path(tmp), self.Stage.PLAN, self.tier, [], body)
+            self.assertTrue(all("External Documentation" not in i for i in r.issues))
 
 
 if __name__ == "__main__":
