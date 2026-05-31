@@ -473,5 +473,97 @@ def test_forced_review_version_aware(tmp_path):
     assert r2b.passed is True
 
 
+class TestPlanCodeBlockGate(unittest.TestCase):
+    def setUp(self):
+        from tools.workflow_cli.gates import check_quality_gate
+        from tools.workflow_cli.models import Stage, TierBase, TierEstimate
+        self.check = check_quality_gate
+        self.Stage = Stage
+        self.standard = TierEstimate(base=TierBase.STANDARD, modifiers=frozenset())
+        self.light = TierEstimate(base=TierBase.LIGHT, modifiers=frozenset())
+
+    def _plan(
+        self,
+        with_code: bool,
+        outside_skeleton_code: bool = False,
+        indented_skeleton_code: bool = False,
+    ) -> str:
+        if with_code:
+            fence_prefix = "  " if indented_skeleton_code else ""
+            skeleton = f"{fence_prefix}```python\ndef f():\n    ...\n{fence_prefix}```\n"
+        else:
+            skeleton = "(prose only)\n"
+        verification = (
+            "Verification:\n```python\nassert True\n```\n"
+            if outside_skeleton_code
+            else "Verification: run targeted tests\n"
+        )
+        return (
+            "# PLAN\n\n"
+            "### PLAN-TASK-001: do thing\n"
+            "TDD Applicable: yes\n"
+            f"Skeleton:\n{skeleton}\n"
+            "Steps:\n- [ ] red\n- [ ] green\n"
+            f"{verification}"
+        )
+
+    def test_standard_plan_without_code_block_fails(self):
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as tmp:
+            r = self.check(Path(tmp), self.Stage.PLAN, self.standard, [], self._plan(False))
+            self.assertFalse(r.passed)
+            self.assertEqual(r.exit_code, 3)
+
+    def test_standard_plan_code_block_outside_skeleton_fails(self):
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as tmp:
+            r = self.check(
+                Path(tmp),
+                self.Stage.PLAN,
+                self.standard,
+                [],
+                self._plan(False, outside_skeleton_code=True),
+            )
+            self.assertFalse(r.passed)
+            self.assertEqual(r.exit_code, 3)
+
+    def test_standard_plan_with_code_block_passes_this_check(self):
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as tmp:
+            r = self.check(Path(tmp), self.Stage.PLAN, self.standard, [], self._plan(True))
+            self.assertTrue(r.passed)
+
+    def test_standard_plan_with_indented_skeleton_code_block_passes_this_check(self):
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as tmp:
+            r = self.check(
+                Path(tmp),
+                self.Stage.PLAN,
+                self.standard,
+                [],
+                self._plan(True, indented_skeleton_code=True),
+            )
+            self.assertTrue(r.passed)
+
+    def test_light_plan_without_code_block_exempt(self):
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as tmp:
+            r = self.check(Path(tmp), self.Stage.PLAN, self.light, [], self._plan(False))
+            self.assertTrue(r.passed)
+
+    def test_non_plan_stage_unaffected(self):
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as tmp:
+            r = self.check(Path(tmp), self.Stage.SPEC, self.standard, [], "non-empty spec body\n")
+            # SPEC gate is Task 3; this check must not fire for PLAN-code on a SPEC artifact
+            self.assertTrue(all("code block" not in i for i in r.issues))
+
+
 if __name__ == "__main__":
     unittest.main()

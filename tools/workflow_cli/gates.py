@@ -140,6 +140,43 @@ def _find_duplicate_ids(content: str) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
+# PLAN code-block gate helpers
+# ---------------------------------------------------------------------------
+
+_PLAN_TASK_RE = re.compile(r"^### PLAN-TASK-\d+", re.MULTILINE)
+_TDD_YES_RE = re.compile(r"TDD Applicable:\s*yes", re.IGNORECASE)
+_CODE_FENCE_RE = re.compile(r"^[ \t]{0,3}```", re.MULTILINE)
+_PLAN_TASK_FIELD_RE = re.compile(
+    r"^(Spec References|Change Type|TDD Applicable|Files|Skeleton|Steps|Verification):",
+    re.MULTILINE,
+)
+
+
+def _plan_task_field_body(task_body: str, field: str) -> str:
+    field_re = re.compile(rf"^{re.escape(field)}:\s*(.*)$", re.MULTILINE)
+    match = field_re.search(task_body)
+    if not match:
+        return ""
+    next_match = _PLAN_TASK_FIELD_RE.search(task_body, match.end())
+    end = next_match.start() if next_match else len(task_body)
+    return f"{match.group(1)}\n{task_body[match.end():end]}"
+
+
+def _plan_tasks_missing_code(content: str) -> bool:
+    """True if any TDD-applicable PLAN-TASK has no fenced code block in its Skeleton field."""
+    starts = [m.start() for m in _PLAN_TASK_RE.finditer(content)]
+    if not starts:
+        return False
+    bounds = starts + [len(content)]
+    for i in range(len(starts)):
+        body = content[bounds[i]:bounds[i + 1]]
+        skeleton = _plan_task_field_body(body, "Skeleton")
+        if _TDD_YES_RE.search(body) and not _CODE_FENCE_RE.search(skeleton):
+            return True
+    return False
+
+
+# ---------------------------------------------------------------------------
 # Quality Gate
 # ---------------------------------------------------------------------------
 
@@ -180,6 +217,15 @@ def check_quality_gate(
             issues.append(
                 f"Duplicate ID definition {dup_id!r} found in artifact; each ID must be unique."
             )
+
+        # Check 5 (PLAN, standard tier): TDD-applicable tasks must carry a code block.
+        from tools.workflow_cli.models import TierBase
+        if stage == Stage.PLAN and tier.base == TierBase.STANDARD:
+            if _plan_tasks_missing_code(artifact_content):
+                issues.append(
+                    "PLAN has a 'TDD Applicable: yes' task with no fenced code block; "
+                    "add a Skeleton code block (standard tier requires executable anchors)."
+                )
 
     return GateResult(
         passed=len(issues) == 0,
