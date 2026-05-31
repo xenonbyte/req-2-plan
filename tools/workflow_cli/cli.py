@@ -615,15 +615,6 @@ def _cmd_gate_quality(args):
         mgr.save(record)
         print_and_exit(format_gate_result(result, gate_type="quality-gate"), result.exit_code)
 
-    # Check forced subagent review
-    reviews_dir = run_dir / "reviews"
-    review_result = check_forced_subagent_review(stage, record.tier_locked, reviews_dir)
-    if not review_result.passed:
-        print_and_exit(
-            format_gate_result(review_result, gate_type="subagent-review"),
-            EXIT_REVIEW_REQ,
-        )
-
     record = update_run_status(record, RunStatus.READY_FOR_CHECKPOINT_REVIEW)
     update_resume_context(
         record,

@@ -209,13 +209,14 @@ def check_forced_subagent_review(
     stage: Stage,
     tier: TierEstimate | None,
     reviews_dir: Path,
+    version: int = 1,
 ) -> GateResult:
     """
     Refuse with exit_code=5 when ALL conditions hold:
     - tier is not None
     - tier.modifiers intersects {MIGRATION, SAFETY, CROSS_PROJECT}
     - stage is in {DESIGN, SPEC, PLAN}
-    - no review files exist under reviews_dir for this stage
+    - no version-matched subagent review file exists under reviews_dir for this stage
     """
     # Condition 1: tier must exist
     if tier is None:
@@ -229,16 +230,10 @@ def check_forced_subagent_review(
     if stage not in _FORCED_REVIEW_STAGES:
         return GateResult(passed=True, issues=[], exit_code=0)
 
-    # Condition 4: check for existing review files
+    # Condition 4: a real, version-matched subagent review must exist.
     stage_name = stage.value
-    checkpoint_pattern = f"{stage_name}-checkpoint-review-*.md"
-    subagent_pattern = f"{stage_name}-subagent-review-*.md"
-
-    has_review = (
-        any(reviews_dir.glob(checkpoint_pattern))
-        or any(reviews_dir.glob(subagent_pattern))
-    )
-    if has_review:
+    subagent_file = reviews_dir / f"{stage_name}-subagent-review-v{version}.md"
+    if subagent_file.exists():
         return GateResult(passed=True, issues=[], exit_code=0)
 
     # All conditions met: require forced subagent review
@@ -248,7 +243,7 @@ def check_forced_subagent_review(
         issues=[
             f"Forced subagent review required for stage {stage.value!r} "
             f"with modifier(s) {triggering!r}. "
-            f"No review files found in {reviews_dir}. "
+            f"No version-matched review file '{subagent_file.name}' found in {reviews_dir}. "
             f"Run subagent review before checkpoint approval."
         ],
         exit_code=5,

@@ -387,32 +387,32 @@ class TestForcedSubagentReview(unittest.TestCase):
         self.assertEqual(result.exit_code, 5)
 
     def test_passes_when_modifiers_present_but_review_file_exists(self):
-        """Forced review passes when review file exists (checkpoint review)."""
+        """Forced review passes when version-matched subagent review file exists."""
         with tempfile.TemporaryDirectory() as tmpdir:
             reviews_dir = Path(tmpdir)
-            # Create a checkpoint review file
-            review_file = reviews_dir / "design-checkpoint-review-2026-01-01.md"
+            # Create a version-matched subagent review file (v1)
+            review_file = reviews_dir / "design-subagent-review-v1.md"
             review_file.write_text("Review notes here.")
             tier = self._locked_tier(
                 modifiers=frozenset({self.TierModifier.MIGRATION})
             )
             result = self.check_forced_subagent_review(
-                self.Stage.DESIGN, tier, reviews_dir
+                self.Stage.DESIGN, tier, reviews_dir, version=1
             )
         self.assertTrue(result.passed)
         self.assertEqual(result.exit_code, 0)
 
     def test_passes_when_modifiers_present_but_subagent_review_file_exists(self):
-        """Forced review passes when subagent review file exists."""
+        """Forced review passes when version-matched subagent review file exists."""
         with tempfile.TemporaryDirectory() as tmpdir:
             reviews_dir = Path(tmpdir)
-            review_file = reviews_dir / "design-subagent-review-001.md"
+            review_file = reviews_dir / "design-subagent-review-v1.md"
             review_file.write_text("Subagent review notes.")
             tier = self._locked_tier(
                 modifiers=frozenset({self.TierModifier.MIGRATION})
             )
             result = self.check_forced_subagent_review(
-                self.Stage.DESIGN, tier, reviews_dir
+                self.Stage.DESIGN, tier, reviews_dir, version=1
             )
         self.assertTrue(result.passed)
         self.assertEqual(result.exit_code, 0)
@@ -455,6 +455,22 @@ class TestForcedSubagentReview(unittest.TestCase):
             )
         self.assertTrue(result.passed)
         self.assertEqual(result.exit_code, 0)
+
+
+def test_forced_review_version_aware(tmp_path):
+    from tools.workflow_cli.gates import check_forced_subagent_review
+    from tools.workflow_cli.models import Stage, TierBase, TierEstimate, TierModifier
+    reviews = tmp_path / "reviews"
+    reviews.mkdir()
+    tier = TierEstimate(base=TierBase.STANDARD, modifiers=frozenset({TierModifier.SAFETY}))
+    # A v1 subagent-review must NOT clear a v2 approval.
+    (reviews / "design-subagent-review-v1.md").write_text("findings", encoding="utf-8")
+    r2 = check_forced_subagent_review(Stage.DESIGN, tier, reviews, version=2)
+    assert r2.passed is False and r2.exit_code == 5
+    # The matching v2 file clears it.
+    (reviews / "design-subagent-review-v2.md").write_text("findings", encoding="utf-8")
+    r2b = check_forced_subagent_review(Stage.DESIGN, tier, reviews, version=2)
+    assert r2b.passed is True
 
 
 if __name__ == "__main__":

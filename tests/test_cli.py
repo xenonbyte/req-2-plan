@@ -925,3 +925,29 @@ class TestNextStageProduceGuard:
             save_record(tmp, record)
             invoke(["stage-produce", "--work-id", work_id, "--stage", "raw_requirement",
                     "--content", "should run gate-entry first"], base_path=tmp, expect_exit=6)
+
+
+# ---------------------------------------------------------------------------
+# Forced Review Relocation Tests
+# ---------------------------------------------------------------------------
+
+
+class TestForcedReviewRelocation:
+    def test_gate_quality_allows_forced_modifier_to_reach_checkpoint_review(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work_id = "WF-20260527-frg"
+            invoke(["run-start", "--work-id", work_id, "--requirement", "foo"], base_path=tmp)
+            invoke(["tier-lock", "--work-id", work_id, "--base", "standard",
+                    "--modifiers", "safety", "--confirm"], base_path=tmp)
+            record = load_record(tmp, work_id)
+            record.current_stage = Stage.DESIGN
+            record.status = RunStatus.ACTIVE_STAGE_DRAFT
+            from tools.workflow_cli.models import ActiveArtifact
+            record.active_artifacts = [ActiveArtifact(
+                stage=Stage.DESIGN, artifact="05-design.md", version=1, status="ready")]
+            save_record(tmp, record)
+            run_dir = Path(tmp) / ".req-to-plan" / work_id
+            (run_dir / "05-design.md").write_text("---\nr2p_version: 1\n---\nbody", encoding="utf-8")
+            invoke(["gate-quality", "--work-id", work_id, "--stage", "design"], base_path=tmp)
+            record = load_record(tmp, work_id)
+            assert record.status == RunStatus.READY_FOR_CHECKPOINT_REVIEW
