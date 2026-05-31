@@ -509,6 +509,10 @@ class TestGateQuality:
                 ["stage-produce", "--work-id", "WF-20260527-test", "--stage", "raw_requirement", "--content", "Some content"],
                 base_path=tmp,
             )
+            invoke(
+                ["stage-ready", "--work-id", "WF-20260527-test", "--stage", "raw_requirement"],
+                base_path=tmp,
+            )
             # quality gate may pass or fail (structural), just check it runs cleanly
             with pytest.raises(SystemExit) as exc:
                 main(["--base-path", str(tmp), "gate-quality", "--work-id", "WF-20260527-test", "--stage", "raw_requirement"])
@@ -532,6 +536,10 @@ class TestGateQuality:
                 ["stage-produce", "--work-id", work_id, "--stage", "raw_requirement", "--content", "Some content"],
                 base_path=tmp,
             )
+            invoke(
+                ["stage-ready", "--work-id", work_id, "--stage", "raw_requirement"],
+                base_path=tmp,
+            )
 
             invoke(["gate-quality", "--work-id", work_id, "--stage", "raw_requirement"], base_path=tmp)
 
@@ -545,6 +553,20 @@ class TestGateQuality:
                 ["run-start", "--work-id", work_id, "--requirement", "Add rate limiting"],
                 base_path=tmp,
             )
+            invoke(
+                ["tier-lock", "--work-id", work_id, "--base", "standard", "--confirm"],
+                base_path=tmp,
+            )
+            # Produce artifact with content that will fail the quality gate (unclosed upstream ID)
+            invoke(
+                ["stage-produce", "--work-id", work_id, "--stage", "raw_requirement",
+                 "--content", "REQ-API-100 some requirement without closure tag"],
+                base_path=tmp,
+            )
+            invoke(
+                ["stage-ready", "--work-id", work_id, "--stage", "raw_requirement"],
+                base_path=tmp,
+            )
 
             invoke(
                 ["gate-quality", "--work-id", work_id, "--stage", "raw_requirement"],
@@ -554,6 +576,44 @@ class TestGateQuality:
 
             record = load_record(tmp, work_id)
             assert record.status == RunStatus.QUALITY_GATE_FAILED
+
+
+class TestGateQualityReadiness:
+    def test_gate_quality_refuses_unready_artifact(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work_id = "WF-20260527-nrdy"
+            invoke(["run-start", "--work-id", work_id, "--requirement", "foo"], base_path=tmp)
+            invoke(["tier-lock", "--work-id", work_id, "--base", "light", "--confirm"], base_path=tmp)
+            invoke(["stage-produce", "--work-id", work_id, "--stage", "raw_requirement",
+                    "--content", "draft only, never marked ready"], base_path=tmp)
+            invoke(["gate-quality", "--work-id", work_id, "--stage", "raw_requirement"],
+                   base_path=tmp, expect_exit=6)
+
+    def test_gate_quality_accepts_ready_artifact(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work_id = "WF-20260527-rady"
+            invoke(["run-start", "--work-id", work_id, "--requirement", "foo"], base_path=tmp)
+            invoke(["tier-lock", "--work-id", work_id, "--base", "light", "--confirm"], base_path=tmp)
+            invoke(["stage-produce", "--work-id", work_id, "--stage", "raw_requirement",
+                    "--content", "real content"], base_path=tmp)
+            invoke(["stage-ready", "--work-id", work_id, "--stage", "raw_requirement"], base_path=tmp)
+            invoke(["gate-quality", "--work-id", work_id, "--stage", "raw_requirement"], base_path=tmp)
+
+    def test_gate_quality_refuses_wrong_stage_or_stale_version(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work_id = "WF-20260527-gqst"
+            invoke(["run-start", "--work-id", work_id, "--requirement", "foo"], base_path=tmp)
+            invoke(["tier-lock", "--work-id", work_id, "--base", "light", "--confirm"], base_path=tmp)
+            invoke(["stage-produce", "--work-id", work_id, "--stage", "raw_requirement",
+                    "--content", "real content"], base_path=tmp)
+            invoke(["stage-ready", "--work-id", work_id, "--stage", "raw_requirement"], base_path=tmp)
+            invoke(["gate-quality", "--work-id", work_id, "--stage", "requirement_brief"],
+                   base_path=tmp, expect_exit=6)
+            run_dir = Path(tmp) / ".req-to-plan" / work_id
+            (run_dir / "00-raw-requirement.md").write_text(
+                "---\nr2p_version: 2\n---\nfoo", encoding="utf-8")
+            invoke(["gate-quality", "--work-id", work_id, "--stage", "raw_requirement"],
+                   base_path=tmp, expect_exit=6)
 
 
 # ---------------------------------------------------------------------------

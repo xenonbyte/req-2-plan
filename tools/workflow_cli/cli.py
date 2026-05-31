@@ -25,8 +25,9 @@ from tools.workflow_cli.state import (
     update_run_status,
     upsert_active_artifact,
     update_resume_context,
+    get_active_artifact,
 )
-from tools.workflow_cli.artifact import ArtifactManager, write_artifact, read_artifact
+from tools.workflow_cli.artifact import ArtifactManager, write_artifact, read_artifact, get_artifact_version
 from tools.workflow_cli.gates import check_entry_gate, check_quality_gate, check_forced_subagent_review
 from tools.workflow_cli.output import (
     format_success,
@@ -529,6 +530,34 @@ def _cmd_gate_entry(args):
 def _cmd_gate_quality(args):
     record, mgr, run_dir = _load_run(args.work_id, args.base_path)
     stage = _parse_stage(args.stage)
+
+    # Precondition: stage must be current and artifact must be ready
+    if stage != record.current_stage:
+        print_and_exit(
+            format_error(
+                f"Stage {stage.value!r} is not the current stage {record.current_stage.value!r}",
+                exit_code=EXIT_CONFLICT,
+            ),
+            EXIT_CONFLICT,
+        )
+    aa = get_active_artifact(record, stage)
+    if aa is None or aa.status != "ready":
+        print_and_exit(
+            format_error(
+                f"Stage {stage.value!r} artifact is not ready; run stage-ready first",
+                exit_code=EXIT_CONFLICT,
+            ),
+            EXIT_CONFLICT,
+        )
+    version = get_artifact_version(run_dir, stage)
+    if version != aa.version:
+        print_and_exit(
+            format_error(
+                f"Active artifact version v{aa.version} does not match on-disk v{version}",
+                exit_code=EXIT_CONFLICT,
+            ),
+            EXIT_CONFLICT,
+        )
 
     # Read artifact content
     try:
