@@ -23,10 +23,10 @@ Run each via Bash using the scripts in `{{R2P_BIN_DIR}}`:
 ## Usage Pattern
 
 1. `r2p-start "<requirement>"` — start a new run
-2. `r2p-continue` — repeatedly; auto-gates eligible runs, stops when human decisions needed
-   - Stops at: needs stage artifact content, needs stage ready mark, needs Quality Gate readiness, needs merged checkpoint review findings, needs human checkpoint approval, needs route handling
-   - Auto-gates: eligible entry gates, eligible Quality Gates, auto-marks ready if content passed gate
-   - Auto-approves: bundled checkpoints when eligible and all findings merged
-   - Auto-advances: moves to next stage after non-PLAN checkpoint approval and entry gate passes
-   - Auto-closes: closes the run when PLAN checkpoint is approved and no open routes remain
+2. `r2p-continue` — repeatedly; runs safe automatic steps, stops and suggests the next command when a human action is needed
+   - Stops at: tier not locked, needs stage artifact content, needs stage ready mark (you run `stage-ready`), needs human checkpoint approval (you run `checkpoint-decide`), entry gate failed, needs repair (Quality Gate failed or changes requested)
+   - Auto-runs: eligible entry gates, eligible Quality Gates, opens checkpoint review (`review-checkpoint`)
+   - Auto-advances: moves to the next stage after non-PLAN checkpoint approval, then runs that stage's entry gate
+   - Auto-closes: closes the run when the PLAN checkpoint is approved and no open routes remain
+   - Does NOT auto-mark artifacts ready and does NOT auto-approve checkpoints — those are human steps
 3. `r2p-adapt --executor superpowers` — generate executor-specific plan from approved PLAN
