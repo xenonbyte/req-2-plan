@@ -153,7 +153,7 @@ _PLAN_TASK_FIELD_RE = re.compile(
 
 
 def _plan_task_field_body(task_body: str, field: str) -> str:
-    field_re = re.compile(rf"^{re.escape(field)}:\s*(.*)$", re.MULTILINE)
+    field_re = re.compile(rf"^{re.escape(field)}:[ \t]*(.*)$", re.MULTILINE)
     match = field_re.search(task_body)
     if not match:
         return ""

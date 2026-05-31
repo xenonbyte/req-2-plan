@@ -564,6 +564,24 @@ class TestPlanCodeBlockGate(unittest.TestCase):
             # SPEC gate is Task 3; this check must not fire for PLAN-code on a SPEC artifact
             self.assertTrue(all("code block" not in i for i in r.issues))
 
+    def test_standard_plan_empty_skeleton_with_fence_in_next_field_fails(self):
+        import tempfile
+        from pathlib import Path
+        plan = (
+            "# PLAN\n\n"
+            "### PLAN-TASK-001: do thing\n"
+            "TDD Applicable: yes\n"
+            "Skeleton:\n"
+            "Steps:\n"
+            "```python\n"
+            "assert True\n"
+            "```\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            r = self.check(Path(tmp), self.Stage.PLAN, self.standard, [], plan)
+            self.assertFalse(r.passed)
+            self.assertEqual(r.exit_code, 3)
+
 
 if __name__ == "__main__":
     unittest.main()
