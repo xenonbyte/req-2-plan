@@ -4,7 +4,7 @@
 
 **Goal:** Wire the missing review→approve→advance state transitions so a non-forced run drives from `run-start` to `CLOSED_AT_PLAN_CHECKPOINT` purely through CLI/shortcut commands, and make `r2p-continue` a real driver.
 
-**Architecture:** The CLI holds state authority; every transition goes through `update_run_status` (which enforces `ALLOWED_TRANSITIONS`). Three new commands (`review-checkpoint`, `checkpoint-decide`, `stage-advance`) add the approve/advance segment; five existing handlers are corrected (gate-entry persistence, gate-quality readiness, forced-review guard relocation, repair-loop status flips, NEXT_STAGE produce guard). Checkpoints are human approvals — the CLI never auto-approves.
+**Architecture:** The CLI holds state authority; every transition goes through `update_run_status` (which enforces `ALLOWED_TRANSITIONS`). Three new commands (`review-checkpoint`, `checkpoint-decide`, `stage-advance`) add the approve/advance segment; six existing handlers are corrected (gate-entry persistence, gate-quality readiness, forced-review guard relocation, repair-loop status flips, NEXT_STAGE/ENTRY_GATE_FAILED produce guards, run-close checkpoint matching). Checkpoints are human approvals — the CLI never auto-approves.
 
 **Tech Stack:** Python 3.10+ stdlib only (argparse, pathlib, unittest via pytest), Markdown run state. Tests run with `.venv/bin/python -m pytest`.
 
@@ -117,6 +117,7 @@ class TestRepairLoops:
         invoke(["tier-lock", "--work-id", work_id, "--base", "light", "--confirm"], base_path=tmp)
         invoke(["stage-produce", "--work-id", work_id, "--stage", "raw_requirement",
                 "--content", "x"], base_path=tmp)
+        invoke(["stage-ready", "--work-id", work_id, "--stage", "raw_requirement"], base_path=tmp)
         record = load_record(tmp, work_id)
         record.status = RunStatus.QUALITY_GATE_FAILED
         save_record(tmp, record)
@@ -143,6 +144,38 @@ class TestRepairLoops:
                     "--content", "addressed changes"], base_path=tmp)
             record = load_record(tmp, work_id)
             assert record.status == RunStatus.ACTIVE_STAGE_DRAFT
+
+    def test_stage_produce_updates_ready_quality_failed_artifact_to_new_draft(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work_id = "WF-20260527-rpq"
+            self._to_quality_failed(tmp, work_id)
+            invoke(["stage-produce", "--work-id", work_id, "--stage", "raw_requirement",
+                    "--content", "replacement content"], base_path=tmp)
+            record = load_record(tmp, work_id)
+            assert record.status == RunStatus.ACTIVE_STAGE_DRAFT
+            from tools.workflow_cli.state import get_active_artifact
+            aa = get_active_artifact(record, Stage.RAW_REQUIREMENT)
+            assert aa.version == 2
+            assert aa.status == "draft"
+
+    def test_stage_produce_updates_ready_changes_requested_artifact_to_new_draft(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work_id = "WF-20260527-rpc"
+            invoke(["run-start", "--work-id", work_id, "--requirement", "foo"], base_path=tmp)
+            invoke(["stage-produce", "--work-id", work_id, "--stage", "raw_requirement",
+                    "--content", "x"], base_path=tmp)
+            invoke(["stage-ready", "--work-id", work_id, "--stage", "raw_requirement"], base_path=tmp)
+            record = load_record(tmp, work_id)
+            record.status = RunStatus.CHECKPOINT_CHANGES_REQUESTED
+            save_record(tmp, record)
+            invoke(["stage-produce", "--work-id", work_id, "--stage", "raw_requirement",
+                    "--content", "addressed changes"], base_path=tmp)
+            record = load_record(tmp, work_id)
+            assert record.status == RunStatus.ACTIVE_STAGE_DRAFT
+            from tools.workflow_cli.state import get_active_artifact
+            aa = get_active_artifact(record, Stage.RAW_REQUIREMENT)
+            assert aa.version == 2
+            assert aa.status == "draft"
 ```
 
 - [ ] **Step 2: Run to verify it fails**
@@ -150,7 +183,7 @@ class TestRepairLoops:
 Run: `.venv/bin/python -m pytest tests/test_cli.py::TestRepairLoops -v`
 Expected: FAIL — `stage-update` leaves status at QUALITY_GATE_FAILED / CHECKPOINT_CHANGES_REQUESTED (it only sets the artifact to "draft", never the run status).
 
-- [ ] **Step 3: Add the status flip to `_cmd_stage_update`**
+- [ ] **Step 3: Add the status flip to `_cmd_stage_update` and `_cmd_stage_produce`**
 
 In `_cmd_stage_update`, after `upsert_active_artifact(record, stage, artifact_file, new_version, "draft")` and before `update_resume_context(...)`, insert:
 
@@ -158,6 +191,34 @@ In `_cmd_stage_update`, after `upsert_active_artifact(record, stage, artifact_fi
     if record.status in (RunStatus.CHECKPOINT_CHANGES_REQUESTED, RunStatus.QUALITY_GATE_FAILED):
         record = update_run_status(record, RunStatus.ACTIVE_STAGE_DRAFT)
 ```
+
+In `_cmd_stage_produce`, the repair states must not call `ArtifactManager.stage_produce(...)` on an existing ready artifact. After `content = _resolve_content(args)`, branch repair states to `ArtifactManager.stage_update(...)` semantics, then flip the run back to draft:
+
+```python
+    am = ArtifactManager(run_dir)
+    artifact_file = STAGE_ARTIFACT_MAP[stage]
+    repair_state = record.status in (
+        RunStatus.CHECKPOINT_CHANGES_REQUESTED,
+        RunStatus.QUALITY_GATE_FAILED,
+    )
+    try:
+        if repair_state:
+            path = am.stage_update(stage, content)
+            from tools.workflow_cli.artifact import get_artifact_version
+            new_version = get_artifact_version(run_dir, stage)
+        else:
+            path = am.stage_produce(stage, content)
+            new_version = 1
+    except FileExistsError as e:
+        print_and_exit(format_error(str(e), exit_code=EXIT_CONFLICT), EXIT_CONFLICT)
+
+    record = update_run_status(record, RunStatus.ACTIVE_STAGE_DRAFT)
+    upsert_active_artifact(record, stage, artifact_file, new_version, "draft")
+```
+
+Remove the old unconditional `record.status = ...`, `stage_produce(...)`, and v1-only `upsert_active_artifact(...)` block so the repair branch cannot hit `FileExistsError` on a ready artifact. Do not apply this to `ENTRY_GATE_FAILED`; Task 5 keeps `stage-produce` refused there so the repair path stays `gate-entry`.
+
+Keep the existing `update_resume_context(record, ...)`, `mgr.save(record)`, and `print_and_exit(...)` lines that follow unchanged — only replace the three-line `am.stage_produce / record.status = / upsert_active_artifact(v1)` block directly above them.
 
 - [ ] **Step 4: Allow CMD-STAGE-UPDATE from QUALITY_GATE_FAILED in the matrix**
 
@@ -216,6 +277,22 @@ class TestGateQualityReadiness:
                     "--content", "real content"], base_path=tmp)
             invoke(["stage-ready", "--work-id", work_id, "--stage", "raw_requirement"], base_path=tmp)
             invoke(["gate-quality", "--work-id", work_id, "--stage", "raw_requirement"], base_path=tmp)
+
+    def test_gate_quality_refuses_wrong_stage_or_stale_version(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work_id = "WF-20260527-gqs"
+            invoke(["run-start", "--work-id", work_id, "--requirement", "foo"], base_path=tmp)
+            invoke(["tier-lock", "--work-id", work_id, "--base", "light", "--confirm"], base_path=tmp)
+            invoke(["stage-produce", "--work-id", work_id, "--stage", "raw_requirement",
+                    "--content", "real content"], base_path=tmp)
+            invoke(["stage-ready", "--work-id", work_id, "--stage", "raw_requirement"], base_path=tmp)
+            invoke(["gate-quality", "--work-id", work_id, "--stage", "requirement_brief"],
+                   base_path=tmp, expect_exit=6)
+            run_dir = Path(tmp) / ".req-to-plan" / work_id
+            (run_dir / "00-raw-requirement.md").write_text(
+                "---\nr2p_version: 2\n---\nfoo", encoding="utf-8")
+            invoke(["gate-quality", "--work-id", work_id, "--stage", "raw_requirement"],
+                   base_path=tmp, expect_exit=6)
 ```
 
 - [ ] **Step 2: Run to verify it fails**
@@ -229,6 +306,15 @@ In `_cmd_gate_quality`, right after `stage = _parse_stage(args.stage)` and befor
 
 ```python
     from tools.workflow_cli.state import get_active_artifact
+    from tools.workflow_cli.artifact import get_artifact_version
+    if stage != record.current_stage:
+        print_and_exit(
+            format_error(
+                f"Stage {stage.value!r} is not the current stage {record.current_stage.value!r}",
+                exit_code=EXIT_CONFLICT,
+            ),
+            EXIT_CONFLICT,
+        )
     aa = get_active_artifact(record, stage)
     if aa is None or aa.status != "ready":
         print_and_exit(
@@ -238,9 +324,18 @@ In `_cmd_gate_quality`, right after `stage = _parse_stage(args.stage)` and befor
             ),
             EXIT_CONFLICT,
         )
+    version = get_artifact_version(run_dir, stage)
+    if version != aa.version:
+        print_and_exit(
+            format_error(
+                f"Active artifact version v{aa.version} does not match on-disk v{version}",
+                exit_code=EXIT_CONFLICT,
+            ),
+            EXIT_CONFLICT,
+        )
 ```
 
-(`get_active_artifact` exists in `state.py`.)
+(`get_active_artifact` exists in `state.py`; `get_artifact_version` exists in `artifact.py`.)
 
 - [ ] **Step 4: Fix the existing produce→gate test**
 
@@ -294,6 +389,19 @@ class TestGateEntryPersistence:
             invoke(["gate-entry", "--work-id", work_id, "--stage", "raw_requirement"], base_path=tmp)
             record = load_record(tmp, work_id)
             assert record.status == RunStatus.ACTIVE_STAGE_DRAFT  # unchanged from run-start
+
+    def test_gate_entry_refuses_wrong_stage_in_stateful_modes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work_id = "WF-20260527-ge4"
+            invoke(["run-start", "--work-id", work_id, "--requirement", "foo"], base_path=tmp)
+            record = load_record(tmp, work_id)
+            record.current_stage = Stage.REQUIREMENT_BRIEF
+            record.status = RunStatus.NEXT_STAGE
+            save_record(tmp, record)
+            invoke(["gate-entry", "--work-id", work_id, "--stage", "raw_requirement"],
+                   base_path=tmp, expect_exit=6)
+            record = load_record(tmp, work_id)
+            assert record.status == RunStatus.NEXT_STAGE
 ```
 
 - [ ] **Step 2: Run to verify it fails**
@@ -331,7 +439,20 @@ Replace the body of `_cmd_gate_entry` from the `output = ...` line onward with:
 
 (Note: `ENTRY_GATE_FAILED → ENTRY_GATE_FAILED` is a no-op re-write; guard it if `update_run_status` rejects same-state — it does not, since `ALLOWED_TRANSITIONS` for a failed re-run targets ACTIVE on pass. On fail from ENTRY_GATE_FAILED the status is already ENTRY_GATE_FAILED, so only call `update_run_status` when `target != record.status`:)
 
-Wrap the transition:
+Before calling `check_entry_gate(...)`, reject wrong-stage stateful entry gates:
+
+```python
+    if record.status in (RunStatus.NEXT_STAGE, RunStatus.ENTRY_GATE_FAILED) and stage != record.current_stage:
+        print_and_exit(
+            format_error(
+                f"Cannot run entry gate for {stage.value!r}; current stage is {record.current_stage.value!r}",
+                exit_code=EXIT_CONFLICT,
+            ),
+            EXIT_CONFLICT,
+        )
+```
+
+Then wrap the transition:
 
 ```python
     if record.status in (RunStatus.NEXT_STAGE, RunStatus.ENTRY_GATE_FAILED):
@@ -359,7 +480,7 @@ git add tools/workflow_cli/cli.py tests/test_cli.py
 git commit -m "feat(cli): gate-entry persists status in next_stage/entry_gate_failed"
 ```
 
-### Task 5: stage-produce refuses NEXT_STAGE; remove CMD-STAGE-PRODUCE from the matrix there
+### Task 5: stage-produce refuses NEXT_STAGE and ENTRY_GATE_FAILED
 
 **Files:**
 - Modify: `tools/workflow_cli/cli.py` (`_cmd_stage_produce` ~654)
@@ -379,6 +500,16 @@ class TestNextStageProduceGuard:
             save_record(tmp, record)
             invoke(["stage-produce", "--work-id", work_id, "--stage", "raw_requirement",
                     "--content", "should be refused"], base_path=tmp, expect_exit=6)
+
+    def test_stage_produce_refused_in_entry_gate_failed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work_id = "WF-20260527-egp"
+            invoke(["run-start", "--work-id", work_id, "--requirement", "foo"], base_path=tmp)
+            record = load_record(tmp, work_id)
+            record.status = RunStatus.ENTRY_GATE_FAILED
+            save_record(tmp, record)
+            invoke(["stage-produce", "--work-id", work_id, "--stage", "raw_requirement",
+                    "--content", "should run gate-entry first"], base_path=tmp, expect_exit=6)
 ```
 
 - [ ] **Step 2: Run to verify it fails**
@@ -386,15 +517,18 @@ class TestNextStageProduceGuard:
 Run: `.venv/bin/python -m pytest tests/test_cli.py::TestNextStageProduceGuard -v`
 Expected: FAIL (stage-produce currently runs; it only checks `stage != current_stage`).
 
-- [ ] **Step 3: Add the NEXT_STAGE guard**
+- [ ] **Step 3: Add the NEXT_STAGE / ENTRY_GATE_FAILED guard**
 
 In `_cmd_stage_produce`, immediately after `stage = _parse_stage(args.stage)` and before the `if stage != record.current_stage:` check, insert:
 
 ```python
-    if record.status == RunStatus.NEXT_STAGE:
+    if record.status in (RunStatus.NEXT_STAGE, RunStatus.ENTRY_GATE_FAILED):
+        next_step = "gate-entry first to enter the stage draft"
+        if record.status == RunStatus.ENTRY_GATE_FAILED:
+            next_step = "gate-entry after repairing upstream checkpoints"
         print_and_exit(
             format_error(
-                "Cannot produce in next_stage; run gate-entry first to enter the stage draft",
+                f"Cannot produce in {record.status.value}; run {next_step}",
                 exit_code=EXIT_CONFLICT,
             ),
             EXIT_CONFLICT,
@@ -413,7 +547,7 @@ In `models.py`, `ALLOWED_COMMANDS_BY_RUN_STATE[RunStatus.NEXT_STAGE]` (~line 262
     },
 ```
 
-(Keep whatever non-produce entries are already present; only remove CMD-STAGE-PRODUCE.)
+(Keep whatever non-produce entries are already present; only remove CMD-STAGE-PRODUCE. `ENTRY_GATE_FAILED` already routes through `CMD-GATE-ENTRY`; do not add produce there.)
 
 - [ ] **Step 5: Run to verify it passes**
 
@@ -424,7 +558,7 @@ Expected: PASS.
 
 ```bash
 git add tools/workflow_cli/cli.py tools/workflow_cli/models.py tests/test_cli.py
-git commit -m "fix(cli): refuse stage-produce in next_stage (entry gate must run first)"
+git commit -m "fix(cli): refuse stage-produce before entry gate has passed"
 ```
 
 ### Task 6: Classify CMD-RUN-RESUME as read-only
@@ -472,7 +606,38 @@ git commit -m "fix(models): classify CMD-RUN-RESUME as read-only"
 
 **Files:**
 - Modify: `tools/workflow_cli/gates.py` (`check_forced_subagent_review` ~208)
+- Modify: `tools/workflow_cli/cli.py` (`_cmd_gate_quality` forced-review call)
+- Test: `tests/test_cli.py`
 - Test: `tests/test_gates.py`
+
+- [ ] **Step 0: Move the forced-review guard out of `gate-quality`**
+
+Before changing the helper signature, remove the `check_forced_subagent_review(...)` call from `_cmd_gate_quality`. `gate-quality` must no longer return exit 5 for forced modifiers; the forced-review check moves to `checkpoint-decide approved` in Task 9. Add this CLI regression:
+
+```python
+class TestForcedReviewRelocation:
+    def test_gate_quality_allows_forced_modifier_to_reach_checkpoint_review(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work_id = "WF-20260527-frg"
+            invoke(["run-start", "--work-id", work_id, "--requirement", "foo"], base_path=tmp)
+            invoke(["tier-lock", "--work-id", work_id, "--base", "standard",
+                    "--modifiers", "safety", "--confirm"], base_path=tmp)
+            record = load_record(tmp, work_id)
+            record.current_stage = Stage.DESIGN
+            record.status = RunStatus.ACTIVE_STAGE_DRAFT
+            from tools.workflow_cli.models import ActiveArtifact
+            record.active_artifacts = [ActiveArtifact(
+                stage=Stage.DESIGN, artifact="05-design.md", version=1, status="ready")]
+            save_record(tmp, record)
+            run_dir = Path(tmp) / ".req-to-plan" / work_id
+            (run_dir / "05-design.md").write_text("---\nr2p_version: 1\n---\nbody", encoding="utf-8")
+            invoke(["gate-quality", "--work-id", work_id, "--stage", "design"], base_path=tmp)
+            record = load_record(tmp, work_id)
+            assert record.status == RunStatus.READY_FOR_CHECKPOINT_REVIEW
+```
+
+Run: `.venv/bin/python -m pytest tests/test_cli.py::TestForcedReviewRelocation -v`
+Expected before removing the guard: FAIL with exit 5. Expected after removing it: PASS.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -573,6 +738,24 @@ class TestReviewCheckpoint:
             invoke(["run-start", "--work-id", work_id, "--requirement", "foo"], base_path=tmp)
             invoke(["review-checkpoint", "--work-id", work_id, "--stage", "raw_requirement"],
                    base_path=tmp, expect_exit=6)
+
+    def test_review_checkpoint_refuses_unready_or_stale_artifact(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work_id = "WF-20260527-rcs"
+            invoke(["run-start", "--work-id", work_id, "--requirement", "foo"], base_path=tmp)
+            record = load_record(tmp, work_id)
+            record.status = RunStatus.READY_FOR_CHECKPOINT_REVIEW
+            save_record(tmp, record)
+            invoke(["review-checkpoint", "--work-id", work_id, "--stage", "raw_requirement"],
+                   base_path=tmp, expect_exit=6)
+            record = load_record(tmp, work_id)
+            record.active_artifacts[0].status = "ready"
+            save_record(tmp, record)
+            run_dir = Path(tmp) / ".req-to-plan" / work_id
+            (run_dir / "00-raw-requirement.md").write_text(
+                "---\nr2p_version: 2\n---\nfoo", encoding="utf-8")
+            invoke(["review-checkpoint", "--work-id", work_id, "--stage", "raw_requirement"],
+                   base_path=tmp, expect_exit=6)
 ```
 
 - [ ] **Step 2: Run to verify it fails**
@@ -608,12 +791,35 @@ def _cmd_review_checkpoint(args):
         )
 
     from tools.workflow_cli.artifact import get_artifact_version
+    from tools.workflow_cli.state import get_active_artifact
+    aa = get_active_artifact(record, stage)
+    if aa is None:
+        print_and_exit(
+            format_error(f"No active artifact for stage {stage.value!r}", exit_code=EXIT_CONFLICT),
+            EXIT_CONFLICT,
+        )
+    if aa.status != "ready":
+        print_and_exit(
+            format_error(
+                f"Stage {stage.value!r} artifact must be ready before checkpoint review",
+                exit_code=EXIT_CONFLICT,
+            ),
+            EXIT_CONFLICT,
+        )
     version = get_artifact_version(run_dir, stage)
+    if version != aa.version:
+        print_and_exit(
+            format_error(
+                f"Active artifact version v{aa.version} does not match on-disk v{version}",
+                exit_code=EXIT_CONFLICT,
+            ),
+            EXIT_CONFLICT,
+        )
     reviews_dir = run_dir / "reviews"
     reviews_dir.mkdir(parents=True, exist_ok=True)
-    marker = reviews_dir / f"{stage.value}-checkpoint-review-v{version}.md"
+    marker = reviews_dir / f"{stage.value}-checkpoint-review-v{aa.version}.md"
     marker.write_text(
-        f"# Checkpoint review marker\n\nstage: {stage.value}\nversion: {version}\n"
+        f"# Checkpoint review marker\n\nstage: {stage.value}\nversion: {aa.version}\n"
         "status: ready for human decision\n",
         encoding="utf-8",
     )
@@ -703,6 +909,17 @@ class TestCheckpointDecide:
             assert record.status == RunStatus.CHECKPOINT_APPROVED
             assert any(cp.stage == Stage.RAW_REQUIREMENT for cp in record.approved_checkpoints)
 
+    def test_approve_preserves_downstream_authorization(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work_id = "WF-20260527-cd2a"
+            self._to_review(tmp, work_id)
+            invoke(["checkpoint-decide", "--work-id", work_id, "--stage", "raw_requirement",
+                    "--decision", "approved", "--confirm",
+                    "--downstream-authorization", "custom_next"], base_path=tmp)
+            record = load_record(tmp, work_id)
+            checkpoint = next(cp for cp in record.approved_checkpoints if cp.stage == Stage.RAW_REQUIREMENT)
+            assert checkpoint.downstream_authorization == "custom_next"
+
     def test_changes_requested_transitions_and_sets_resume(self):
         with tempfile.TemporaryDirectory() as tmp:
             work_id = "WF-20260527-cd3"
@@ -739,6 +956,48 @@ class TestCheckpointDecide:
                     "--decision", "approved", "--confirm"], base_path=tmp)
             record = load_record(tmp, work_id)
             assert record.status == RunStatus.CHECKPOINT_APPROVED
+
+    def test_forced_modifier_gate_quality_passes_but_approve_requires_review(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work_id = "WF-20260527-cd5"
+            invoke(["run-start", "--work-id", work_id, "--requirement", "foo"], base_path=tmp)
+            invoke(["tier-lock", "--work-id", work_id, "--base", "standard",
+                    "--modifiers", "safety", "--confirm"], base_path=tmp)
+            record = load_record(tmp, work_id)
+            record.current_stage = Stage.DESIGN
+            record.status = RunStatus.ACTIVE_STAGE_DRAFT
+            from tools.workflow_cli.models import ActiveArtifact
+            record.active_artifacts = [ActiveArtifact(
+                stage=Stage.DESIGN, artifact="05-design.md", version=1, status="ready")]
+            save_record(tmp, record)
+            run_dir = Path(tmp) / ".req-to-plan" / work_id
+            (run_dir / "05-design.md").write_text("---\nr2p_version: 1\n---\nbody", encoding="utf-8")
+            invoke(["gate-quality", "--work-id", work_id, "--stage", "design"], base_path=tmp)
+            invoke(["review-checkpoint", "--work-id", work_id, "--stage", "design"], base_path=tmp)
+            invoke(["checkpoint-decide", "--work-id", work_id, "--stage", "design",
+                    "--decision", "approved", "--confirm"], base_path=tmp, expect_exit=5)
+            reviews = run_dir / "reviews"
+            (reviews / "design-subagent-review-v1.md").write_text("findings", encoding="utf-8")
+            invoke(["checkpoint-decide", "--work-id", work_id, "--stage", "design",
+                    "--decision", "approved", "--confirm"], base_path=tmp)
+
+    def test_checkpoint_decide_refuses_unready_or_stale_artifact(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work_id = "WF-20260527-cds"
+            self._to_review(tmp, work_id)
+            record = load_record(tmp, work_id)
+            record.active_artifacts[0].status = "draft"
+            save_record(tmp, record)
+            invoke(["checkpoint-decide", "--work-id", work_id, "--stage", "raw_requirement",
+                    "--decision", "changes_requested"], base_path=tmp, expect_exit=6)
+            record = load_record(tmp, work_id)
+            record.active_artifacts[0].status = "ready"
+            save_record(tmp, record)
+            run_dir = Path(tmp) / ".req-to-plan" / work_id
+            (run_dir / "00-raw-requirement.md").write_text(
+                "---\nr2p_version: 2\n---\nfoo", encoding="utf-8")
+            invoke(["checkpoint-decide", "--work-id", work_id, "--stage", "raw_requirement",
+                    "--decision", "changes_requested"], base_path=tmp, expect_exit=6)
 ```
 
 - [ ] **Step 2: Run to verify it fails**
@@ -771,10 +1030,28 @@ def _cmd_checkpoint_decide(args):
         )
 
     from tools.workflow_cli.state import get_active_artifact
+    from tools.workflow_cli.artifact import get_artifact_version
     aa = get_active_artifact(record, stage)
     if aa is None:
         print_and_exit(
             format_error(f"No active artifact for stage {stage.value!r}", exit_code=EXIT_CONFLICT),
+            EXIT_CONFLICT,
+        )
+    if aa.status != "ready":
+        print_and_exit(
+            format_error(
+                f"Stage {stage.value!r} artifact must be ready before checkpoint decision",
+                exit_code=EXIT_CONFLICT,
+            ),
+            EXIT_CONFLICT,
+        )
+    version = get_artifact_version(run_dir, stage)
+    if version != aa.version:
+        print_and_exit(
+            format_error(
+                f"Active artifact version v{aa.version} does not match on-disk v{version}",
+                exit_code=EXIT_CONFLICT,
+            ),
             EXIT_CONFLICT,
         )
 
@@ -839,7 +1116,7 @@ def _cmd_checkpoint_decide(args):
     from tools.workflow_cli.models import NEXT_STAGE_MAP
     from tools.workflow_cli.state import add_checkpoint
     next_stage = NEXT_STAGE_MAP.get(stage)
-    downstream = next_stage.value if next_stage else "close_workflow_run"
+    downstream = args.downstream_authorization or (next_stage.value if next_stage else "close_workflow_run")
     artifact_file = STAGE_ARTIFACT_MAP[stage]
     add_checkpoint(record, stage, artifact_file, aa.version, downstream)
     upsert_active_artifact(record, stage, artifact_file, aa.version, "approved")
@@ -923,6 +1200,7 @@ class TestStageAdvance:
             invoke(["run-start", "--work-id", work_id, "--requirement", "foo"], base_path=tmp)
             record = load_record(tmp, work_id)
             record.status = RunStatus.CHECKPOINT_APPROVED  # hand-edited, no checkpoint row
+            record.active_artifacts[0].status = "approved"
             save_record(tmp, record)
             invoke(["stage-advance", "--work-id", work_id], base_path=tmp, expect_exit=6)
 
@@ -938,6 +1216,22 @@ class TestStageAdvance:
             record.active_artifacts = [ActiveArtifact(
                 stage=Stage.PLAN, artifact="07-plan.md", version=1, status="approved")]
             save_record(tmp, record)
+            invoke(["stage-advance", "--work-id", work_id], base_path=tmp, expect_exit=6)
+
+    def test_advance_refuses_non_approved_active_artifact(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work_id = "WF-20260527-sa4"
+            self._to_approved(tmp, work_id)
+            record = load_record(tmp, work_id)
+            record.active_artifacts[0].status = "ready"
+            save_record(tmp, record)
+            invoke(["stage-advance", "--work-id", work_id], base_path=tmp, expect_exit=6)
+            record = load_record(tmp, work_id)
+            record.active_artifacts[0].status = "approved"
+            save_record(tmp, record)
+            run_dir = Path(tmp) / ".req-to-plan" / work_id
+            (run_dir / "00-raw-requirement.md").write_text(
+                "---\nr2p_version: 2\n---\nfoo", encoding="utf-8")
             invoke(["stage-advance", "--work-id", work_id], base_path=tmp, expect_exit=6)
 ```
 
@@ -972,13 +1266,40 @@ def _cmd_stage_advance(args):
         )
 
     from tools.workflow_cli.state import get_active_artifact
+    from tools.workflow_cli.artifact import get_artifact_version
     aa = get_active_artifact(record, stage)
-    if aa is None or not any(
-        cp.stage == stage and cp.version == aa.version for cp in record.approved_checkpoints
+    if aa is None:
+        print_and_exit(
+            format_error(
+                f"No active artifact for stage {stage.value!r}",
+                exit_code=EXIT_CONFLICT,
+            ),
+            EXIT_CONFLICT,
+        )
+    if aa.status != "approved":
+        print_and_exit(
+            format_error(
+                f"Stage {stage.value!r} artifact must be approved before stage-advance",
+                exit_code=EXIT_CONFLICT,
+            ),
+            EXIT_CONFLICT,
+        )
+    version = get_artifact_version(run_dir, stage)
+    if version != aa.version:
+        print_and_exit(
+            format_error(
+                f"Active artifact version v{aa.version} does not match on-disk v{version}",
+                exit_code=EXIT_CONFLICT,
+            ),
+            EXIT_CONFLICT,
+        )
+    if not any(
+        cp.stage == stage and cp.artifact == aa.artifact and cp.version == aa.version
+        for cp in record.approved_checkpoints
     ):
         print_and_exit(
             format_error(
-                f"No approved checkpoint matching {stage.value} v{aa.version if aa else '?'}",
+                f"No approved checkpoint matching {stage.value} v{aa.version}",
                 exit_code=EXIT_CONFLICT,
             ),
             EXIT_CONFLICT,
@@ -1024,6 +1345,113 @@ Expected: PASS.
 ```bash
 git add tools/workflow_cli/cli.py tests/test_cli.py
 git commit -m "feat(cli): add stage-advance (checkpoint_approved -> next_stage)"
+```
+
+### Task 10a: Strengthen `run-close` checkpoint matching
+
+**Files:**
+- Modify: `tools/workflow_cli/cli.py` (`_cmd_run_close` ~230)
+- Test: `tests/test_cli.py`
+
+- [ ] **Step 1: Write the failing test**
+
+Add a regression that a hand-edited `CHECKPOINT_APPROVED` plan run cannot close unless the approved PLAN checkpoint matches the active plan artifact and version:
+
+```python
+class TestRunCloseCheckpointMatch:
+    def test_run_close_refuses_mismatched_plan_checkpoint(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work_id = "WF-20260527-rcm"
+            invoke(["run-start", "--work-id", work_id, "--requirement", "foo"], base_path=tmp)
+            record = load_record(tmp, work_id)
+            record.status = RunStatus.CHECKPOINT_APPROVED
+            record.current_stage = Stage.PLAN
+            from tools.workflow_cli.models import ActiveArtifact, CheckpointRecord
+            record.active_artifacts = [ActiveArtifact(
+                stage=Stage.PLAN, artifact="07-plan.md", version=2, status="approved")]
+            record.approved_checkpoints = [CheckpointRecord(
+                stage=Stage.PLAN, artifact="07-plan.md", version=1,
+                approved_at="2026-05-27T00:00:00+00:00",
+                downstream_authorization="close_workflow_run")]
+            save_record(tmp, record)
+            invoke(["run-close", "--work-id", work_id], base_path=tmp, expect_exit=6)
+
+    def test_run_close_refuses_stale_plan_artifact_on_disk(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work_id = "WF-20260527-rcmd"
+            invoke(["run-start", "--work-id", work_id, "--requirement", "foo"], base_path=tmp)
+            record = load_record(tmp, work_id)
+            record.status = RunStatus.CHECKPOINT_APPROVED
+            record.current_stage = Stage.PLAN
+            from tools.workflow_cli.models import ActiveArtifact, CheckpointRecord
+            record.active_artifacts = [ActiveArtifact(
+                stage=Stage.PLAN, artifact="07-plan.md", version=1, status="approved")]
+            record.approved_checkpoints = [CheckpointRecord(
+                stage=Stage.PLAN, artifact="07-plan.md", version=1,
+                approved_at="2026-05-27T00:00:00+00:00",
+                downstream_authorization="close_workflow_run")]
+            save_record(tmp, record)
+            run_dir = Path(tmp) / ".req-to-plan" / work_id
+            (run_dir / "07-plan.md").write_text(
+                "---\nr2p_version: 2\n---\nfoo", encoding="utf-8")
+            invoke(["run-close", "--work-id", work_id], base_path=tmp, expect_exit=6)
+```
+
+- [ ] **Step 2: Run to verify it fails**
+
+Run: `.venv/bin/python -m pytest tests/test_cli.py::TestRunCloseCheckpointMatch -v`
+Expected: FAIL — current `run-close` only checks that some PLAN checkpoint exists (both tests fail).
+
+- [ ] **Step 3: Require active PLAN artifact + matching approved checkpoint**
+
+In `_cmd_run_close`, replace the broad `any(cp.stage == Stage.PLAN ...)` check with:
+
+This mirrors `stage-advance`'s active artifact/version guard, but for the terminal PLAN checkpoint.
+
+```python
+    from tools.workflow_cli.state import get_active_artifact
+    from tools.workflow_cli.artifact import get_artifact_version
+    aa = get_active_artifact(record, Stage.PLAN)
+    if aa is None or aa.status != "approved":
+        print_and_exit(
+            format_error("PLAN active artifact must be approved before run-close", exit_code=EXIT_CONFLICT),
+            EXIT_CONFLICT,
+        )
+    disk_version = get_artifact_version(run_dir, Stage.PLAN)
+    if disk_version != aa.version:
+        print_and_exit(
+            format_error(
+                f"Active artifact version v{aa.version} does not match on-disk v{disk_version}",
+                exit_code=EXIT_CONFLICT,
+            ),
+            EXIT_CONFLICT,
+        )
+    has_matching_plan_checkpoint = any(
+        cp.stage == Stage.PLAN
+        and cp.artifact == aa.artifact
+        and cp.version == aa.version
+        for cp in record.approved_checkpoints
+    )
+    if not has_matching_plan_checkpoint:
+        print_and_exit(
+            format_error(
+                f"No approved PLAN checkpoint matching {aa.artifact} v{aa.version}",
+                exit_code=EXIT_CONFLICT,
+            ),
+            EXIT_CONFLICT,
+        )
+```
+
+- [ ] **Step 4: Run to verify it passes**
+
+Run: `.venv/bin/python -m pytest tests/test_cli.py::TestRunCloseCheckpointMatch tests/test_cli.py::TestRunClose -v`
+Expected: PASS (both `test_run_close_refuses_mismatched_plan_checkpoint` and `test_run_close_refuses_stale_plan_artifact_on_disk` pass).
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add tools/workflow_cli/cli.py tests/test_cli.py
+git commit -m "fix(cli): require matching plan checkpoint before run-close"
 ```
 
 ### Task 11: Model + test_models for the new command intents
@@ -1087,14 +1515,44 @@ class TestContinueDriver:
         import tempfile
         from pathlib import Path
         from tools.workflow_cli import agent_shortcuts as A
+        from tools.workflow_cli.models import TierBase, TierEstimate
+        from tools.workflow_cli.state import RunStateManager
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
             A.main(["start", "Add rate limiting"], base_path=base)
+            pointer = A.read_active_pointer(base)
+            manager = RunStateManager(base / ".req-to-plan" / pointer["selected_work_id"])
+            record = manager.load()
+            record.tier_locked = TierEstimate(TierBase.LIGHT)
+            manager.save(record)
             # after start: ACTIVE_STAGE_DRAFT, raw_requirement artifact is draft (not ready)
             with pytest.raises(SystemExit):
                 A.main(["continue"], base_path=base)
             out = capsys.readouterr().out
             assert "stage-ready" in out
+
+    def test_continue_new_stage_without_artifact_asks_for_production(self, capsys):
+        import tempfile
+        from pathlib import Path
+        from tools.workflow_cli import agent_shortcuts as A
+        from tools.workflow_cli.models import RunStatus, Stage, TierBase, TierEstimate
+        from tools.workflow_cli.state import RunStateManager
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            A.main(["start", "Add rate limiting"], base_path=base)
+            pointer = A.read_active_pointer(base)
+            manager = RunStateManager(base / ".req-to-plan" / pointer["selected_work_id"])
+            record = manager.load()
+            record.tier_locked = TierEstimate(TierBase.LIGHT)
+            record.current_stage = Stage.REQUIREMENT_BRIEF
+            record.status = RunStatus.ACTIVE_STAGE_DRAFT
+            record.active_artifacts = []
+            manager.save(record)
+            with pytest.raises(SystemExit):
+                A.main(["continue"], base_path=base)
+            out = capsys.readouterr().out
+            assert "needs_content" in out
+            assert "produce requirement_brief content" in out
 ```
 
 - [ ] **Step 2: Run to verify it fails**
@@ -1118,64 +1576,89 @@ def _cmd_continue(ns: argparse.Namespace, base_path: Path) -> None:
         print(f"blocked: source_run_not_found\nwork_id: {work_id}\n")
         sys.exit(7)
 
+    from tools.workflow_cli.artifact import read_artifact
     from tools.workflow_cli.state import RunStateManager, get_active_artifact
     from tools.workflow_cli.models import RunStatus, Stage
-    record = RunStateManager(run_path.parent).load()
-    s = record.status
-    stage = record.current_stage.value
+    manager = RunStateManager(run_path.parent)
 
-    if s == RunStatus.CLOSED_AT_PLAN_CHECKPOINT:
-        print(f"done: run_closed\nwork_id: {work_id}\nplan: 07-plan.md\n"
-              "next: hand the PLAN to your executor\n")
-        sys.exit(0)
+    while True:
+        record = manager.load()
+        s = record.status
+        stage = record.current_stage.value
 
-    if s == RunStatus.ACTIVE_STAGE_DRAFT:
-        if record.tier_locked is None:
-            print(f"stop: tier_not_locked\nnext: r2p tier-lock\n")
+        if s == RunStatus.CLOSED_AT_PLAN_CHECKPOINT:
+            print(f"done: run_closed\nwork_id: {work_id}\nplan: 07-plan.md\n"
+                  "next: hand the PLAN to your executor\n")
             sys.exit(0)
-        aa = get_active_artifact(record, record.current_stage)
-        if aa is None or aa.status != "ready":
-            print(f"stop: needs_ready\nstage: {stage}\n"
-                  f"next: review the artifact, then stage-ready --stage {stage}\n")
+
+        if s == RunStatus.ACTIVE_STAGE_DRAFT:
+            if record.tier_locked is None:
+                print(f"stop: tier_not_locked\nnext: r2p tier-lock\n")
+                sys.exit(0)
+            aa = get_active_artifact(record, record.current_stage)
+            try:
+                body = read_artifact(run_path.parent, record.current_stage).strip()
+            except FileNotFoundError:
+                body = ""
+            if aa is None or not body:
+                print(f"stop: needs_content\nstage: {stage}\n"
+                      f"next: produce {stage} content\n")
+                sys.exit(0)
+            if aa.status != "ready":
+                print(f"stop: needs_ready\nstage: {stage}\n"
+                      f"next: review the artifact, then stage-ready --stage {stage}\n")
+                sys.exit(0)
+            code = _run_cli(["gate-quality", "--work-id", work_id, "--stage", stage], base_path)
+            if code != 0:
+                sys.exit(code)
+            continue  # reload and run review-checkpoint before stopping for human approval
+
+        if s == RunStatus.READY_FOR_CHECKPOINT_REVIEW:
+            code = _run_cli(["review-checkpoint", "--work-id", work_id, "--stage", stage], base_path)
+            if code != 0:
+                sys.exit(code)
+            print(f"stop: needs_human_approval\nstage: {stage}\n"
+                  f"next: checkpoint-decide --stage {stage} --decision approved --confirm "
+                  "(or --decision changes_requested)\n")
             sys.exit(0)
-        code = _run_cli(["gate-quality", "--work-id", work_id, "--stage", stage], base_path)
+
+        if s == RunStatus.CHECKPOINT_REVIEW:
+            print(f"stop: needs_human_approval\nstage: {stage}\n"
+                  f"next: checkpoint-decide --stage {stage} --decision approved --confirm\n")
+            sys.exit(0)
+
+        if s == RunStatus.CHECKPOINT_APPROVED:
+            if record.current_stage == Stage.PLAN:
+                code = _run_cli(["run-close", "--work-id", work_id], base_path)
+                if code == 0:
+                    print("done: closing\nplan: 07-plan.md\nnext: hand the PLAN to your executor\n")
+                sys.exit(code)
+            code = _run_cli(["stage-advance", "--work-id", work_id], base_path)
+            if code != 0:
+                sys.exit(code)
+            continue  # reload and run the NEXT_STAGE entry gate in the same continue call
+
+        if s == RunStatus.NEXT_STAGE:
+            code = _run_cli(["gate-entry", "--work-id", work_id, "--stage", stage], base_path)
+            if code != 0:
+                print(f"stop: entry_gate_failed\nstage: {stage}\nnext: repair upstream and rerun gate-entry\n")
+                sys.exit(code)
+            print(f"stop: entered_stage\nstage: {stage}\nnext: produce {stage} content\n")
+            sys.exit(0)
+
+        if s == RunStatus.ENTRY_GATE_FAILED:
+            print(f"stop: entry_gate_failed\nstage: {stage}\n"
+                  f"next: repair upstream checkpoints, then gate-entry --stage {stage}\n")
+            sys.exit(0)
+
+        if s in (RunStatus.QUALITY_GATE_FAILED, RunStatus.CHECKPOINT_CHANGES_REQUESTED):
+            print(f"stop: needs_repair\nstatus: {s.value}\nstage: {stage}\n"
+                  f"next: address the issue, then stage-update --stage {stage}\n")
+            sys.exit(0)
+
+        # Fallback: read-only resume context.
+        code = _run_cli(["run-resume", "--work-id", work_id], base_path)
         sys.exit(code)
-
-    if s == RunStatus.READY_FOR_CHECKPOINT_REVIEW:
-        _run_cli(["review-checkpoint", "--work-id", work_id, "--stage", stage], base_path)
-        print(f"stop: needs_human_approval\nstage: {stage}\n"
-              f"next: checkpoint-decide --stage {stage} --decision approved --confirm "
-              "(or --decision changes_requested)\n")
-        sys.exit(0)
-
-    if s == RunStatus.CHECKPOINT_REVIEW:
-        print(f"stop: needs_human_approval\nstage: {stage}\n"
-              f"next: checkpoint-decide --stage {stage} --decision approved --confirm\n")
-        sys.exit(0)
-
-    if s == RunStatus.CHECKPOINT_APPROVED:
-        if record.current_stage == Stage.PLAN:
-            code = _run_cli(["run-close", "--work-id", work_id], base_path)
-            print("done: closing\nplan: 07-plan.md\nnext: hand the PLAN to your executor\n")
-            sys.exit(code)
-        _run_cli(["stage-advance", "--work-id", work_id], base_path)
-        sys.exit(0)
-
-    if s == RunStatus.NEXT_STAGE:
-        code = _run_cli(["gate-entry", "--work-id", work_id, "--stage", record.current_stage.value], base_path)
-        print(f"stop: entered_stage\nstage: {record.current_stage.value}\n"
-              f"next: produce {record.current_stage.value} content\n")
-        sys.exit(0)
-
-    if s in (RunStatus.ENTRY_GATE_FAILED, RunStatus.QUALITY_GATE_FAILED,
-             RunStatus.CHECKPOINT_CHANGES_REQUESTED):
-        print(f"stop: needs_repair\nstatus: {s.value}\nstage: {stage}\n"
-              f"next: address the issue, then stage-update --stage {stage}\n")
-        sys.exit(0)
-
-    # Fallback: read-only resume context.
-    code = _run_cli(["run-resume", "--work-id", work_id], base_path)
-    sys.exit(code)
 ```
 
 Ensure `argparse`, `sys`, `Path`, `read_active_pointer`, `_run_cli` are already imported (they are).
@@ -1290,17 +1773,20 @@ git commit -m "docs: sync command surface, invariants, runbook, and test baselin
 
 **Spec coverage (Part 1 of the design doc):**
 - New commands review-checkpoint / checkpoint-decide / stage-advance → Tasks 8/9/10 ✓
-- Shared precondition checks (stage==current, ready, version match, dup-approval, missing-checkpoint advance) → Tasks 9/10 ✓
+- Shared precondition checks (stage==current, active artifact exists, expected status, version match, dup-approval, missing-checkpoint advance) → Tasks 8/9/10 ✓
 - Forced-review guard moved to checkpoint-decide, version-aware, subagent-file-required → Tasks 7/9 ✓
+- Existing gate-quality forced-review guard removed before the new commands depend on it → Task 7 ✓
 - Marker required for every approve (GR5) → Task 9 ✓
-- gate-quality requires ready (NR2) → Task 3 ✓
-- gate-entry persists in NEXT_STAGE + ENTRY_GATE_FAILED (TR1/QR1) → Task 4 ✓
-- NEXT_STAGE produce guard + matrix removal (FR2/QR4) → Task 5 ✓
+- Explicit downstream authorization is preserved when provided → Task 9 ✓
+- gate-quality requires current stage, ready artifact, and version match (NR2/R4) → Task 3 ✓
+- gate-entry persists in NEXT_STAGE + ENTRY_GATE_FAILED and refuses wrong-stage entry in those stateful modes (TR1/QR1) → Task 4 ✓
+- NEXT_STAGE and ENTRY_GATE_FAILED produce guards + matrix removal (FR2/QR4) → Task 5 ✓
 - TR3 migrate 4 direct writes → Task 1 ✓
-- Repair loops CHANGES_REQUESTED + QUALITY_GATE_FAILED (R5/FR1) → Task 2 ✓
+- Repair loops CHANGES_REQUESTED + QUALITY_GATE_FAILED via stage-update and stage-produce; repair `stage-produce` uses update-version semantics for existing ready artifacts (R5/FR1) → Task 2 ✓
 - CMD-RUN-RESUME read-only + CMD-STAGE-UPDATE in QUALITY_GATE_FAILED (GR2) → Tasks 6/2 ✓
 - model intents (1.5a) → Task 11 ✓
-- r2p-continue driver, corrected ready→gate order (R3) → Task 12 ✓
+- PLAN run-close checkpoint/artifact/version match (QR2) → Task 10a ✓
+- r2p-continue driver, corrected content→ready→gate→review order, subcommand error propagation, advance→gate-entry fall-through, missing-artifact production prompt, and correct entry-gate-failed handoff (R3/QR1) → Task 12 ✓
 - end-to-end test → Task 13 ✓
 - docs/invariants/baseline sync (GR1/GR3) → Task 14 ✓
 
