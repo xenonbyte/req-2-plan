@@ -601,3 +601,40 @@ class TestExecutorAdapt:
             self._setup_closed_run_with_plan(base, work_id)
             write_active_pointer(base, work_id)
             self._invoke_shortcut(["adapt", "--executor", "nonexistent-executor"], base, expect_exit=2)
+
+
+# ---------------------------------------------------------------------------
+# TestEndToEndPipeline
+# ---------------------------------------------------------------------------
+
+
+class TestEndToEndPipeline:
+    """True end-to-end test: run-start → all stages → CLOSED via CLI."""
+
+    def _drive_stage(self, invoke, tmp, work_id, stage, content):
+        invoke(["stage-produce", "--work-id", work_id, "--stage", stage, "--content", content], base_path=tmp)
+        invoke(["stage-ready", "--work-id", work_id, "--stage", stage], base_path=tmp)
+        invoke(["gate-quality", "--work-id", work_id, "--stage", stage], base_path=tmp)
+        invoke(["review-checkpoint", "--work-id", work_id, "--stage", stage], base_path=tmp)
+        invoke(["checkpoint-decide", "--work-id", work_id, "--stage", stage,
+                "--decision", "approved", "--confirm"], base_path=tmp)
+
+    def test_full_pipeline_to_closed(self):
+        import tempfile
+        from pathlib import Path
+        from tests.test_cli import invoke, load_record
+        from tools.workflow_cli.models import RunStatus, Stage
+        stages = ["raw_requirement", "requirement_brief", "risk_discovery", "design", "spec", "plan"]
+        with tempfile.TemporaryDirectory() as tmp:
+            work_id = "WF-20260527-e2e"
+            invoke(["run-start", "--work-id", work_id, "--requirement", "Add a small feature"], base_path=tmp)
+            invoke(["tier-lock", "--work-id", work_id, "--base", "light", "--confirm"], base_path=tmp)
+            for i, stage in enumerate(stages):
+                self._drive_stage(invoke, tmp, work_id, stage, f"This is real content for the {stage} stage with sufficient detail")
+                if stage != "plan":
+                    invoke(["stage-advance", "--work-id", work_id], base_path=tmp)
+                    invoke(["gate-entry", "--work-id", work_id, "--stage", stages[i + 1]], base_path=tmp)
+            invoke(["run-close", "--work-id", work_id], base_path=tmp)
+            record = load_record(tmp, work_id)
+            assert record.status == RunStatus.CLOSED_AT_PLAN_CHECKPOINT
+            assert any(cp.stage == Stage.PLAN for cp in record.approved_checkpoints)
