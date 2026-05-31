@@ -562,3 +562,179 @@ class TestEndToEndPipeline:
             record = load_record(tmp, work_id)
             assert record.status == RunStatus.CLOSED_AT_PLAN_CHECKPOINT
             assert any(cp.stage == Stage.PLAN for cp in record.approved_checkpoints)
+
+
+# ---------------------------------------------------------------------------
+# TestStandardTierArtifactStructure
+# ---------------------------------------------------------------------------
+
+# Well-formed SPEC content: has an External Documentation Checked section with
+# a real dependency-inventory row (4-cell table) so Check 6 passes.
+_SPEC_WELL_FORMED = """\
+## Overview
+
+This spec covers rate-limiting at the API gateway layer.
+
+## Functional Requirements
+
+No upstream IDs referenced here.
+
+## External Documentation Checked
+
+| Dependency | Version | Check Date | Conclusion |
+|---|---|---|---|
+| pytest | 8.x | 2026-05-31 | Context7 checked |
+"""
+
+# Well-formed PLAN content: PLAN-TASK-001 has TDD Applicable: yes and a
+# fenced python block inside its Skeleton field.
+_PLAN_WELL_FORMED = """\
+## Summary
+
+Implement rate limiting.
+
+### PLAN-TASK-001: Add rate-limit middleware
+
+Spec References: none
+Change Type: new
+TDD Applicable: yes
+Files: src/middleware.py
+Skeleton:
+```python
+def rate_limit(request):
+    pass
+```
+Steps:
+- [ ] Implement token bucket
+- [ ] Wire into gateway
+
+Verification:
+All unit tests pass.
+"""
+
+# Malformed PLAN: TDD Applicable: yes but code fence is only in Verification,
+# not inside Skeleton.
+_PLAN_CODE_OUTSIDE_SKELETON = """\
+## Summary
+
+Implement rate limiting — bad skeleton.
+
+### PLAN-TASK-001: Add rate-limit middleware
+
+Spec References: none
+Change Type: new
+TDD Applicable: yes
+Files: src/middleware.py
+Skeleton:
+No code here — just prose.
+Steps:
+- [ ] Implement token bucket
+
+Verification:
+```python
+assert rate_limit(req) == 200
+```
+"""
+
+
+class TestStandardTierArtifactStructure:
+    """Gate-integration test: standard-tier SPEC / PLAN artifact structure checks."""
+
+    # Re-use the _drive_stage logic from TestEndToEndPipeline as a private helper.
+    def _drive_stage(self, invoke_fn, tmp, work_id, stage, content):
+        """Produce → ready → gate-quality(0) → review-checkpoint → checkpoint-decide approved."""
+        if stage == "spec" and "## External Documentation Checked" not in content:
+            content = content + "\n\n## External Documentation Checked\n\nN/A — no external dependencies\n"
+        invoke_fn(["stage-produce", "--work-id", work_id, "--stage", stage, "--content", content], base_path=tmp)
+        invoke_fn(["stage-ready", "--work-id", work_id, "--stage", stage], base_path=tmp)
+        invoke_fn(["gate-quality", "--work-id", work_id, "--stage", stage], base_path=tmp)
+        invoke_fn(["review-checkpoint", "--work-id", work_id, "--stage", stage], base_path=tmp)
+        invoke_fn(["checkpoint-decide", "--work-id", work_id, "--stage", stage,
+                   "--decision", "approved", "--confirm"], base_path=tmp)
+
+    def _advance_to(self, invoke_fn, tmp, work_id, next_stage):
+        """stage-advance then gate-entry for next_stage."""
+        invoke_fn(["stage-advance", "--work-id", work_id], base_path=tmp)
+        invoke_fn(["gate-entry", "--work-id", work_id, "--stage", next_stage], base_path=tmp)
+
+    def _setup_run_through_design(self, invoke_fn, tmp, work_id):
+        """Start a standard-tier run and drive it through design (four upstream stages)."""
+        invoke_fn(["run-start", "--work-id", work_id, "--requirement", "Add rate limiting to the API gateway"], base_path=tmp)
+        invoke_fn(["tier-lock", "--work-id", work_id, "--base", "standard", "--confirm"], base_path=tmp)
+
+        upstream_stages = [
+            ("raw_requirement", "requirement_brief"),
+            ("requirement_brief", "risk_discovery"),
+            ("risk_discovery", "design"),
+            ("design", "spec"),
+        ]
+        for stage, next_stage in upstream_stages[:-1]:
+            self._drive_stage(invoke_fn, tmp, work_id, stage,
+                              f"Content for {stage} stage — sufficient detail for the pipeline.")
+            self._advance_to(invoke_fn, tmp, work_id, next_stage)
+
+        # Drive design (last before spec) and advance to spec
+        stage, next_stage = upstream_stages[-1]
+        self._drive_stage(invoke_fn, tmp, work_id, stage,
+                          f"Content for {stage} stage — sufficient detail for the pipeline.")
+        self._advance_to(invoke_fn, tmp, work_id, next_stage)
+
+    def test_well_formed_spec_and_plan_pass_quality_gate(self):
+        """Positive: well-formed SPEC and PLAN both pass gate-quality at standard tier.
+        Negative (separate run): PLAN with code block outside Skeleton fails gate-quality (exit 3).
+        """
+        from tests.test_cli import invoke as cli_invoke
+
+        # ------------------------------------------------------------------
+        # Positive flow
+        # ------------------------------------------------------------------
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            work_id = "WF-20260527-std-pos"
+
+            self._setup_run_through_design(cli_invoke, tmp, work_id)
+
+            # --- SPEC stage ---
+            cli_invoke(["stage-produce", "--work-id", work_id, "--stage", "spec",
+                        "--content", _SPEC_WELL_FORMED], base_path=tmp)
+            cli_invoke(["stage-ready", "--work-id", work_id, "--stage", "spec"], base_path=tmp)
+            cli_invoke(["gate-quality", "--work-id", work_id, "--stage", "spec"], base_path=tmp)  # must pass (exit 0)
+            cli_invoke(["review-checkpoint", "--work-id", work_id, "--stage", "spec"], base_path=tmp)
+            cli_invoke(["checkpoint-decide", "--work-id", work_id, "--stage", "spec",
+                        "--decision", "approved", "--confirm"], base_path=tmp)
+            cli_invoke(["stage-advance", "--work-id", work_id], base_path=tmp)
+            cli_invoke(["gate-entry", "--work-id", work_id, "--stage", "plan"], base_path=tmp)
+
+            # --- PLAN stage ---
+            cli_invoke(["stage-produce", "--work-id", work_id, "--stage", "plan",
+                        "--content", _PLAN_WELL_FORMED], base_path=tmp)
+            cli_invoke(["stage-ready", "--work-id", work_id, "--stage", "plan"], base_path=tmp)
+            cli_invoke(["gate-quality", "--work-id", work_id, "--stage", "plan"], base_path=tmp)  # must pass (exit 0)
+
+        # ------------------------------------------------------------------
+        # Negative guard: code block outside Skeleton → gate-quality must fail (exit 3)
+        # ------------------------------------------------------------------
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            work_id = "WF-20260527-std-neg"
+
+            self._setup_run_through_design(cli_invoke, tmp, work_id)
+
+            # Drive SPEC through normally so we can reach PLAN
+            cli_invoke(["stage-produce", "--work-id", work_id, "--stage", "spec",
+                        "--content", _SPEC_WELL_FORMED], base_path=tmp)
+            cli_invoke(["stage-ready", "--work-id", work_id, "--stage", "spec"], base_path=tmp)
+            cli_invoke(["gate-quality", "--work-id", work_id, "--stage", "spec"], base_path=tmp)
+            cli_invoke(["review-checkpoint", "--work-id", work_id, "--stage", "spec"], base_path=tmp)
+            cli_invoke(["checkpoint-decide", "--work-id", work_id, "--stage", "spec",
+                        "--decision", "approved", "--confirm"], base_path=tmp)
+            cli_invoke(["stage-advance", "--work-id", work_id], base_path=tmp)
+            cli_invoke(["gate-entry", "--work-id", work_id, "--stage", "plan"], base_path=tmp)
+
+            # PLAN with code block only outside Skeleton
+            cli_invoke(["stage-produce", "--work-id", work_id, "--stage", "plan",
+                        "--content", _PLAN_CODE_OUTSIDE_SKELETON], base_path=tmp)
+            cli_invoke(["stage-ready", "--work-id", work_id, "--stage", "plan"], base_path=tmp)
+            # gate-quality must FAIL with exit 3
+            cli_invoke(["gate-quality", "--work-id", work_id, "--stage", "plan"],
+                       base_path=tmp, expect_exit=3)
