@@ -199,6 +199,7 @@ ALLOWED_COMMANDS_BY_RUN_STATE: dict[RunStatus, set[str]] = {
     },
     RunStatus.QUALITY_GATE_FAILED: {
         "CMD-STAGE-PRODUCE",
+        "CMD-STAGE-UPDATE",
         "CMD-STAGE-READY",
         "CMD-GATE-QUALITY",
         "CMD-CONFIRM-RECORD",

@@ -688,15 +688,25 @@ def _cmd_stage_produce(args):
     content = _resolve_content(args)
 
     am = ArtifactManager(run_dir)
+    artifact_file = STAGE_ARTIFACT_MAP[stage]
+    repair_state = record.status in (
+        RunStatus.CHECKPOINT_CHANGES_REQUESTED,
+        RunStatus.QUALITY_GATE_FAILED,
+    )
     try:
-        path = am.stage_produce(stage, content)
+        if repair_state:
+            path = am.stage_update(stage, content)
+            from tools.workflow_cli.artifact import get_artifact_version
+            new_version = get_artifact_version(run_dir, stage)
+        else:
+            path = am.stage_produce(stage, content)
+            new_version = 1
     except FileExistsError as e:
         print_and_exit(format_error(str(e), exit_code=EXIT_CONFLICT), EXIT_CONFLICT)
 
     # Update run record active artifacts
     record = update_run_status(record, RunStatus.ACTIVE_STAGE_DRAFT)
-    artifact_file = STAGE_ARTIFACT_MAP[stage]
-    upsert_active_artifact(record, stage, artifact_file, 1, "draft")
+    upsert_active_artifact(record, stage, artifact_file, new_version, "draft")
     update_resume_context(record, last_operation=f"produce_{stage.value}")
     mgr.save(record)
 
@@ -722,6 +732,11 @@ def _cmd_stage_update(args):
     new_version = get_artifact_version(run_dir, stage)
     artifact_file = STAGE_ARTIFACT_MAP[stage]
     upsert_active_artifact(record, stage, artifact_file, new_version, "draft")
+
+    # Close repair loops: flip back to ACTIVE_STAGE_DRAFT if in repair state
+    if record.status in (RunStatus.CHECKPOINT_CHANGES_REQUESTED, RunStatus.QUALITY_GATE_FAILED):
+        record = update_run_status(record, RunStatus.ACTIVE_STAGE_DRAFT)
+
     update_resume_context(record, last_operation=f"update_{stage.value}")
     mgr.save(record)
 

@@ -714,6 +714,78 @@ class TestInstallCli:
 
 
 # ---------------------------------------------------------------------------
+# Repair Loop Tests
+# ---------------------------------------------------------------------------
+
+
+class TestRepairLoops:
+    def _to_quality_failed(self, tmp, work_id):
+        invoke(["run-start", "--work-id", work_id, "--requirement", "foo"], base_path=tmp)
+        invoke(["tier-lock", "--work-id", work_id, "--base", "light", "--confirm"], base_path=tmp)
+        invoke(["stage-produce", "--work-id", work_id, "--stage", "raw_requirement",
+                "--content", "x"], base_path=tmp)
+        invoke(["stage-ready", "--work-id", work_id, "--stage", "raw_requirement"], base_path=tmp)
+        record = load_record(tmp, work_id)
+        record.status = RunStatus.QUALITY_GATE_FAILED
+        save_record(tmp, record)
+
+    def test_stage_update_flips_quality_failed_to_draft(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work_id = "WF-20260527-r-qf"
+            self._to_quality_failed(tmp, work_id)
+            invoke(["stage-update", "--work-id", work_id, "--stage", "raw_requirement",
+                    "--content", "repaired content"], base_path=tmp)
+            record = load_record(tmp, work_id)
+            assert record.status == RunStatus.ACTIVE_STAGE_DRAFT
+
+    def test_stage_update_flips_changes_requested_to_draft(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work_id = "WF-20260527-cr-1"
+            invoke(["run-start", "--work-id", work_id, "--requirement", "foo"], base_path=tmp)
+            invoke(["stage-produce", "--work-id", work_id, "--stage", "raw_requirement",
+                    "--content", "x"], base_path=tmp)
+            record = load_record(tmp, work_id)
+            record.status = RunStatus.CHECKPOINT_CHANGES_REQUESTED
+            save_record(tmp, record)
+            invoke(["stage-update", "--work-id", work_id, "--stage", "raw_requirement",
+                    "--content", "addressed changes"], base_path=tmp)
+            record = load_record(tmp, work_id)
+            assert record.status == RunStatus.ACTIVE_STAGE_DRAFT
+
+    def test_stage_produce_updates_ready_quality_failed_artifact_to_new_draft(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work_id = "WF-20260527-rpq-1"
+            self._to_quality_failed(tmp, work_id)
+            invoke(["stage-produce", "--work-id", work_id, "--stage", "raw_requirement",
+                    "--content", "replacement content"], base_path=tmp)
+            record = load_record(tmp, work_id)
+            assert record.status == RunStatus.ACTIVE_STAGE_DRAFT
+            from tools.workflow_cli.state import get_active_artifact
+            aa = get_active_artifact(record, Stage.RAW_REQUIREMENT)
+            assert aa.version == 2
+            assert aa.status == "draft"
+
+    def test_stage_produce_updates_ready_changes_requested_artifact_to_new_draft(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work_id = "WF-20260527-rpc-1"
+            invoke(["run-start", "--work-id", work_id, "--requirement", "foo"], base_path=tmp)
+            invoke(["stage-produce", "--work-id", work_id, "--stage", "raw_requirement",
+                    "--content", "x"], base_path=tmp)
+            invoke(["stage-ready", "--work-id", work_id, "--stage", "raw_requirement"], base_path=tmp)
+            record = load_record(tmp, work_id)
+            record.status = RunStatus.CHECKPOINT_CHANGES_REQUESTED
+            save_record(tmp, record)
+            invoke(["stage-produce", "--work-id", work_id, "--stage", "raw_requirement",
+                    "--content", "addressed changes"], base_path=tmp)
+            record = load_record(tmp, work_id)
+            assert record.status == RunStatus.ACTIVE_STAGE_DRAFT
+            from tools.workflow_cli.state import get_active_artifact
+            aa = get_active_artifact(record, Stage.RAW_REQUIREMENT)
+            assert aa.version == 2
+            assert aa.status == "draft"
+
+
+# ---------------------------------------------------------------------------
 # State Authority Tests
 # ---------------------------------------------------------------------------
 
