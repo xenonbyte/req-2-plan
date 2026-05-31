@@ -4,11 +4,11 @@
 
 **Goal:** Make the neutral PLAN directly executable — fix a machine-parseable PLAN-TASK schema, require executable code anchors (hard-fail gate at standard tier), require a SPEC `External Documentation Checked` section, and make PLAN steps checkbox-tracked.
 
-**Architecture:** Two layers. (1) Stage-spec docs (`plan-workflow.md`, `spec-workflow.md`) define the required PLAN/SPEC structure the Agent generates. (2) `gates.py` `check_quality_gate` enforces the structure for the relevant stage only (`PLAN` for code-block presence; `SPEC` for the External-Docs section). The quality gate already receives `stage` and `tier`, so no signature change is needed.
+**Architecture:** Two layers. (1) Stage-spec docs (`plan-workflow.md`, `spec-workflow.md`) define the required PLAN/SPEC structure the Agent generates. (2) `gates.py` `check_quality_gate` enforces the structure for the relevant stage only (`PLAN` for code-block presence inside each TDD-applicable task's `Skeleton`; `SPEC` for a non-empty External-Docs section). The quality gate already receives `stage` and `tier`, so no signature change is needed.
 
 **Tech Stack:** Python 3.10+ stdlib (`re`), Markdown stage docs. Tests run with `.venv/bin/python -m pytest`.
 
-**Design source:** `docs/2026-05-30-workflow-fixes-and-plan-optimization.md` Part 3 (Approved). Decisions: 3.1 gate = **hard fail at standard tier** (light/N-A exempt); Context7 section = **always present** with explicit `N/A` row (presence check, not dependency-guessing).
+**Design source:** `docs/2026-05-30-workflow-fixes-and-plan-optimization.md` Part 3 (Approved). Decisions: 3.1 gate = **hard fail at standard tier** (light/N-A exempt); Context7 section = **always present** with at least one real dependency row or explicit `N/A` row (heading + non-empty inventory check, not dependency-guessing).
 
 **Pre-verified facts (2026-05-31):**
 - `check_quality_gate(run_dir, stage, tier, approved_checkpoints, artifact_content)` at `gates.py:146`; `tier.base` (light/standard) is available.
@@ -78,14 +78,20 @@ class TestPlanCodeBlockGate(unittest.TestCase):
         self.standard = TierEstimate(base=TierBase.STANDARD, modifiers=frozenset())
         self.light = TierEstimate(base=TierBase.LIGHT, modifiers=frozenset())
 
-    def _plan(self, with_code: bool) -> str:
+    def _plan(self, with_code: bool, outside_skeleton_code: bool = False) -> str:
         skeleton = "```python\ndef f():\n    ...\n```\n" if with_code else "(prose only)\n"
+        verification = (
+            "Verification:\n```python\nassert True\n```\n"
+            if outside_skeleton_code
+            else "Verification: run targeted tests\n"
+        )
         return (
             "# PLAN\n\n"
             "### PLAN-TASK-001: do thing\n"
             "TDD Applicable: yes\n"
             f"Skeleton:\n{skeleton}\n"
             "Steps:\n- [ ] red\n- [ ] green\n"
+            f"{verification}"
         )
 
     def test_standard_plan_without_code_block_fails(self):
@@ -93,6 +99,20 @@ class TestPlanCodeBlockGate(unittest.TestCase):
         from pathlib import Path
         with tempfile.TemporaryDirectory() as tmp:
             r = self.check(Path(tmp), self.Stage.PLAN, self.standard, [], self._plan(False))
+            self.assertFalse(r.passed)
+            self.assertEqual(r.exit_code, 3)
+
+    def test_standard_plan_code_block_outside_skeleton_fails(self):
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as tmp:
+            r = self.check(
+                Path(tmp),
+                self.Stage.PLAN,
+                self.standard,
+                [],
+                self._plan(False, outside_skeleton_code=True),
+            )
             self.assertFalse(r.passed)
             self.assertEqual(r.exit_code, 3)
 
@@ -132,17 +152,32 @@ In `gates.py`, add a helper:
 _PLAN_TASK_RE = re.compile(r"^### PLAN-TASK-\d+", re.MULTILINE)
 _TDD_YES_RE = re.compile(r"TDD Applicable:\s*yes", re.IGNORECASE)
 _CODE_FENCE_RE = re.compile(r"^```", re.MULTILINE)
+_PLAN_TASK_FIELD_RE = re.compile(
+    r"^(Spec References|Change Type|TDD Applicable|Files|Skeleton|Steps|Verification):",
+    re.MULTILINE,
+)
+
+
+def _plan_task_field_body(task_body: str, field: str) -> str:
+    field_re = re.compile(rf"^{re.escape(field)}:\s*(.*)$", re.MULTILINE)
+    match = field_re.search(task_body)
+    if not match:
+        return ""
+    next_match = _PLAN_TASK_FIELD_RE.search(task_body, match.end())
+    end = next_match.start() if next_match else len(task_body)
+    return f"{match.group(1)}\n{task_body[match.end():end]}"
 
 
 def _plan_tasks_missing_code(content: str) -> bool:
-    """True if any PLAN-TASK with 'TDD Applicable: yes' has no fenced code block in its body."""
+    """True if any TDD-applicable PLAN-TASK has no fenced code block in its Skeleton field."""
     starts = [m.start() for m in _PLAN_TASK_RE.finditer(content)]
     if not starts:
         return False
     bounds = starts + [len(content)]
     for i in range(len(starts)):
         body = content[bounds[i]:bounds[i + 1]]
-        if _TDD_YES_RE.search(body) and not _CODE_FENCE_RE.search(body):
+        skeleton = _plan_task_field_body(body, "Skeleton")
+        if _TDD_YES_RE.search(body) and not _CODE_FENCE_RE.search(skeleton):
             return True
     return False
 ```
@@ -199,6 +234,37 @@ class TestSpecExternalDocsGate(unittest.TestCase):
             self.assertFalse(r.passed)
             self.assertEqual(r.exit_code, 3)
 
+    def test_spec_empty_external_docs_section_fails(self):
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as tmp:
+            body = "# SPEC\n\n## External Documentation Checked\n\n## Next Section\n"
+            r = self.check(Path(tmp), self.Stage.SPEC, self.tier, [], body)
+            self.assertFalse(r.passed)
+            self.assertEqual(r.exit_code, 3)
+
+    def test_spec_external_docs_prose_only_fails(self):
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as tmp:
+            body = "# SPEC\n\n## External Documentation Checked\n\nChecked docs.\n"
+            r = self.check(Path(tmp), self.Stage.SPEC, self.tier, [], body)
+            self.assertFalse(r.passed)
+            self.assertEqual(r.exit_code, 3)
+
+    def test_spec_with_dependency_inventory_row_passes(self):
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as tmp:
+            body = (
+                "# SPEC\n\n## External Documentation Checked\n\n"
+                "| dependency | version | check date | conclusion |\n"
+                "| --- | --- | --- | --- |\n"
+                "| pytest | 8.x | 2026-05-31 | Context7 checked |\n"
+            )
+            r = self.check(Path(tmp), self.Stage.SPEC, self.tier, [], body)
+            self.assertTrue(r.passed)
+
     def test_spec_with_na_row_passes(self):
         import tempfile
         from pathlib import Path
@@ -224,19 +290,54 @@ class TestSpecExternalDocsGate(unittest.TestCase):
 Run: `.venv/bin/python -m pytest tests/test_gates.py::TestSpecExternalDocsGate -v`
 Expected: `test_spec_missing_external_docs_section_fails` FAILS.
 
-- [ ] **Step 3: Add the SPEC presence check**
+- [ ] **Step 3: Add the SPEC section + inventory-row check**
 
 In `check_quality_gate`, inside the `if not issues:` block, add:
 
 ```python
-        # Check 6 (SPEC): the External Documentation Checked section must be present.
+        # Check 6 (SPEC): the External Documentation Checked section must be present and non-empty.
         if stage == Stage.SPEC:
-            if "## External Documentation Checked" not in artifact_content:
+            if not _has_external_docs_inventory(artifact_content):
                 issues.append(
-                    "SPEC is missing the '## External Documentation Checked' section. "
+                    "SPEC is missing a non-empty '## External Documentation Checked' section. "
                     "Add it; if there are no external dependencies, include an explicit "
                     "'N/A — no external dependencies' row."
                 )
+```
+
+Add the helper near the other quality-gate helpers:
+
+```python
+_EXTERNAL_DOCS_RE = re.compile(r"^## External Documentation Checked\s*$", re.MULTILINE)
+_H2_RE = re.compile(r"^##\s+", re.MULTILINE)
+
+
+def _is_external_docs_inventory_row(line: str) -> bool:
+    if line == "N/A — no external dependencies":
+        return True
+    if not (line.startswith("|") and line.endswith("|")):
+        return False
+    cells = [cell.strip() for cell in line.strip("|").split("|")]
+    if len(cells) != 4:
+        return False
+    if [cell.lower() for cell in cells] == ["dependency", "version", "check date", "conclusion"]:
+        return False
+    if all(set(cell) <= {"-", ":", " "} for cell in cells):
+        return False
+    return all(cells)
+
+
+def _has_external_docs_inventory(content: str) -> bool:
+    match = _EXTERNAL_DOCS_RE.search(content)
+    if not match:
+        return False
+    next_heading = _H2_RE.search(content, match.end())
+    section = content[match.end(): next_heading.start() if next_heading else len(content)]
+    for line in section.splitlines():
+        stripped = line.strip()
+        if stripped and _is_external_docs_inventory_row(stripped):
+            return True
+    return False
 ```
 
 - [ ] **Step 4: Update `spec-workflow.md`**
@@ -284,22 +385,38 @@ git commit -m "docs: checkbox-tracked PLAN steps and linear self-contained task/
 ### Task 5: Full suite + baseline
 
 **Files:**
+- Modify: `tests/test_integration.py`
 - Modify: `CLAUDE.md`, `.claude/skills/req-to-plan.md`
 
-- [ ] **Step 1: Run the whole suite**
+- [ ] **Step 1: Add the standard-tier artifact structure gate check**
+
+Per the Agent/CLI separation invariant, the CLI never generates SPEC/PLAN content — the Agent does. So this is a gate-integration test, not a generation test: it **writes** well-formed standard-tier SPEC and PLAN artifacts to a temp run, marks them ready, runs `gate-quality`, and asserts the gate's verdict on real artifact structure (not just the unit helpers).
+
+In `tests/test_integration.py`, add a standard-tier test (e.g. `TestStandardTierArtifactStructure::test_well_formed_spec_and_plan_pass_quality_gate`) that, for a `tier-lock --base standard` run:
+
+- writes a SPEC artifact whose `## External Documentation Checked` section has at least one real dependency-inventory row or the `N/A — no external dependencies` row, marks it ready, and asserts `gate-quality --stage spec` passes (exit 0);
+- writes a PLAN artifact with `PLAN-TASK-*` headings where every `TDD Applicable: yes` task has a fenced code block inside its `Skeleton` field and steps use `- [ ]` checkboxes, marks it ready, and asserts `gate-quality --stage plan` passes (exit 0);
+- as a negative guard, asserts a PLAN whose TDD-applicable task has its only fenced code block outside `Skeleton` fails `gate-quality` with exit 3.
+
+- [ ] **Step 2: Run the focused gate check**
+
+Run the focused test with `.venv/bin/python -m pytest tests/test_integration.py::<new-test-node> -v`.
+Expected: PASS.
+
+- [ ] **Step 3: Run the whole suite**
 
 Run: `.venv/bin/python -m pytest tests/ -v`
 Expected: all PASS.
 
-- [ ] **Step 2: Backfill the baseline number**
+- [ ] **Step 4: Backfill the baseline number**
 
 Run: `.venv/bin/python -m pytest tests/ --co -q | tail -1`
 Put the real collected number into `CLAUDE.md` and `.claude/skills/req-to-plan.md`.
 
-- [ ] **Step 3: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
-git add CLAUDE.md .claude/skills/req-to-plan.md
+git add tests/test_integration.py CLAUDE.md .claude/skills/req-to-plan.md
 git commit -m "docs: update test baseline after Part 3"
 ```
 
@@ -307,10 +424,10 @@ git commit -m "docs: update test baseline after Part 3"
 
 ## Self-Review
 
-**Spec coverage (Part 3):** machine-parseable schema (Task 1, §3.0); code-block hard-fail gate at standard tier, light/N-A exempt (Task 2, §3.1 + decision); SPEC External-Docs presence gate + doc (Task 3, §3.2 + TR7); checkbox steps + linear readability (Task 4, §3.3/§3.4); baseline (Task 5). ✓
+**Spec coverage (Part 3):** machine-parseable schema (Task 1, §3.0); code-block hard-fail gate at standard tier, light/N-A exempt, scoped to `Skeleton` (Task 2, §3.1 + decision); SPEC External-Docs heading + non-empty inventory gate and doc (Task 3, §3.2 + TR7); checkbox steps + linear readability (Task 4, §3.3/§3.4); standard-tier artifact flow check + baseline (Task 5). ✓
 
 **Placeholder scan:** Tasks 1/4 are doc-structure edits (no code to inline beyond the schema example, which is shown); Tasks 2/3 carry full helper code and tests. No TBD/TODO.
 
-**Type consistency:** `_plan_tasks_missing_code`, `_PLAN_TASK_RE`, `_TDD_YES_RE`, `_CODE_FENCE_RE` defined once in Task 2; `check_quality_gate` signature unchanged (uses existing `stage`, `tier.base`); `Stage.PLAN`/`Stage.SPEC`/`TierBase.STANDARD` are existing symbols.
+**Type consistency:** `_plan_tasks_missing_code`, `_has_external_docs_inventory`, `_is_external_docs_inventory_row`, and their regex constants are defined once in `gates.py`; `check_quality_gate` signature unchanged (uses existing `stage`, `tier.base`); `Stage.PLAN`/`Stage.SPEC`/`TierBase.STANDARD` are existing symbols.
 
-**Gate-firing scope:** Check 5 fires only for `stage == PLAN`; Check 6 only for `stage == SPEC` — verified by `test_non_plan_stage_unaffected` and `test_plan_stage_not_required_to_have_section`.
+**Gate-firing scope:** Check 5 fires only for `stage == PLAN` and only accepts code in the task `Skeleton`; Check 6 only for `stage == SPEC` and rejects missing, empty, or prose-only External-Docs sections while accepting explicit `N/A` and dependency inventory rows — verified by `test_non_plan_stage_unaffected`, `test_standard_plan_code_block_outside_skeleton_fails`, `test_plan_stage_not_required_to_have_section`, `test_spec_empty_external_docs_section_fails`, `test_spec_external_docs_prose_only_fails`, and `test_spec_with_dependency_inventory_row_passes`.
