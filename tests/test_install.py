@@ -459,6 +459,20 @@ def assert_no_manifest_references(manifest_root: Path, stale: Path) -> None:
             )
 
 
+def old_managed_adapt_wrapper() -> str:
+    return """#!/usr/bin/env bash
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT=/old/req-to-plan
+export PYTHONPATH="$REPO_ROOT${PYTHONPATH:+:$PYTHONPATH}"
+if command -v python3 >/dev/null 2>&1; then
+    exec python3 -m tools.workflow_cli.agent_shortcuts adapt "$@"
+else
+    exec python -m tools.workflow_cli.agent_shortcuts adapt "$@"
+fi
+"""
+
+
 class TestStaleWrapperCleanup:
     def test_upgrade_removes_stale_shared_wrapper_from_all_manifests(self, tmp_path):
         svc, manifest_root, ph_root = make_service(tmp_path)
@@ -488,6 +502,63 @@ class TestStaleWrapperCleanup:
         svc.uninstall("claude")
         assert not stale.exists(), "stale r2p-adapt wrapper must be removed on uninstall"
         assert_no_manifest_references(manifest_root, stale)
+
+    def test_uninstall_preserves_restored_user_backup_for_obsolete_shared_wrapper(self, tmp_path):
+        svc, manifest_root, ph_root = make_service(tmp_path)
+        svc.install("claude")
+        svc.install("codex")
+        bin_dir = manifest_root / "bin"
+        stale = bin_dir / "r2p-adapt"
+        stale.write_text(old_managed_adapt_wrapper(), encoding="utf-8")
+        seed_stale_wrapper_in_manifests(manifest_root, stale, platforms=("claude", "codex"))
+
+        backup_dir = manifest_root / "install" / "backups" / "claude"
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        backup_file = backup_dir / "r2p-adapt.user.bak"
+        backup_file.write_text("USER ORIGINAL\n", encoding="utf-8")
+
+        from tools.workflow_cli.install import _load_manifest, _dump_manifest
+        claude_manifest_path = manifest_root / "install" / "claude.yaml"
+        claude_manifest = _load_manifest(claude_manifest_path)
+        claude_manifest.setdefault("backups", []).append(
+            {"target": str(stale), "backup": str(backup_file)}
+        )
+        claude_manifest_path.write_text(_dump_manifest(claude_manifest), encoding="utf-8")
+
+        svc.uninstall("claude")
+
+        assert stale.exists(), "user's restored original must not be removed by cleanup"
+        assert stale.read_text() == "USER ORIGINAL\n"
+        assert_no_manifest_references(manifest_root, stale)
+        assert not backup_file.exists(), "restored backup file should be consumed"
+
+    def test_uninstall_discards_restored_managed_backup_for_obsolete_shared_wrapper(self, tmp_path):
+        svc, manifest_root, ph_root = make_service(tmp_path)
+        svc.install("claude")
+        svc.install("codex")
+        bin_dir = manifest_root / "bin"
+        stale = bin_dir / "r2p-adapt"
+        stale.write_text(old_managed_adapt_wrapper(), encoding="utf-8")
+        seed_stale_wrapper_in_manifests(manifest_root, stale, platforms=("claude", "codex"))
+
+        backup_dir = manifest_root / "install" / "backups" / "codex"
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        backup_file = backup_dir / "r2p-adapt.managed.bak"
+        backup_file.write_text(old_managed_adapt_wrapper(), encoding="utf-8")
+
+        from tools.workflow_cli.install import _load_manifest, _dump_manifest
+        codex_manifest_path = manifest_root / "install" / "codex.yaml"
+        codex_manifest = _load_manifest(codex_manifest_path)
+        codex_manifest.setdefault("backups", []).append(
+            {"target": str(stale), "backup": str(backup_file)}
+        )
+        codex_manifest_path.write_text(_dump_manifest(codex_manifest), encoding="utf-8")
+
+        svc.uninstall("codex")
+
+        assert not stale.exists(), "restored managed obsolete wrapper must not survive cleanup"
+        assert_no_manifest_references(manifest_root, stale)
+        assert not backup_file.exists(), "discarded managed backup file should be consumed"
 
     def test_stale_shared_wrapper_cleanup_preserves_unmanaged_r2p_wrapper(self, tmp_path):
         svc, manifest_root, ph_root = make_service(tmp_path)
@@ -538,3 +609,72 @@ class TestStaleWrapperCleanup:
         # Obsolete-wrapper metadata is cleaned and the consumed backup is gone.
         assert_no_manifest_references(manifest_root, stale)
         assert not backup_file.exists(), "restored backup file should be consumed"
+
+    def test_cleanup_ignores_managed_wrapper_backup_when_no_user_backup_exists(self, tmp_path):
+        svc, manifest_root, ph_root = make_service(tmp_path)
+        svc.install("codex")
+        bin_dir = manifest_root / "bin"
+        stale = bin_dir / "r2p-adapt"
+        stale.write_text(old_managed_adapt_wrapper(), encoding="utf-8")
+
+        backups_dir = manifest_root / "install" / "backups" / "codex"
+        backups_dir.mkdir(parents=True, exist_ok=True)
+        managed_backup = backups_dir / "r2p-adapt.managed.bak"
+        managed_backup.write_text(old_managed_adapt_wrapper(), encoding="utf-8")
+
+        from tools.workflow_cli.install import _load_manifest, _dump_manifest
+        mpath = manifest_root / "install" / "codex.yaml"
+        manifest = _load_manifest(mpath)
+        manifest.setdefault("installed_paths", []).append(str(stale))
+        manifest.setdefault("backups", []).append(
+            {"target": str(stale), "backup": str(managed_backup)}
+        )
+        mpath.write_text(_dump_manifest(manifest), encoding="utf-8")
+
+        svc._cleanup_obsolete_managed_wrappers()
+
+        assert not stale.exists(), "managed-only obsolete wrapper backup must not be restored"
+        assert_no_manifest_references(manifest_root, stale)
+        assert not managed_backup.exists(), "discarded managed wrapper backup should be consumed"
+
+    def test_cleanup_prefers_user_backup_over_later_managed_wrapper_backup(self, tmp_path):
+        svc, manifest_root, ph_root = make_service(tmp_path)
+        svc.install("codex")
+        svc.install("gemini")
+        bin_dir = manifest_root / "bin"
+        stale = bin_dir / "r2p-adapt"
+        stale.write_text(old_managed_adapt_wrapper(), encoding="utf-8")
+
+        from tools.workflow_cli.install import _load_manifest, _dump_manifest
+
+        codex_backup_dir = manifest_root / "install" / "backups" / "codex"
+        codex_backup_dir.mkdir(parents=True, exist_ok=True)
+        user_backup = codex_backup_dir / "r2p-adapt.user.bak"
+        user_backup.write_text("USER ORIGINAL\n", encoding="utf-8")
+        codex_manifest_path = manifest_root / "install" / "codex.yaml"
+        codex_manifest = _load_manifest(codex_manifest_path)
+        codex_manifest.setdefault("installed_paths", []).append(str(stale))
+        codex_manifest.setdefault("backups", []).append(
+            {"target": str(stale), "backup": str(user_backup)}
+        )
+        codex_manifest_path.write_text(_dump_manifest(codex_manifest), encoding="utf-8")
+
+        gemini_backup_dir = manifest_root / "install" / "backups" / "gemini"
+        gemini_backup_dir.mkdir(parents=True, exist_ok=True)
+        managed_backup = gemini_backup_dir / "r2p-adapt.managed.bak"
+        managed_backup.write_text(old_managed_adapt_wrapper(), encoding="utf-8")
+        gemini_manifest_path = manifest_root / "install" / "gemini.yaml"
+        gemini_manifest = _load_manifest(gemini_manifest_path)
+        gemini_manifest.setdefault("installed_paths", []).append(str(stale))
+        gemini_manifest.setdefault("backups", []).append(
+            {"target": str(stale), "backup": str(managed_backup)}
+        )
+        gemini_manifest_path.write_text(_dump_manifest(gemini_manifest), encoding="utf-8")
+
+        svc._cleanup_obsolete_managed_wrappers()
+
+        assert stale.exists(), "user's original file must survive cleanup"
+        assert stale.read_text() == "USER ORIGINAL\n"
+        assert_no_manifest_references(manifest_root, stale)
+        assert not user_backup.exists(), "restored user backup file should be consumed"
+        assert not managed_backup.exists(), "discarded managed wrapper backup should be consumed"

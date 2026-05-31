@@ -145,6 +145,12 @@ def _find_duplicate_ids(content: str) -> list[str]:
 
 _EXTERNAL_DOCS_RE = re.compile(r"^## External Documentation Checked\s*$", re.MULTILINE)
 _H2_RE = re.compile(r"^##\s+", re.MULTILINE)
+_MARKDOWN_CODE_FENCE_RE = re.compile(r"^[ \t]{0,3}```", re.MULTILINE)
+_ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def _plain_table_cell(cell: str) -> str:
+    return cell.strip().strip("_*`").strip()
 
 
 def _is_external_docs_inventory_row(line: str) -> bool:
@@ -159,7 +165,35 @@ def _is_external_docs_inventory_row(line: str) -> bool:
         return False
     if all(set(cell) <= {"-", ":", " "} for cell in cells):
         return False
-    return all(cells)
+    if not all(cells):
+        return False
+
+    dependency, version, check_date, conclusion = [_plain_table_cell(cell) for cell in cells]
+    normalized = [cell.lower() for cell in (dependency, version, check_date, conclusion)]
+    if normalized == ["example", "x.y", "yyyy-mm-dd", "context7 checked / unconfirmed"]:
+        return False
+    if dependency.lower() == "example":
+        return False
+    if version.lower() == "x.y":
+        return False
+    if check_date.lower() == "yyyy-mm-dd":
+        return False
+    if conclusion.lower() == "context7 checked / unconfirmed":
+        return False
+    if not _ISO_DATE_RE.fullmatch(check_date):
+        return False
+    return bool(dependency and version and conclusion)
+
+
+def _external_docs_section_lines(section: str):
+    in_fence = False
+    for line in section.splitlines():
+        if _MARKDOWN_CODE_FENCE_RE.match(line):
+            in_fence = not in_fence
+            continue
+        if in_fence:
+            continue
+        yield line
 
 
 def _has_external_docs_inventory(content: str) -> bool:
@@ -168,7 +202,7 @@ def _has_external_docs_inventory(content: str) -> bool:
         return False
     next_heading = _H2_RE.search(content, match.end())
     section = content[match.end(): next_heading.start() if next_heading else len(content)]
-    for line in section.splitlines():
+    for line in _external_docs_section_lines(section):
         stripped = line.strip()
         if stripped and _is_external_docs_inventory_row(stripped):
             return True
@@ -181,7 +215,7 @@ def _has_external_docs_inventory(content: str) -> bool:
 
 _PLAN_TASK_RE = re.compile(r"^### PLAN-TASK-\d+", re.MULTILINE)
 _TDD_YES_RE = re.compile(r"TDD Applicable:\s*yes", re.IGNORECASE)
-_CODE_FENCE_RE = re.compile(r"^[ \t]{0,3}```", re.MULTILINE)
+_CODE_FENCE_RE = _MARKDOWN_CODE_FENCE_RE
 _PLAN_TASK_FIELD_RE = re.compile(
     r"^(Spec References|Change Type|TDD Applicable|Files|Skeleton|Steps|Verification):",
     re.MULTILINE,

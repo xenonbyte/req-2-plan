@@ -851,6 +851,81 @@ class TestRepairLoops:
             record = load_record(tmp, work_id)
             assert record.status == RunStatus.ACTIVE_STAGE_DRAFT
 
+    def test_stage_update_after_quality_pass_reenters_draft(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work_id = "WF-20260527-rqg"
+            invoke(["run-start", "--work-id", work_id, "--requirement", "foo"], base_path=tmp)
+            invoke(["tier-lock", "--work-id", work_id, "--base", "light", "--confirm"], base_path=tmp)
+            invoke(["stage-produce", "--work-id", work_id, "--stage", "raw_requirement",
+                    "--content", "real content"], base_path=tmp)
+            invoke(["stage-ready", "--work-id", work_id, "--stage", "raw_requirement"], base_path=tmp)
+            invoke(["gate-quality", "--work-id", work_id, "--stage", "raw_requirement"], base_path=tmp)
+            record = load_record(tmp, work_id)
+            assert record.status == RunStatus.READY_FOR_CHECKPOINT_REVIEW
+
+            invoke(["stage-update", "--work-id", work_id, "--stage", "raw_requirement",
+                    "--content", "edited after gate"], base_path=tmp)
+            record = load_record(tmp, work_id)
+            assert record.status == RunStatus.ACTIVE_STAGE_DRAFT
+            from tools.workflow_cli.state import get_active_artifact
+            aa = get_active_artifact(record, Stage.RAW_REQUIREMENT)
+            assert aa.version == 2
+            assert aa.status == "draft"
+
+            invoke(["stage-ready", "--work-id", work_id, "--stage", "raw_requirement"], base_path=tmp)
+            invoke(["review-checkpoint", "--work-id", work_id, "--stage", "raw_requirement"],
+                   base_path=tmp, expect_exit=6)
+
+    def test_stage_update_rejects_open_checkpoint_review(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work_id = "WF-20260527-rcr"
+            invoke(["run-start", "--work-id", work_id, "--requirement", "foo"], base_path=tmp)
+            invoke(["tier-lock", "--work-id", work_id, "--base", "light", "--confirm"], base_path=tmp)
+            invoke(["stage-produce", "--work-id", work_id, "--stage", "raw_requirement",
+                    "--content", "real content"], base_path=tmp)
+            invoke(["stage-ready", "--work-id", work_id, "--stage", "raw_requirement"], base_path=tmp)
+            invoke(["gate-quality", "--work-id", work_id, "--stage", "raw_requirement"], base_path=tmp)
+            invoke(["review-checkpoint", "--work-id", work_id, "--stage", "raw_requirement"],
+                   base_path=tmp)
+            record = load_record(tmp, work_id)
+            assert record.status == RunStatus.CHECKPOINT_REVIEW
+
+            invoke(["stage-update", "--work-id", work_id, "--stage", "raw_requirement",
+                    "--content", "edited while review is open"],
+                   base_path=tmp, expect_exit=6)
+            record = load_record(tmp, work_id)
+            assert record.status == RunStatus.CHECKPOINT_REVIEW
+            from tools.workflow_cli.state import get_active_artifact
+            aa = get_active_artifact(record, Stage.RAW_REQUIREMENT)
+            assert aa.version == 1
+            assert aa.status == "ready"
+
+    def test_stage_update_rejects_approved_checkpoint(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work_id = "WF-20260527-rca"
+            invoke(["run-start", "--work-id", work_id, "--requirement", "foo"], base_path=tmp)
+            invoke(["tier-lock", "--work-id", work_id, "--base", "light", "--confirm"], base_path=tmp)
+            invoke(["stage-produce", "--work-id", work_id, "--stage", "raw_requirement",
+                    "--content", "real content"], base_path=tmp)
+            invoke(["stage-ready", "--work-id", work_id, "--stage", "raw_requirement"], base_path=tmp)
+            invoke(["gate-quality", "--work-id", work_id, "--stage", "raw_requirement"], base_path=tmp)
+            invoke(["review-checkpoint", "--work-id", work_id, "--stage", "raw_requirement"],
+                   base_path=tmp)
+            invoke(["checkpoint-decide", "--work-id", work_id, "--stage", "raw_requirement",
+                    "--decision", "approved", "--confirm"], base_path=tmp)
+            record = load_record(tmp, work_id)
+            assert record.status == RunStatus.CHECKPOINT_APPROVED
+
+            invoke(["stage-update", "--work-id", work_id, "--stage", "raw_requirement",
+                    "--content", "edited after approval"],
+                   base_path=tmp, expect_exit=6)
+            record = load_record(tmp, work_id)
+            assert record.status == RunStatus.CHECKPOINT_APPROVED
+            from tools.workflow_cli.state import get_active_artifact
+            aa = get_active_artifact(record, Stage.RAW_REQUIREMENT)
+            assert aa.version == 1
+            assert aa.status == "approved"
+
     def test_stage_update_rejects_wrong_stage_in_repair_state(self):
         with tempfile.TemporaryDirectory() as tmp:
             work_id = "WF-20260527-rws"
@@ -1204,6 +1279,31 @@ class TestStageAdvance:
             invoke(["stage-advance", "--work-id", work_id], base_path=tmp)
             record = load_record(tmp, work_id)
             assert record.status == RunStatus.NEXT_STAGE
+            assert record.current_stage == Stage.REQUIREMENT_BRIEF
+
+    def test_stage_update_refused_after_stage_advance_before_entry(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work_id = "WF-20260527-sun"
+            self._to_approved(tmp, work_id)
+            invoke(["stage-advance", "--work-id", work_id], base_path=tmp)
+            invoke(["stage-update", "--work-id", work_id, "--stage", "raw_requirement",
+                    "--content", "mutating approved upstream after advance"],
+                   base_path=tmp, expect_exit=6)
+            record = load_record(tmp, work_id)
+            assert record.status == RunStatus.NEXT_STAGE
+            assert record.current_stage == Stage.REQUIREMENT_BRIEF
+
+    def test_stage_update_refused_for_non_current_stage_after_entry(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work_id = "WF-20260527-suc"
+            self._to_approved(tmp, work_id)
+            invoke(["stage-advance", "--work-id", work_id], base_path=tmp)
+            invoke(["gate-entry", "--work-id", work_id, "--stage", "requirement_brief"], base_path=tmp)
+            invoke(["stage-update", "--work-id", work_id, "--stage", "raw_requirement",
+                    "--content", "mutating approved upstream from next-stage draft"],
+                   base_path=tmp, expect_exit=6)
+            record = load_record(tmp, work_id)
+            assert record.status == RunStatus.ACTIVE_STAGE_DRAFT
             assert record.current_stage == Stage.REQUIREMENT_BRIEF
 
     def test_advance_refused_without_matching_checkpoint(self):

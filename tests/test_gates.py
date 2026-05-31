@@ -633,6 +633,34 @@ class TestSpecExternalDocsGate(unittest.TestCase):
             r = self.check(Path(tmp), self.Stage.SPEC, self.tier, [], body)
             self.assertTrue(r.passed)
 
+    def test_spec_with_template_placeholder_inventory_row_fails(self):
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as tmp:
+            body = (
+                "# SPEC\n\n## External Documentation Checked\n\n"
+                "| dependency | version | check date | conclusion |\n"
+                "| --- | --- | --- | --- |\n"
+                "| _example_ | _x.y_ | _YYYY-MM-DD_ | _Context7 checked / UNCONFIRMED_ |\n"
+            )
+            r = self.check(Path(tmp), self.Stage.SPEC, self.tier, [], body)
+            self.assertFalse(r.passed)
+            self.assertEqual(r.exit_code, 3)
+
+    def test_spec_with_placeholder_conclusion_inventory_row_fails(self):
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as tmp:
+            body = (
+                "# SPEC\n\n## External Documentation Checked\n\n"
+                "| dependency | version | check date | conclusion |\n"
+                "| --- | --- | --- | --- |\n"
+                "| pytest | 8.x | 2026-05-31 | _Context7 checked / UNCONFIRMED_ |\n"
+            )
+            r = self.check(Path(tmp), self.Stage.SPEC, self.tier, [], body)
+            self.assertFalse(r.passed)
+            self.assertEqual(r.exit_code, 3)
+
     def test_spec_with_na_row_passes(self):
         import tempfile
         from pathlib import Path
@@ -643,6 +671,20 @@ class TestSpecExternalDocsGate(unittest.TestCase):
             )
             r = self.check(Path(tmp), self.Stage.SPEC, self.tier, [], body)
             self.assertTrue(r.passed)
+
+    def test_spec_ignores_fenced_template_na_row(self):
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as tmp:
+            body = (
+                "# SPEC\n\n## External Documentation Checked\n\n"
+                "```md\n"
+                "N/A — no external dependencies\n"
+                "```\n"
+            )
+            r = self.check(Path(tmp), self.Stage.SPEC, self.tier, [], body)
+            self.assertFalse(r.passed)
+            self.assertEqual(r.exit_code, 3)
 
     def test_plan_stage_not_required_to_have_section(self):
         import tempfile

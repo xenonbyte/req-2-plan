@@ -369,6 +369,7 @@ class TestContinueDriver:
                 A.main(["continue"], base_path=base)
             out = capsys.readouterr().out
             assert "stage-ready" in out
+            assert f"stage-ready --work-id {pointer['selected_work_id']} --stage raw_requirement" in out
 
     def test_continue_new_stage_without_artifact_asks_for_production(self, capsys):
         import tempfile
@@ -424,6 +425,7 @@ class TestContinueDriver:
                 A.main(["continue"], base_path=base)
             out = capsys.readouterr().out
             assert "needs_repair" in out
+            assert f"stage-update --work-id {work_id} --stage raw_requirement" in out
             assert exc.value.code == 0
             record = RunStateManager(base / ".req-to-plan" / work_id).load()
             assert record.status == RunStatus.QUALITY_GATE_FAILED
@@ -444,3 +446,79 @@ class TestContinueDriver:
             # lifecycle `r2p` binary (which has no tier-lock subcommand).
             assert "r2p tier-lock" not in out
             assert "tier-lock --work-id" in out
+
+    def test_continue_checkpoint_review_prints_executable_next(self, capsys):
+        import tempfile
+        from pathlib import Path
+        from tools.workflow_cli import agent_shortcuts as A
+        from tools.workflow_cli.models import RunStatus
+        from tools.workflow_cli.state import RunStateManager
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            with pytest.raises(SystemExit):
+                A.main(["start", "Add rate limiting"], base_path=base)
+            work_id = A.read_active_pointer(base)["selected_work_id"]
+            manager = RunStateManager(base / ".req-to-plan" / work_id)
+            record = manager.load()
+            record.status = RunStatus.CHECKPOINT_REVIEW
+            manager.save(record)
+
+            with pytest.raises(SystemExit):
+                A.main(["continue"], base_path=base)
+
+            out = capsys.readouterr().out
+            assert "needs_human_approval" in out
+            assert (
+                f"checkpoint-decide --work-id {work_id} --stage raw_requirement "
+                "--decision approved --confirm"
+            ) in out
+
+    def test_continue_next_stage_entry_failure_prints_executable_retry(self, capsys):
+        import tempfile
+        from pathlib import Path
+        from tools.workflow_cli import agent_shortcuts as A
+        from tools.workflow_cli.models import RunStatus, Stage
+        from tools.workflow_cli.state import RunStateManager
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            with pytest.raises(SystemExit):
+                A.main(["start", "Add rate limiting"], base_path=base)
+            work_id = A.read_active_pointer(base)["selected_work_id"]
+            manager = RunStateManager(base / ".req-to-plan" / work_id)
+            record = manager.load()
+            record.status = RunStatus.NEXT_STAGE
+            record.current_stage = Stage.REQUIREMENT_BRIEF
+            manager.save(record)
+
+            with patch("tools.workflow_cli.agent_shortcuts._run_cli", return_value=2):
+                with pytest.raises(SystemExit) as exc:
+                    A.main(["continue"], base_path=base)
+
+            out = capsys.readouterr().out
+            assert exc.value.code == 2
+            assert "entry_gate_failed" in out
+            assert f"gate-entry --work-id {work_id} --stage requirement_brief" in out
+
+    def test_continue_entry_gate_failed_prints_executable_retry(self, capsys):
+        import tempfile
+        from pathlib import Path
+        from tools.workflow_cli import agent_shortcuts as A
+        from tools.workflow_cli.models import RunStatus, Stage
+        from tools.workflow_cli.state import RunStateManager
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            with pytest.raises(SystemExit):
+                A.main(["start", "Add rate limiting"], base_path=base)
+            work_id = A.read_active_pointer(base)["selected_work_id"]
+            manager = RunStateManager(base / ".req-to-plan" / work_id)
+            record = manager.load()
+            record.status = RunStatus.ENTRY_GATE_FAILED
+            record.current_stage = Stage.REQUIREMENT_BRIEF
+            manager.save(record)
+
+            with pytest.raises(SystemExit):
+                A.main(["continue"], base_path=base)
+
+            out = capsys.readouterr().out
+            assert "entry_gate_failed" in out
+            assert f"gate-entry --work-id {work_id} --stage requirement_brief" in out

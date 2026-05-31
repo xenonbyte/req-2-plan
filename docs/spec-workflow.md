@@ -543,6 +543,9 @@ Dependency inventory for every external library, framework, SDK, API, or CLI too
 |---|---|---|---|
 | _example_ | _x.y_ | _YYYY-MM-DD_ | _Context7 checked / UNCONFIRMED_ |
 
+Replace or remove the example row before finalizing the SPEC; template placeholder rows do
+not satisfy the Quality Gate.
+
 If there are no external dependencies:
 
 ```text

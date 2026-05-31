@@ -236,7 +236,7 @@ def _cmd_continue(ns: argparse.Namespace, base_path: Path) -> None:
                 sys.exit(0)
             if aa.status != "ready":
                 print(f"stop: needs_ready\nstage: {stage}\n"
-                      f"next: review the artifact, then stage-ready --stage {stage}\n")
+                      f"next: review the artifact, then stage-ready --work-id {work_id} --stage {stage}\n")
                 sys.exit(0)
             code = _run_cli(["gate-quality", "--work-id", work_id, "--stage", stage], base_path)
             if code != 0 and manager.load().status == RunStatus.ACTIVE_STAGE_DRAFT:
@@ -252,13 +252,16 @@ def _cmd_continue(ns: argparse.Namespace, base_path: Path) -> None:
             if code != 0:
                 sys.exit(code)
             print(f"stop: needs_human_approval\nstage: {stage}\n"
-                  f"next: checkpoint-decide --stage {stage} --decision approved --confirm "
-                  "(or --decision changes_requested)\n")
+                  f"next: checkpoint-decide --work-id {work_id} --stage {stage} "
+                  "--decision approved --confirm\n"
+                  f"alt: checkpoint-decide --work-id {work_id} --stage {stage} "
+                  "--decision changes_requested\n")
             sys.exit(0)
 
         if s == RunStatus.CHECKPOINT_REVIEW:
             print(f"stop: needs_human_approval\nstage: {stage}\n"
-                  f"next: checkpoint-decide --stage {stage} --decision approved --confirm\n")
+                  f"next: checkpoint-decide --work-id {work_id} --stage {stage} "
+                  "--decision approved --confirm\n")
             sys.exit(0)
 
         if s == RunStatus.CHECKPOINT_APPROVED:
@@ -275,19 +278,20 @@ def _cmd_continue(ns: argparse.Namespace, base_path: Path) -> None:
         if s == RunStatus.NEXT_STAGE:
             code = _run_cli(["gate-entry", "--work-id", work_id, "--stage", stage], base_path)
             if code != 0:
-                print(f"stop: entry_gate_failed\nstage: {stage}\nnext: repair upstream and rerun gate-entry\n")
+                print(f"stop: entry_gate_failed\nstage: {stage}\n"
+                      f"next: repair upstream and rerun gate-entry --work-id {work_id} --stage {stage}\n")
                 sys.exit(code)
             print(f"stop: entered_stage\nstage: {stage}\nnext: produce {stage} content\n")
             sys.exit(0)
 
         if s == RunStatus.ENTRY_GATE_FAILED:
             print(f"stop: entry_gate_failed\nstage: {stage}\n"
-                  f"next: repair upstream checkpoints, then gate-entry --stage {stage}\n")
+                  f"next: repair upstream checkpoints, then gate-entry --work-id {work_id} --stage {stage}\n")
             sys.exit(0)
 
         if s in (RunStatus.QUALITY_GATE_FAILED, RunStatus.CHECKPOINT_CHANGES_REQUESTED):
             print(f"stop: needs_repair\nstatus: {s.value}\nstage: {stage}\n"
-                  f"next: address the issue, then stage-update --stage {stage}\n")
+                  f"next: address the issue, then stage-update --work-id {work_id} --stage {stage}\n")
             sys.exit(0)
 
         # Fallback: read-only resume context.

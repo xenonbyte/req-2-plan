@@ -118,6 +118,7 @@ ALLOWED_TRANSITIONS: dict[RunStatus, set[RunStatus]] = {
         RunStatus.UPSTREAM_GAP_ROUTING,
     },
     RunStatus.READY_FOR_CHECKPOINT_REVIEW: {
+        RunStatus.ACTIVE_STAGE_DRAFT,
         RunStatus.CHECKPOINT_REVIEW,
         RunStatus.UPSTREAM_GAP_ROUTING,
     },
@@ -212,6 +213,7 @@ ALLOWED_COMMANDS_BY_RUN_STATE: dict[RunStatus, set[str]] = {
         "CMD-TIER-STATUS",
     },
     RunStatus.READY_FOR_CHECKPOINT_REVIEW: {
+        "CMD-STAGE-UPDATE",
         "CMD-REVIEW-CHECKPOINT",
         "CMD-SUBAGENT-REVIEW",
         "CMD-GAP-RECORD",

@@ -46,7 +46,7 @@ Use the project `.venv` (system Python lacks PyYAML due to PEP 668):
 .venv/bin/python -m pytest tests/ --cov=tools/workflow_cli
 ```
 
-Test count baseline: 529 passing. All tests must stay green after any change.
+Test count baseline: 544 passing. All tests must stay green after any change.
 
 ## Adding a New CLI Command
 

@@ -187,6 +187,7 @@ class InstallService:
         manifest = _load_manifest(manifest_path)
         removed: list[str] = []
         restored: list[str] = []
+        restored_targets: set[str] = set()
 
         # Collect paths that have backups (these should be restored, not deleted)
         backed_up_targets: set[str] = set()
@@ -209,14 +210,17 @@ class InstallService:
                 p.unlink()
                 removed.append(path_str)
 
-        # Restore backups (reverse order)
+        # Restore user backups (reverse order). Managed wrapper backups are
+        # generated r2p files from another platform install, not user originals.
         for bk in reversed(manifest.get("backups", [])):
             backup_path = Path(bk["backup"])
             target_path = Path(bk["target"])
             if backup_path.exists():
-                target_path.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(str(backup_path), str(target_path))
-                restored.append(str(target_path))
+                if not self._is_managed_wrapper_backup(str(target_path), backup_path):
+                    target_path.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(str(backup_path), str(target_path))
+                    restored.append(str(target_path))
+                    restored_targets.add(str(target_path))
                 backup_path.unlink(missing_ok=True)
 
         # Reference-count bin dir: only remove when no other platform manifests exist
@@ -237,7 +241,7 @@ class InstallService:
 
         # Clean obsolete managed shared wrappers even when another platform remains
         # installed (normal uninstall skips shared bin/ paths in that case).
-        self._cleanup_obsolete_managed_wrappers()
+        self._cleanup_obsolete_managed_wrappers(preserve_paths=restored_targets)
 
         return {"removed": removed, "restored": restored, "platform": platform}
 
@@ -306,7 +310,9 @@ class InstallService:
                 return True
         return False
 
-    def _cleanup_obsolete_managed_wrappers(self) -> None:
+    def _cleanup_obsolete_managed_wrappers(
+        self, preserve_paths: set[str] | None = None
+    ) -> None:
         """Remove managed shared bin/r2p-* wrappers that are no longer part of the
         current template set, across every installed platform manifest.
 
@@ -316,6 +322,7 @@ class InstallService:
         obsolete when it points inside ``bin/``, its filename starts with ``r2p-``,
         and that filename is not in the current ``tools/r2p-*`` wrapper set.
         """
+        preserve_paths = preserve_paths or set()
         current_wrappers = {
             p.name for p in sorted(self.repo_root.glob("tools/r2p-*")) if p.is_file()
         }
@@ -351,7 +358,7 @@ class InstallService:
                 self._strip_path_from_manifest(mpath, path_str)
             # Delete the obsolete managed wrapper only when there was no user
             # original to restore in its place.
-            if not restored:
+            if not restored and path_str not in preserve_paths:
                 Path(path_str).unlink(missing_ok=True)
 
     def _restore_managed_wrapper_backup(self, path_str: str) -> bool:
@@ -359,21 +366,53 @@ class InstallService:
         is ``path_str``, consuming the backup. Returns True if a backup was restored.
 
         Mirrors the uninstall restore step so cleaning up an obsolete managed
-        wrapper never destroys the user's original file."""
+        wrapper never destroys the user's original file. Backups that contain an
+        r2p-managed wrapper are discarded instead of restored; those are backups
+        of a shared wrapper already written by another platform install."""
         target = Path(path_str)
-        restored = False
+        user_backups: list[tuple[str, str, int, Path]] = []
+        managed_backups: list[Path] = []
+
         for mpath in sorted((self.manifest_root / "install").glob("*.yaml")):
             manifest = _load_manifest(mpath)
-            for bk in manifest.get("backups", []):
+            installed_at = str(manifest.get("installed_at", ""))
+            for index, bk in enumerate(manifest.get("backups", [])):
                 if str(bk.get("target")) != path_str:
                     continue
-                backup_path = Path(bk.get("backup", ""))
-                if backup_path.exists():
-                    target.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copy2(str(backup_path), str(target))
-                    backup_path.unlink(missing_ok=True)
-                    restored = True
+                backup = bk.get("backup")
+                if not backup:
+                    continue
+                backup_path = Path(backup)
+                if not backup_path.is_file():
+                    continue
+                if self._is_managed_wrapper_backup(path_str, backup_path):
+                    managed_backups.append(backup_path)
+                else:
+                    user_backups.append((installed_at, mpath.name, index, backup_path))
+
+        restored = False
+        if user_backups:
+            _, _, _, backup_path = sorted(user_backups, key=lambda item: item[:3])[0]
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(str(backup_path), str(target))
+            backup_path.unlink(missing_ok=True)
+            restored = True
+
+        for backup_path in managed_backups:
+            backup_path.unlink(missing_ok=True)
+
         return restored
+
+    def _is_managed_wrapper_backup(self, path_str: str, backup_path: Path) -> bool:
+        target = Path(path_str)
+        bin_dir = self.manifest_root / "bin"
+        if target.parent != bin_dir or not target.name.startswith("r2p-"):
+            return False
+        try:
+            content = backup_path.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            return False
+        return _looks_like_managed_bin_script(content)
 
     def _strip_path_from_manifest(self, manifest_path: Path, path_str: str) -> None:
         """Remove ``path_str`` from a manifest's installed_paths and any matching
@@ -413,6 +452,15 @@ def _render_bin_script(content: str, repo_root: Path) -> str:
     return content.replace(
         'REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"',
         f"REPO_ROOT={shlex.quote(str(repo_root))}",
+    )
+
+
+def _looks_like_managed_bin_script(content: str) -> bool:
+    return (
+        content.startswith("#!/usr/bin/env bash")
+        and 'SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"' in content
+        and 'export PYTHONPATH="$REPO_ROOT${PYTHONPATH:+:$PYTHONPATH}"' in content
+        and "-m tools.workflow_cli.agent_shortcuts" in content
     )
 
 

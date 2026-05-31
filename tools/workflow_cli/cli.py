@@ -813,23 +813,57 @@ def _cmd_stage_produce(args):
 def _cmd_stage_update(args):
     record, mgr, run_dir = _load_run(args.work_id, args.base_path)
     stage = _parse_stage(args.stage)
-    content = _resolve_content(args)
 
-    # In a repair loop, only the current stage may be updated; updating another
-    # stage must not clear the repair state for the unchanged current artifact.
-    repair_state = record.status in (
-        RunStatus.CHECKPOINT_CHANGES_REQUESTED,
-        RunStatus.QUALITY_GATE_FAILED,
-    )
-    if repair_state and stage != record.current_stage:
+    if record.status in (RunStatus.NEXT_STAGE, RunStatus.ENTRY_GATE_FAILED):
+        next_step = "gate-entry first to enter the stage draft"
+        if record.status == RunStatus.ENTRY_GATE_FAILED:
+            next_step = "gate-entry after repairing upstream checkpoints"
         print_and_exit(
             format_error(
-                f"Cannot update stage {stage.value!r} while repairing "
+                f"Cannot update in {record.status.value}; run {next_step}",
+                exit_code=EXIT_CONFLICT,
+            ),
+            EXIT_CONFLICT,
+        )
+
+    if record.status == RunStatus.CHECKPOINT_REVIEW:
+        print_and_exit(
+            format_error(
+                "Cannot update artifacts while checkpoint review is open; "
+                "use checkpoint-decide to approve or request changes first",
+                exit_code=EXIT_CONFLICT,
+            ),
+            EXIT_CONFLICT,
+        )
+    if record.status == RunStatus.CHECKPOINT_APPROVED:
+        print_and_exit(
+            format_error(
+                "Cannot update artifacts after checkpoint approval; "
+                "use stage-advance or run-close",
+                exit_code=EXIT_CONFLICT,
+            ),
+            EXIT_CONFLICT,
+        )
+
+    if stage != record.current_stage:
+        print_and_exit(
+            format_error(
+                f"Cannot update stage {stage.value!r}; current stage is "
                 f"{record.current_stage.value!r}",
                 exit_code=EXIT_CONFLICT,
             ),
             EXIT_CONFLICT,
         )
+
+    # Repair and post-gate edits invalidate the current artifact's gate/review readiness.
+    repair_state = record.status in (
+        RunStatus.CHECKPOINT_CHANGES_REQUESTED,
+        RunStatus.QUALITY_GATE_FAILED,
+    )
+    review_ready_state = record.status == RunStatus.READY_FOR_CHECKPOINT_REVIEW
+    needs_draft_reset = repair_state or review_ready_state
+
+    content = _resolve_content(args)
 
     am = ArtifactManager(run_dir)
     path = am.stage_update(stage, content)
@@ -840,9 +874,9 @@ def _cmd_stage_update(args):
     artifact_file = STAGE_ARTIFACT_MAP[stage]
     upsert_active_artifact(record, stage, artifact_file, new_version, "draft")
 
-    # Close repair loops: flip back to ACTIVE_STAGE_DRAFT if in repair state
-    # (guaranteed above to be the current stage).
-    if repair_state:
+    # Any post-gate edit invalidates the previous gate/review readiness.
+    # The stage must be marked ready and pass gate-quality again.
+    if needs_draft_reset:
         record = update_run_status(record, RunStatus.ACTIVE_STAGE_DRAFT)
 
     update_resume_context(record, last_operation=f"update_{stage.value}")
