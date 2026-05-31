@@ -934,6 +934,77 @@ def _register_status_commands(subparsers):
     p.set_defaults(func=_cmd_status_next)
 
 
+def _cmd_review_checkpoint(args):
+    record, mgr, run_dir = _load_run(args.work_id, args.base_path)
+    stage = _parse_stage(args.stage)
+
+    if record.status != RunStatus.READY_FOR_CHECKPOINT_REVIEW:
+        print_and_exit(
+            format_error(
+                f"Cannot review-checkpoint in status {record.status.value!r}; "
+                "must be ready_for_checkpoint_review",
+                exit_code=EXIT_CONFLICT,
+            ),
+            EXIT_CONFLICT,
+        )
+    if stage != record.current_stage:
+        print_and_exit(
+            format_error(
+                f"Stage {stage.value!r} is not the current stage {record.current_stage.value!r}",
+                exit_code=EXIT_CONFLICT,
+            ),
+            EXIT_CONFLICT,
+        )
+
+    aa = get_active_artifact(record, stage)
+    if aa is None:
+        print_and_exit(
+            format_error(f"No active artifact for stage {stage.value!r}", exit_code=EXIT_CONFLICT),
+            EXIT_CONFLICT,
+        )
+    if aa.status != "ready":
+        print_and_exit(
+            format_error(
+                f"Stage {stage.value!r} artifact must be ready before checkpoint review",
+                exit_code=EXIT_CONFLICT,
+            ),
+            EXIT_CONFLICT,
+        )
+    version = get_artifact_version(run_dir, stage)
+    if version != aa.version:
+        print_and_exit(
+            format_error(
+                f"Active artifact version v{aa.version} does not match on-disk v{version}",
+                exit_code=EXIT_CONFLICT,
+            ),
+            EXIT_CONFLICT,
+        )
+    reviews_dir = run_dir / "reviews"
+    reviews_dir.mkdir(parents=True, exist_ok=True)
+    marker = reviews_dir / f"{stage.value}-checkpoint-review-v{aa.version}.md"
+    marker.write_text(
+        f"# Checkpoint review marker\n\nstage: {stage.value}\nversion: {aa.version}\n"
+        "status: ready for human decision\n",
+        encoding="utf-8",
+    )
+
+    record = update_run_status(record, RunStatus.CHECKPOINT_REVIEW)
+    update_resume_context(
+        record,
+        last_operation=f"review_checkpoint_{stage.value}",
+        next_operation="checkpoint_decide",
+        active_item=stage.value,
+    )
+    mgr.save(record)
+    print_and_exit(
+        format_success(
+            {"work_id": str(record.work_id), "stage": stage.value, "marker": str(marker)},
+            message=f"Checkpoint review opened: {stage.value}",
+        ),
+        EXIT_OK,
+    )
+
+
 def _register_stage_commands(subparsers):
     def _add_content_args(p):
         grp = p.add_mutually_exclusive_group()
@@ -961,6 +1032,13 @@ def _register_stage_commands(subparsers):
     p.set_defaults(func=_cmd_stage_ready)
 
 
+def _register_checkpoint_commands(subparsers):
+    p = subparsers.add_parser("review-checkpoint", help="Open checkpoint review for a stage")
+    p.add_argument("--work-id", required=True)
+    p.add_argument("--stage", required=True)
+    p.set_defaults(func=_cmd_review_checkpoint)
+
+
 # ---------------------------------------------------------------------------
 # main
 # ---------------------------------------------------------------------------
@@ -984,6 +1062,7 @@ def main(args=None):
     _register_gate_commands(subparsers)
     _register_status_commands(subparsers)
     _register_stage_commands(subparsers)
+    _register_checkpoint_commands(subparsers)
 
     parsed = parser.parse_args(args)
     parsed.func(parsed)

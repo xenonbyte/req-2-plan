@@ -951,3 +951,52 @@ class TestForcedReviewRelocation:
             invoke(["gate-quality", "--work-id", work_id, "--stage", "design"], base_path=tmp)
             record = load_record(tmp, work_id)
             assert record.status == RunStatus.READY_FOR_CHECKPOINT_REVIEW
+
+
+# ---------------------------------------------------------------------------
+# review-checkpoint
+# ---------------------------------------------------------------------------
+
+
+class TestReviewCheckpoint:
+    def _to_ready(self, tmp, work_id, stage="raw_requirement"):
+        invoke(["run-start", "--work-id", work_id, "--requirement", "foo"], base_path=tmp)
+        invoke(["tier-lock", "--work-id", work_id, "--base", "light", "--confirm"], base_path=tmp)
+        invoke(["stage-produce", "--work-id", work_id, "--stage", stage, "--content", "real"], base_path=tmp)
+        invoke(["stage-ready", "--work-id", work_id, "--stage", stage], base_path=tmp)
+        invoke(["gate-quality", "--work-id", work_id, "--stage", stage], base_path=tmp)
+
+    def test_review_checkpoint_writes_marker_and_transitions(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work_id = "WF-20260527-rcp"
+            self._to_ready(tmp, work_id)
+            invoke(["review-checkpoint", "--work-id", work_id, "--stage", "raw_requirement"], base_path=tmp)
+            record = load_record(tmp, work_id)
+            assert record.status == RunStatus.CHECKPOINT_REVIEW
+            marker = Path(tmp) / ".req-to-plan" / work_id / "reviews" / "raw_requirement-checkpoint-review-v1.md"
+            assert marker.exists()
+
+    def test_review_checkpoint_wrong_state(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work_id = "WF-20260527-rcw"
+            invoke(["run-start", "--work-id", work_id, "--requirement", "foo"], base_path=tmp)
+            invoke(["review-checkpoint", "--work-id", work_id, "--stage", "raw_requirement"],
+                   base_path=tmp, expect_exit=6)
+
+    def test_review_checkpoint_refuses_unready_or_stale_artifact(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work_id = "WF-20260527-rcs"
+            invoke(["run-start", "--work-id", work_id, "--requirement", "foo"], base_path=tmp)
+            record = load_record(tmp, work_id)
+            record.status = RunStatus.READY_FOR_CHECKPOINT_REVIEW
+            save_record(tmp, record)
+            invoke(["review-checkpoint", "--work-id", work_id, "--stage", "raw_requirement"],
+                   base_path=tmp, expect_exit=6)
+            record = load_record(tmp, work_id)
+            record.active_artifacts[0].status = "ready"
+            save_record(tmp, record)
+            run_dir = Path(tmp) / ".req-to-plan" / work_id
+            (run_dir / "00-raw-requirement.md").write_text(
+                "---\nr2p_version: 2\n---\nfoo", encoding="utf-8")
+            invoke(["review-checkpoint", "--work-id", work_id, "--stage", "raw_requirement"],
+                   base_path=tmp, expect_exit=6)
