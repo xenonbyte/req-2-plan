@@ -496,6 +496,22 @@ def _cmd_tier_escalate(args):
             format_error("Tier is not locked; run tier-lock first", exit_code=EXIT_CLI_ERR),
             EXIT_CLI_ERR,
         )
+    if record.status == RunStatus.CHECKPOINT_APPROVED:
+        print_and_exit(
+            format_error(
+                "Cannot escalate tier after checkpoint approval; advance or reopen the run first",
+                exit_code=EXIT_CONFLICT,
+            ),
+            EXIT_CONFLICT,
+        )
+    if not is_command_allowed(record.status, "CMD-TIER-ESCALATE"):
+        print_and_exit(
+            format_error(
+                f"Cannot tier-escalate in status {record.status.value!r}",
+                exit_code=EXIT_CONFLICT,
+            ),
+            EXIT_CONFLICT,
+        )
 
     previous_tier = record.tier_locked
     record.tier_locked = record.tier_locked.escalate(modifier)

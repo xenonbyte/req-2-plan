@@ -218,7 +218,7 @@ Bundle rules:
 - The current stage is in `{ design, spec, plan }`.
 - No exactly-version-matched `reviews/<stage>-subagent-review-v<artifact-version>.md` file exists for the current stage and active artifact version.
 
-The rule requires a version-matched subagent review file with the exact artifact version in the filename. The checkpoint-review marker is a separate, always-required precondition: Quality Gate must pass and checkpoint review findings must be merged before any checkpoint decision (approved or not).
+The rule requires a version-matched subagent review file with the exact artifact version in the filename. The checkpoint-review marker is a separate, always-required precondition for approved decisions: Quality Gate must pass and `reviews/<stage>-checkpoint-review-v<artifact-version>.md` must exist before approval. Non-approval decisions such as `changes_requested` may still be recorded from `checkpoint_review` so repair work is not blocked by a missing marker.
 
 The refusal surfaces the missing review file path and the suggested command for `CMD-SUBAGENT-REVIEW`. Other checkpoint decisions (`changes_requested`, `blocked`, `upstream_gap_detected`, `route_upstream`) remain allowed so the operator can still record non-approval outcomes.
 

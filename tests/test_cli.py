@@ -1309,6 +1309,47 @@ class TestTierEscalationInvalidatesPlanGate:
             )
             invoke(["gate-quality", "--work-id", work_id, "--stage", "plan"], base_path=tmp, expect_exit=3)
 
+    def test_scope_expanding_escalation_refuses_approved_plan(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work_id = "WF-20260527-pgapproved"
+            self._ready_plan_under_light_tier(tmp, work_id)
+            invoke(["review-checkpoint", "--work-id", work_id, "--stage", "plan"], base_path=tmp)
+            invoke(
+                ["checkpoint-decide", "--work-id", work_id, "--stage", "plan", "--decision", "approved", "--confirm"],
+                base_path=tmp,
+            )
+
+            invoke(
+                ["tier-escalate", "--work-id", work_id, "--modifier", "scope_expanding"],
+                base_path=tmp,
+                expect_exit=6,
+            )
+
+            record = load_record(tmp, work_id)
+            assert record.status == RunStatus.CHECKPOINT_APPROVED
+            assert record.tier_locked.base.value == "light"
+
+    def test_scope_expanding_escalation_refuses_closed_run(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work_id = "WF-20260527-pgclosed"
+            self._ready_plan_under_light_tier(tmp, work_id)
+            invoke(["review-checkpoint", "--work-id", work_id, "--stage", "plan"], base_path=tmp)
+            invoke(
+                ["checkpoint-decide", "--work-id", work_id, "--stage", "plan", "--decision", "approved", "--confirm"],
+                base_path=tmp,
+            )
+            invoke(["run-close", "--work-id", work_id], base_path=tmp)
+
+            invoke(
+                ["tier-escalate", "--work-id", work_id, "--modifier", "scope_expanding"],
+                base_path=tmp,
+                expect_exit=6,
+            )
+
+            record = load_record(tmp, work_id)
+            assert record.status == RunStatus.CLOSED_AT_PLAN_CHECKPOINT
+            assert record.tier_locked.base.value == "light"
+
 
 # ---------------------------------------------------------------------------
 # review-checkpoint
