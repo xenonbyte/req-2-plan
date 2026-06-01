@@ -29,7 +29,13 @@ from tools.workflow_cli.state import (
     get_active_artifact,
     add_checkpoint,
 )
-from tools.workflow_cli.artifact import ArtifactManager, write_artifact, read_artifact, get_artifact_version
+from tools.workflow_cli.artifact import (
+    ArtifactManager,
+    write_artifact,
+    read_artifact,
+    get_artifact_version,
+    update_artifact_status,
+)
 from tools.workflow_cli.gates import check_entry_gate, check_quality_gate, check_forced_subagent_review
 from tools.workflow_cli.output import (
     format_success,
@@ -491,7 +497,27 @@ def _cmd_tier_escalate(args):
             EXIT_CLI_ERR,
         )
 
+    previous_tier = record.tier_locked
     record.tier_locked = record.tier_locked.escalate(modifier)
+
+    plan_gate_passed_statuses = {
+        RunStatus.READY_FOR_CHECKPOINT_REVIEW,
+        RunStatus.CHECKPOINT_REVIEW,
+    }
+    standard_plan_gate_became_applicable = (
+        record.current_stage == Stage.PLAN
+        and previous_tier.base != TierBase.STANDARD
+        and record.tier_locked.base == TierBase.STANDARD
+        and record.status in plan_gate_passed_statuses
+    )
+    if standard_plan_gate_became_applicable:
+        record = update_run_status(record, RunStatus.ACTIVE_STAGE_DRAFT)
+        update_resume_context(
+            record,
+            last_operation=f"tier_escalated_{modifier.value}",
+            next_operation="gate_quality",
+            active_item=Stage.PLAN.value,
+        )
 
     # Revoke affected bundle authorizations that cover high-tier stages
     from tools.workflow_cli.gates import _FORCED_REVIEW_MODIFIERS
@@ -918,17 +944,19 @@ def _cmd_stage_ready(args):
     stage_ready_statuses = {
         RunStatus.ACTIVE_STAGE_DRAFT,
         RunStatus.QUALITY_GATE_FAILED,
-        RunStatus.CHECKPOINT_CHANGES_REQUESTED,
     }
     if record.status not in stage_ready_statuses:
         print_and_exit(
             format_error(
                 f"Cannot mark artifacts ready in status {record.status.value!r}; "
-                "stage-ready is only allowed while drafting or repairing the current stage",
+                "stage-ready is only allowed while drafting or after quality-gate failure; "
+                "checkpoint changes_requested requires stage-update or stage-produce first",
                 exit_code=EXIT_CONFLICT,
             ),
             EXIT_CONFLICT,
         )
+
+    repair_state = record.status == RunStatus.QUALITY_GATE_FAILED
 
     if stage != record.current_stage:
         print_and_exit(
@@ -957,6 +985,8 @@ def _cmd_stage_ready(args):
     version = get_artifact_version(run_dir, stage)
     artifact_file = STAGE_ARTIFACT_MAP[stage]
     upsert_active_artifact(record, stage, artifact_file, version, "ready")
+    if repair_state:
+        record = update_run_status(record, RunStatus.ACTIVE_STAGE_DRAFT)
     update_resume_context(record, last_operation=f"ready_{stage.value}")
     mgr.save(record)
 
@@ -1234,6 +1264,17 @@ def _cmd_checkpoint_decide(args):
             EXIT_REVIEW_REQ,
         )
 
+    open_routes = [r.route_id for r in record.open_routes if r.status == "open"]
+    if open_routes:
+        print_and_exit(
+            format_error(
+                "Cannot approve checkpoint while routes remain open",
+                details=open_routes,
+                exit_code=EXIT_CONFLICT,
+            ),
+            EXIT_CONFLICT,
+        )
+
     # Duplicate-approval guard.
     if any(cp.stage == stage and cp.version == aa.version for cp in record.approved_checkpoints):
         print_and_exit(
@@ -1271,6 +1312,7 @@ def _cmd_checkpoint_decide(args):
     artifact_file = STAGE_ARTIFACT_MAP[stage]
     add_checkpoint(record, stage, artifact_file, aa.version, downstream)
     upsert_active_artifact(record, stage, artifact_file, aa.version, "approved")
+    update_artifact_status(run_dir, stage, "approved")
     record = update_run_status(record, RunStatus.CHECKPOINT_APPROVED)
     update_resume_context(
         record,

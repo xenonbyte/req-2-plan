@@ -241,11 +241,9 @@ def _has_external_docs_inventory(content: str) -> bool:
 # ---------------------------------------------------------------------------
 
 _PLAN_TASK_RE = re.compile(r"^### PLAN-TASK-\d+", re.MULTILINE)
-_TDD_YES_RE = re.compile(r"TDD Applicable:\s*yes", re.IGNORECASE)
-_CODE_FENCE_RE = _MARKDOWN_CODE_FENCE_RE
+_CODE_FENCE_LINE_RE = re.compile(r"^[ \t]{0,3}(`{3,}|~{3,})(.*)$")
 _PLAN_TASK_FIELD_RE = re.compile(
-    r"^(Spec References|Change Type|TDD Applicable|Files|Skeleton|Steps|Verification):",
-    re.MULTILINE,
+    r"^(Spec References|Change Type|TDD Applicable|Files|Skeleton|Steps|Verification):"
 )
 
 
@@ -258,13 +256,70 @@ def _plan_task_starts(content: str) -> list[int]:
 
 
 def _plan_task_field_body(task_body: str, field: str) -> str:
-    field_re = re.compile(rf"^{re.escape(field)}:[ \t]*(.*)$", re.MULTILINE)
-    match = field_re.search(task_body)
-    if not match:
+    found = _find_plan_task_field(task_body, field)
+    if found is None:
         return ""
-    next_match = _PLAN_TASK_FIELD_RE.search(task_body, match.end())
-    end = next_match.start() if next_match else len(task_body)
-    return f"{match.group(1)}\n{task_body[match.end():end]}"
+    match, line_start = found
+    body_start = line_start + match.end()
+    next_start = _find_next_plan_task_field_start(task_body, body_start)
+    end = next_start if next_start is not None else len(task_body)
+    return f"{match.group(1)}\n{task_body[body_start:end]}"
+
+
+def _find_plan_task_field(task_body: str, field: str):
+    field_re = re.compile(rf"^{re.escape(field)}:[ \t]*(.*)$")
+    for line, start, _ in _unfenced_markdown_lines(task_body):
+        match = field_re.match(line)
+        if match:
+            return match, start
+    return None
+
+
+def _find_next_plan_task_field_start(task_body: str, after: int) -> int | None:
+    for line, start, _ in _unfenced_markdown_lines(task_body):
+        if start >= after and _PLAN_TASK_FIELD_RE.match(line):
+            return start
+    return None
+
+
+def _plan_task_field_value(task_body: str, field: str) -> str:
+    found = _find_plan_task_field(task_body, field)
+    if found is None:
+        return ""
+    match, _ = found
+    return match.group(1).strip()
+
+
+def _has_complete_code_fence(content: str) -> bool:
+    fence_char = ""
+    fence_len = 0
+    has_body = False
+
+    for line in content.splitlines():
+        marker = _CODE_FENCE_LINE_RE.match(line)
+        if fence_char:
+            if (
+                marker
+                and marker.group(1)[0] == fence_char
+                and len(marker.group(1)) >= fence_len
+                and not marker.group(2).strip()
+            ):
+                if has_body:
+                    return True
+                fence_char = ""
+                fence_len = 0
+                has_body = False
+                continue
+            if line.strip():
+                has_body = True
+            continue
+
+        if marker and marker.group(2).strip():
+            fence_char = marker.group(1)[0]
+            fence_len = len(marker.group(1))
+            has_body = False
+
+    return False
 
 
 def _plan_tasks_missing_code(content: str) -> bool:
@@ -276,7 +331,8 @@ def _plan_tasks_missing_code(content: str) -> bool:
     for i in range(len(starts)):
         body = content[bounds[i]:bounds[i + 1]]
         skeleton = _plan_task_field_body(body, "Skeleton")
-        if _TDD_YES_RE.search(body) and not _CODE_FENCE_RE.search(skeleton):
+        tdd_applicable = _plan_task_field_value(body, "TDD Applicable")
+        if tdd_applicable.lower() == "yes" and not _has_complete_code_fence(skeleton):
             return True
     return False
 

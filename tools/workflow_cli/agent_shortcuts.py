@@ -203,6 +203,32 @@ def _tier_lock_command(base_path: Path, work_id: str, record) -> str:
     return _workflow_cli_command(base_path, args)
 
 
+def _prepare_input_file(run_dir: Path, stage: str, suffix: str, seed: str = "") -> Path:
+    path = run_dir / "inputs" / f"{stage}-{suffix}.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if not path.exists():
+        path.write_text(seed, encoding="utf-8")
+    return path
+
+
+def _stage_content_command(
+    base_path: Path,
+    work_id: str,
+    stage: str,
+    command: str,
+    content_file: Path,
+) -> str:
+    return _workflow_cli_command(
+        base_path,
+        [
+            command,
+            "--work-id", work_id,
+            "--stage", stage,
+            "--content-file", content_file,
+        ],
+    )
+
+
 # ---------------------------------------------------------------------------
 # Subcommand handlers
 # ---------------------------------------------------------------------------
@@ -278,8 +304,17 @@ def _cmd_continue(ns: argparse.Namespace, base_path: Path) -> None:
             except FileNotFoundError:
                 body = ""
             if aa is None or not body:
+                content_file = _prepare_input_file(run_path.parent, stage, "content")
+                content_cmd = _stage_content_command(
+                    base_path,
+                    work_id,
+                    stage,
+                    "stage-produce" if aa is None else "stage-update",
+                    content_file,
+                )
                 print(f"stop: needs_content\nstage: {stage}\n"
-                      f"next: produce {stage} content\n")
+                      f"content_file: {content_file}\n"
+                      f"next: {content_cmd}\n")
                 sys.exit(0)
             if aa.status != "ready":
                 ready_cmd = _workflow_cli_command(
@@ -340,9 +375,20 @@ def _cmd_continue(ns: argparse.Namespace, base_path: Path) -> None:
                     "--confirm",
                 ],
             )
+            changes_cmd = _workflow_cli_command(
+                base_path,
+                [
+                    "checkpoint-decide",
+                    "--work-id", work_id,
+                    "--stage", stage,
+                    "--decision", "changes_requested",
+                ],
+            )
             print(f"stop: needs_human_approval\nstage: {stage}\n"
                   "next: "
-                  f"{approve_cmd}\n")
+                  f"{approve_cmd}\n"
+                  "alt: "
+                  f"{changes_cmd}\n")
             sys.exit(0)
 
         if s == RunStatus.CHECKPOINT_APPROVED:
@@ -367,7 +413,17 @@ def _cmd_continue(ns: argparse.Namespace, base_path: Path) -> None:
                       "next: repair upstream and rerun "
                       f"{retry_cmd}\n")
                 sys.exit(code)
-            print(f"stop: entered_stage\nstage: {stage}\nnext: produce {stage} content\n")
+            content_file = _prepare_input_file(run_path.parent, stage, "content")
+            produce_cmd = _stage_content_command(
+                base_path,
+                work_id,
+                stage,
+                "stage-produce",
+                content_file,
+            )
+            print(f"stop: entered_stage\nstage: {stage}\n"
+                  f"content_file: {content_file}\n"
+                  f"next: {produce_cmd}\n")
             sys.exit(0)
 
         if s == RunStatus.ENTRY_GATE_FAILED:
@@ -381,13 +437,21 @@ def _cmd_continue(ns: argparse.Namespace, base_path: Path) -> None:
             sys.exit(0)
 
         if s in (RunStatus.QUALITY_GATE_FAILED, RunStatus.CHECKPOINT_CHANGES_REQUESTED):
-            update_cmd = _workflow_cli_command(
+            try:
+                seed = read_artifact(run_path.parent, record.current_stage)
+            except FileNotFoundError:
+                seed = ""
+            content_file = _prepare_input_file(run_path.parent, stage, "repair", seed)
+            update_cmd = _stage_content_command(
                 base_path,
-                ["stage-update", "--work-id", work_id, "--stage", stage],
+                work_id,
+                stage,
+                "stage-update",
+                content_file,
             )
             print(f"stop: needs_repair\nstatus: {s.value}\nstage: {stage}\n"
-                  "next: address the issue, then "
-                  f"{update_cmd}\n")
+                  f"content_file: {content_file}\n"
+                  f"next: {update_cmd}\n")
             sys.exit(0)
 
         # Fallback: read-only resume context.

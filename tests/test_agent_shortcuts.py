@@ -491,8 +491,48 @@ class TestContinueDriver:
             with pytest.raises(SystemExit):
                 A.main(["continue"], base_path=base)
             out = capsys.readouterr().out
+            content_file = base / ".req-to-plan" / pointer["selected_work_id"] / "inputs" / "requirement_brief-content.md"
             assert "needs_content" in out
-            assert "produce requirement_brief content" in out
+            assert _expected_workflow_cli_prefix(base) in out
+            assert content_file.exists()
+            assert str(content_file) in out
+            assert (
+                f"stage-produce --work-id {pointer['selected_work_id']} "
+                "--stage requirement_brief --content-file"
+            ) in out
+
+    def test_continue_existing_empty_artifact_asks_for_update(self, capsys):
+        import tempfile
+        from pathlib import Path
+        from tools.workflow_cli import agent_shortcuts as A
+        from tools.workflow_cli.cli import main as cli_main
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            with pytest.raises(SystemExit):
+                A.main(["start", "Add rate limiting"], base_path=base)
+            work_id = A.read_active_pointer(base)["selected_work_id"]
+            with pytest.raises(SystemExit):
+                cli_main(["--base-path", str(base), "tier-lock", "--work-id", work_id,
+                          "--base", "light", "--confirm"])
+            empty_content = base / "empty.md"
+            empty_content.write_text("", encoding="utf-8")
+            with pytest.raises(SystemExit):
+                cli_main(["--base-path", str(base), "stage-update", "--work-id", work_id,
+                          "--stage", "raw_requirement",
+                          "--content-file", str(empty_content)])
+
+            with pytest.raises(SystemExit):
+                A.main(["continue"], base_path=base)
+
+            out = capsys.readouterr().out
+            content_file = base / ".req-to-plan" / work_id / "inputs" / "raw_requirement-content.md"
+            assert "needs_content" in out
+            assert str(content_file) in out
+            assert (
+                f"stage-update --work-id {work_id} --stage raw_requirement "
+                "--content-file"
+            ) in out
+            assert "stage-produce" not in out
 
     def test_continue_surfaces_repair_after_failed_quality_gate(self, capsys):
         import tempfile
@@ -523,9 +563,16 @@ class TestContinueDriver:
             with pytest.raises(SystemExit) as exc:
                 A.main(["continue"], base_path=base)
             out = capsys.readouterr().out
+            content_file = base / ".req-to-plan" / work_id / "inputs" / "raw_requirement-repair.md"
             assert "needs_repair" in out
             assert _expected_workflow_cli_prefix(base) in out
-            assert f"stage-update --work-id {work_id} --stage raw_requirement" in out
+            assert content_file.exists()
+            assert "Depends on REQ-AUTH-1 with no closure tag" in content_file.read_text(encoding="utf-8")
+            assert str(content_file) in out
+            assert (
+                f"stage-update --work-id {work_id} --stage raw_requirement "
+                "--content-file"
+            ) in out
             assert exc.value.code == 0
             record = RunStateManager(base / ".req-to-plan" / work_id).load()
             assert record.status == RunStatus.QUALITY_GATE_FAILED
@@ -598,6 +645,10 @@ class TestContinueDriver:
             assert (
                 f"checkpoint-decide --work-id {work_id} --stage raw_requirement "
                 "--decision approved --confirm"
+            ) in out
+            assert (
+                f"checkpoint-decide --work-id {work_id} --stage raw_requirement "
+                "--decision changes_requested"
             ) in out
 
     def test_continue_next_stage_entry_failure_prints_executable_retry(self, capsys):

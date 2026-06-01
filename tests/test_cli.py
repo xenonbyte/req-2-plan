@@ -742,6 +742,45 @@ class TestStageReady:
             text = artifact.read_text()
             assert "r2p_status: ready" in text
 
+    def test_stage_ready_from_quality_gate_failed_returns_to_draft(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work_id = "WF-20260527-ready-repair"
+            invoke(["run-start", "--work-id", work_id, "--requirement", "foo"], base_path=tmp)
+            invoke(["stage-produce", "--work-id", work_id, "--stage", "raw_requirement",
+                    "--content", "real"], base_path=tmp)
+            record = load_record(tmp, work_id)
+            record.status = RunStatus.QUALITY_GATE_FAILED
+            save_record(tmp, record)
+
+            invoke(["stage-ready", "--work-id", work_id, "--stage", "raw_requirement"],
+                   base_path=tmp)
+
+            record = load_record(tmp, work_id)
+            assert record.status == RunStatus.ACTIVE_STAGE_DRAFT
+            assert record.active_artifacts[0].status == "ready"
+
+    def test_stage_ready_refuses_changes_requested_without_repair(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work_id = "WF-20260527-ready-cr"
+            invoke(["run-start", "--work-id", work_id, "--requirement", "foo"], base_path=tmp)
+            invoke(["tier-lock", "--work-id", work_id, "--base", "light", "--confirm"], base_path=tmp)
+            invoke(["stage-produce", "--work-id", work_id, "--stage", "raw_requirement",
+                    "--content", "real"], base_path=tmp)
+            invoke(["stage-ready", "--work-id", work_id, "--stage", "raw_requirement"], base_path=tmp)
+            invoke(["gate-quality", "--work-id", work_id, "--stage", "raw_requirement"], base_path=tmp)
+            invoke(["review-checkpoint", "--work-id", work_id, "--stage", "raw_requirement"],
+                   base_path=tmp)
+            invoke(["checkpoint-decide", "--work-id", work_id, "--stage", "raw_requirement",
+                    "--decision", "changes_requested"], base_path=tmp)
+
+            invoke(["stage-ready", "--work-id", work_id, "--stage", "raw_requirement"],
+                   base_path=tmp, expect_exit=6)
+
+            record = load_record(tmp, work_id)
+            assert record.status == RunStatus.CHECKPOINT_CHANGES_REQUESTED
+            assert record.active_artifacts[0].version == 1
+            assert record.active_artifacts[0].status == "ready"
+
     def test_refuses_after_checkpoint_approval_without_resetting_artifact(self):
         with tempfile.TemporaryDirectory() as tmp:
             work_id = "WF-20260527-ready-approved"
@@ -1215,6 +1254,62 @@ class TestForcedReviewRelocation:
             assert record.status == RunStatus.READY_FOR_CHECKPOINT_REVIEW
 
 
+class TestTierEscalationInvalidatesPlanGate:
+    def _ready_plan_under_light_tier(self, tmp: str, work_id: str) -> None:
+        from tools.workflow_cli.models import ActiveArtifact
+
+        invoke(["run-start", "--work-id", work_id, "--requirement", "foo"], base_path=tmp)
+        invoke(["tier-lock", "--work-id", work_id, "--base", "light", "--confirm"], base_path=tmp)
+        record = load_record(tmp, work_id)
+        record.current_stage = Stage.PLAN
+        record.status = RunStatus.ACTIVE_STAGE_DRAFT
+        record.active_artifacts = [
+            ActiveArtifact(
+                stage=Stage.PLAN,
+                artifact="07-plan.md",
+                version=1,
+                status="ready",
+            )
+        ]
+        save_record(tmp, record)
+        run_dir = Path(tmp) / ".req-to-plan" / work_id
+        (run_dir / "07-plan.md").write_text(
+            "---\nr2p_version: 1\n---\n# PLAN\n\nProse-only plan.\n",
+            encoding="utf-8",
+        )
+        invoke(["gate-quality", "--work-id", work_id, "--stage", "plan"], base_path=tmp)
+
+    def test_scope_expanding_escalation_invalidates_ready_plan_gate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work_id = "WF-20260527-pgready"
+            self._ready_plan_under_light_tier(tmp, work_id)
+
+            invoke(["tier-escalate", "--work-id", work_id, "--modifier", "scope_expanding"], base_path=tmp)
+
+            record = load_record(tmp, work_id)
+            assert record.status == RunStatus.ACTIVE_STAGE_DRAFT
+            assert record.tier_locked.base.value == "standard"
+            invoke(["review-checkpoint", "--work-id", work_id, "--stage", "plan"], base_path=tmp, expect_exit=6)
+            invoke(["gate-quality", "--work-id", work_id, "--stage", "plan"], base_path=tmp, expect_exit=3)
+
+    def test_scope_expanding_escalation_invalidates_open_plan_review(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work_id = "WF-20260527-pgreview"
+            self._ready_plan_under_light_tier(tmp, work_id)
+            invoke(["review-checkpoint", "--work-id", work_id, "--stage", "plan"], base_path=tmp)
+
+            invoke(["tier-escalate", "--work-id", work_id, "--modifier", "scope_expanding"], base_path=tmp)
+
+            record = load_record(tmp, work_id)
+            assert record.status == RunStatus.ACTIVE_STAGE_DRAFT
+            invoke(
+                ["checkpoint-decide", "--work-id", work_id, "--stage", "plan", "--decision", "approved", "--confirm"],
+                base_path=tmp,
+                expect_exit=6,
+            )
+            invoke(["gate-quality", "--work-id", work_id, "--stage", "plan"], base_path=tmp, expect_exit=3)
+
+
 # ---------------------------------------------------------------------------
 # review-checkpoint
 # ---------------------------------------------------------------------------
@@ -1311,6 +1406,8 @@ class TestCheckpointDecide:
             record = load_record(tmp, work_id)
             assert record.status == RunStatus.CHECKPOINT_APPROVED
             assert any(cp.stage == Stage.RAW_REQUIREMENT for cp in record.approved_checkpoints)
+            artifact = Path(tmp) / ".req-to-plan" / work_id / "00-raw-requirement.md"
+            assert "r2p_status: approved" in artifact.read_text(encoding="utf-8")
 
     def test_approve_preserves_downstream_authorization(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1322,6 +1419,30 @@ class TestCheckpointDecide:
             record = load_record(tmp, work_id)
             checkpoint = next(cp for cp in record.approved_checkpoints if cp.stage == Stage.RAW_REQUIREMENT)
             assert checkpoint.downstream_authorization == "custom_next"
+
+    def test_approve_refuses_open_routes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work_id = "WF-20260527-cd2b"
+            self._to_review(tmp, work_id)
+            record = load_record(tmp, work_id)
+            record.open_routes = [
+                OpenRoute(
+                    route_id="GAP-001",
+                    from_stage=Stage.RAW_REQUIREMENT,
+                    owner_stage=Stage.RAW_REQUIREMENT,
+                    required_action="repair traceability",
+                    status="open",
+                )
+            ]
+            save_record(tmp, record)
+
+            invoke(["checkpoint-decide", "--work-id", work_id, "--stage", "raw_requirement",
+                    "--decision", "approved", "--confirm"], base_path=tmp, expect_exit=6)
+
+            record = load_record(tmp, work_id)
+            assert record.status == RunStatus.CHECKPOINT_REVIEW
+            assert record.approved_checkpoints == []
+            assert record.active_artifacts[0].status == "ready"
 
     def test_changes_requested_transitions_and_sets_resume(self):
         with tempfile.TemporaryDirectory() as tmp:

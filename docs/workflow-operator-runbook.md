@@ -255,7 +255,7 @@ r2p-switch --work-id <work-id>
 r2p-reopen --from <work-id> --stage <stage> --reason "<short>"
 ```
 
-These shortcuts are intentionally small. `r2p-continue` may perform safe `run resume` or `run close` delegation, but it stops and prints the next explicit command when stage content, tier locking, Quality Gate readiness, review merge, confirmation, checkpoint decision, route repair, or re-import work is required.
+These shortcuts are intentionally small. `r2p-continue` may perform safe `run resume` or `run close` delegation, but it stops and prints the next explicit command when stage content, tier locking, Quality Gate readiness, review merge, confirmation, checkpoint decision, route repair, or re-import work is required. If the stop prints `content_file`, write the stage content or repair there before running the printed `next:` command.
 
 ## Close The Run
 

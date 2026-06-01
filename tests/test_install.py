@@ -85,6 +85,15 @@ class TestInstallService:
         bin_dir = str(manifest_root / "bin")
         assert bin_dir in content, "rendered bin dir path should appear in file"
 
+    def test_install_claude_skill_qualifies_content_file_stops(self, tmp_path):
+        svc, manifest_root, ph_root = make_service(tmp_path)
+        svc.install("claude")
+        skill = ph_root / "claude" / "skills" / "r2p" / "SKILL.md"
+        content = skill.read_text()
+        assert "content_file" in content
+        assert "needs_content" in content
+        assert "needs_repair" in content
+
     def test_install_renders_bin_script_with_source_repo_root(self, tmp_path):
         svc, manifest_root, _ = make_service(tmp_path)
         svc.install("claude")
@@ -547,6 +556,34 @@ class TestStaleWrapperCleanup:
         assert_no_manifest_references(manifest_root, stale)
         assert not backup_file.exists(), "restored backup file should be consumed"
 
+    def test_final_uninstall_preserves_restored_user_backup_for_obsolete_shared_wrapper(self, tmp_path):
+        svc, manifest_root, ph_root = make_service(tmp_path)
+        svc.install("claude")
+        bin_dir = manifest_root / "bin"
+        stale = bin_dir / "r2p-adapt"
+        stale.write_text(old_managed_adapt_wrapper(), encoding="utf-8")
+        seed_stale_wrapper_in_manifests(manifest_root, stale, platforms=("claude",))
+
+        backup_dir = manifest_root / "install" / "backups" / "claude"
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        backup_file = backup_dir / "r2p-adapt.user.bak"
+        backup_file.write_text("USER ORIGINAL\n", encoding="utf-8")
+
+        from tools.workflow_cli.install import _load_manifest, _dump_manifest
+        claude_manifest_path = manifest_root / "install" / "claude.yaml"
+        claude_manifest = _load_manifest(claude_manifest_path)
+        claude_manifest.setdefault("backups", []).append(
+            {"target": str(stale), "backup": str(backup_file)}
+        )
+        claude_manifest_path.write_text(_dump_manifest(claude_manifest), encoding="utf-8")
+
+        result = svc.uninstall("claude")
+
+        assert str(stale) in result["restored"], "uninstall should report restored user backup"
+        assert stale.exists(), "final uninstall must not delete the restored user file"
+        assert stale.read_text() == "USER ORIGINAL\n"
+        assert not backup_file.exists(), "restored backup file should be consumed"
+
     def test_uninstall_discards_restored_managed_backup_for_obsolete_shared_wrapper(self, tmp_path):
         svc, manifest_root, ph_root = make_service(tmp_path)
         svc.install("claude")
@@ -693,3 +730,26 @@ class TestStaleWrapperCleanup:
         assert_no_manifest_references(manifest_root, stale)
         assert not user_backup.exists(), "restored user backup file should be consumed"
         assert not managed_backup.exists(), "discarded managed wrapper backup should be consumed"
+
+    def test_cleanup_ignores_bad_manifest_while_cleaning_valid_manifests(self, tmp_path):
+        svc, manifest_root, ph_root = make_service(tmp_path)
+        svc.install("codex")
+        bin_dir = manifest_root / "bin"
+        stale = bin_dir / "r2p-adapt"
+        stale.write_text(old_managed_adapt_wrapper(), encoding="utf-8")
+        seed_stale_wrapper_in_manifests(manifest_root, stale, platforms=("codex",))
+
+        bad_manifest = manifest_root / "install" / "broken.yaml"
+        bad_manifest.write_text("[]\n", encoding="utf-8")
+
+        svc._cleanup_obsolete_managed_wrappers()
+
+        assert bad_manifest.exists(), "cleanup should leave unreadable manifests for operator repair"
+        assert not stale.exists(), "valid manifests should still be cleaned"
+        from tools.workflow_cli.install import _load_manifest
+        codex_manifest = _load_manifest(manifest_root / "install" / "codex.yaml")
+        assert str(stale) not in codex_manifest.get("installed_paths", [])
+        assert all(
+            str(bk.get("target")) != str(stale)
+            for bk in codex_manifest.get("backups", [])
+        )

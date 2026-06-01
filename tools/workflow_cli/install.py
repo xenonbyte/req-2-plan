@@ -210,6 +210,13 @@ class InstallService:
                 p.unlink()
                 removed.append(path_str)
 
+        # Reference-count bin dir: on final platform uninstall, drop managed bin
+        # contents before restoring backups so user-owned bin files can be copied
+        # back after cleanup.
+        if not other_platforms_installed:
+            if bin_dir.exists():
+                shutil.rmtree(str(bin_dir))
+
         # Restore user backups (reverse order). Managed wrapper backups are
         # generated r2p files from another platform install, not user originals.
         for bk in reversed(manifest.get("backups", [])):
@@ -226,11 +233,6 @@ class InstallService:
         # Clean obsolete managed shared wrappers while this manifest can still
         # prove ownership of stale shared bin paths.
         self._cleanup_obsolete_managed_wrappers(preserve_paths=restored_targets)
-
-        # Reference-count bin dir: only remove when no other platform manifests exist
-        if not other_platforms_installed:
-            if bin_dir.exists():
-                shutil.rmtree(str(bin_dir))
 
         # Clean up empty backup directory for this platform
         backup_dir = self.manifest_root / "install" / "backups" / platform
@@ -334,7 +336,9 @@ class InstallService:
         # Discover obsolete managed wrapper paths from manifest references only.
         obsolete: set[str] = set()
         for mpath in sorted(install_dir.glob("*.yaml")):
-            manifest = _load_manifest(mpath)
+            manifest = self._load_manifest_for_cleanup(mpath)
+            if manifest is None:
+                continue
             refs = list(manifest.get("installed_paths", []))
             refs += [str(bk.get("target")) for bk in manifest.get("backups", [])]
             for ref in refs:
@@ -355,6 +359,8 @@ class InstallService:
             # only copy is orphaned and can never be restored by uninstall.
             restored = self._restore_managed_wrapper_backup(path_str)
             for mpath in sorted(install_dir.glob("*.yaml")):
+                if self._load_manifest_for_cleanup(mpath) is None:
+                    continue
                 self._strip_path_from_manifest(mpath, path_str)
             # Delete the obsolete managed wrapper only when there was no user
             # original to restore in its place.
@@ -374,7 +380,9 @@ class InstallService:
         managed_backups: list[Path] = []
 
         for mpath in sorted((self.manifest_root / "install").glob("*.yaml")):
-            manifest = _load_manifest(mpath)
+            manifest = self._load_manifest_for_cleanup(mpath)
+            if manifest is None:
+                continue
             installed_at = str(manifest.get("installed_at", ""))
             for index, bk in enumerate(manifest.get("backups", [])):
                 if str(bk.get("target")) != path_str:
@@ -433,6 +441,17 @@ class InstallService:
 
         if changed:
             manifest_path.write_text(_dump_manifest(manifest), encoding="utf-8")
+
+    def _load_manifest_for_cleanup(self, manifest_path: Path) -> dict[str, Any] | None:
+        """Load a manifest during best-effort shared-wrapper cleanup.
+
+        A malformed unrelated manifest should not leave the current install or
+        uninstall half-cleaned; the bad file remains in place for operator repair.
+        """
+        try:
+            return _load_manifest(manifest_path)
+        except (OSError, UnicodeDecodeError, ValueError):
+            return None
 
 
 # ---------------------------------------------------------------------------

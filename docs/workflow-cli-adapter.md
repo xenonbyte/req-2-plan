@@ -106,7 +106,7 @@ The active pointer path is:
 .req-to-plan/.workflow-active
 ```
 
-The wrappers must preserve the concrete CLI's gates, checkpoint, route, stale artifact, and confirmation stops. `r2p-continue` performs only safe single-step delegation and must stop rather than synthesize stage artifact content.
+The wrappers must preserve the concrete CLI's gates, checkpoint, route, stale artifact, and confirmation stops. `r2p-continue` performs only safe single-step delegation and must stop rather than synthesize stage artifact content. For content and repair stops, it may create an operator input file under `.req-to-plan/<work-id>/inputs/` and print a complete `stage-produce` or `stage-update --content-file <path>` command.
 
 ## Global Flags
 

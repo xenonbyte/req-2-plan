@@ -490,8 +490,11 @@ class TestPlanCodeBlockGate(unittest.TestCase):
         outside_skeleton_code: bool = False,
         indented_skeleton_code: bool = False,
         fence: str = "```",
+        skeleton_override: str | None = None,
     ) -> str:
-        if with_code:
+        if skeleton_override is not None:
+            skeleton = skeleton_override
+        elif with_code:
             fence_prefix = "  " if indented_skeleton_code else ""
             skeleton = f"{fence_prefix}{fence}python\ndef f():\n    ...\n{fence_prefix}{fence}\n"
         else:
@@ -576,6 +579,44 @@ class TestPlanCodeBlockGate(unittest.TestCase):
             r = self.check(Path(tmp), self.Stage.PLAN, self.standard, [], self._plan(True))
             self.assertTrue(r.passed)
 
+    def test_standard_plan_allows_field_labels_inside_skeleton_code_block(self):
+        import tempfile
+        from pathlib import Path
+        skeleton = (
+            "```yaml\n"
+            "Steps:\n"
+            "  - write failing test\n"
+            "Files:\n"
+            "  - tools/example.py\n"
+            "```\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            r = self.check(
+                Path(tmp),
+                self.Stage.PLAN,
+                self.standard,
+                [],
+                self._plan(True, skeleton_override=skeleton),
+            )
+            self.assertTrue(r.passed)
+
+    def test_standard_plan_uses_tdd_applicable_field_value_only(self):
+        import tempfile
+        from pathlib import Path
+        plan = (
+            "# PLAN\n\n"
+            "### PLAN-TASK-001: do thing\n"
+            "TDD Applicable: no\n"
+            "Skeleton:\n"
+            "(prose only)\n"
+            "Steps:\n"
+            "- Mention the literal text TDD Applicable: yes in documentation.\n"
+            "Verification: inspect generated docs\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            r = self.check(Path(tmp), self.Stage.PLAN, self.standard, [], plan)
+            self.assertTrue(r.passed)
+
     def test_standard_plan_with_indented_skeleton_code_block_passes_this_check(self):
         import tempfile
         from pathlib import Path
@@ -601,6 +642,65 @@ class TestPlanCodeBlockGate(unittest.TestCase):
                 self._plan(True, fence="~~~"),
             )
             self.assertTrue(r.passed)
+
+    def test_standard_plan_with_bare_skeleton_fence_fails(self):
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as tmp:
+            r = self.check(
+                Path(tmp),
+                self.Stage.PLAN,
+                self.standard,
+                [],
+                self._plan(True, fence="```", skeleton_override="```\n"),
+            )
+            self.assertFalse(r.passed)
+            self.assertEqual(r.exit_code, 3)
+
+    def test_standard_plan_with_unclosed_skeleton_fence_fails(self):
+        import tempfile
+        from pathlib import Path
+        plan = (
+            "# PLAN\n\n"
+            "### PLAN-TASK-001: do thing\n"
+            "TDD Applicable: yes\n"
+            "Skeleton:\n"
+            "```python\n"
+            "def f():\n"
+            "    return 1\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            r = self.check(Path(tmp), self.Stage.PLAN, self.standard, [], plan)
+            self.assertFalse(r.passed)
+            self.assertEqual(r.exit_code, 3)
+
+    def test_standard_plan_with_empty_skeleton_code_block_fails(self):
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as tmp:
+            r = self.check(
+                Path(tmp),
+                self.Stage.PLAN,
+                self.standard,
+                [],
+                self._plan(True, skeleton_override="```python\n```\n"),
+            )
+            self.assertFalse(r.passed)
+            self.assertEqual(r.exit_code, 3)
+
+    def test_standard_plan_with_language_missing_from_skeleton_code_block_fails(self):
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as tmp:
+            r = self.check(
+                Path(tmp),
+                self.Stage.PLAN,
+                self.standard,
+                [],
+                self._plan(True, skeleton_override="```\ndef f():\n    return 1\n```\n"),
+            )
+            self.assertFalse(r.passed)
+            self.assertEqual(r.exit_code, 3)
 
     def test_light_plan_without_code_block_exempt(self):
         import tempfile

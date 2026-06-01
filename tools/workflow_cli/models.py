@@ -123,6 +123,7 @@ ALLOWED_TRANSITIONS: dict[RunStatus, set[RunStatus]] = {
         RunStatus.UPSTREAM_GAP_ROUTING,
     },
     RunStatus.CHECKPOINT_REVIEW: {
+        RunStatus.ACTIVE_STAGE_DRAFT,
         RunStatus.CHECKPOINT_CHANGES_REQUESTED,
         RunStatus.CHECKPOINT_APPROVED,
         RunStatus.UPSTREAM_GAP_ROUTING,
@@ -202,7 +203,6 @@ ALLOWED_COMMANDS_BY_RUN_STATE: dict[RunStatus, set[str]] = {
         "CMD-STAGE-PRODUCE",
         "CMD-STAGE-UPDATE",
         "CMD-STAGE-READY",
-        "CMD-GATE-QUALITY",
         "CMD-CONFIRM-RECORD",
         "CMD-CONFIRM-REJECT",
         "CMD-SUBAGENT-DISPATCH",
@@ -237,8 +237,6 @@ ALLOWED_COMMANDS_BY_RUN_STATE: dict[RunStatus, set[str]] = {
     RunStatus.CHECKPOINT_CHANGES_REQUESTED: {
         "CMD-STAGE-PRODUCE",
         "CMD-STAGE-UPDATE",
-        "CMD-STAGE-READY",
-        "CMD-GATE-QUALITY",
         "CMD-CONFIRM-RECORD",
         "CMD-CONFIRM-REJECT",
         "CMD-SUBAGENT-DISPATCH",

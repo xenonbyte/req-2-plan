@@ -168,6 +168,25 @@ class TestCommandEligibility(unittest.TestCase):
             self.is_command_allowed(self.RunStatus.NOT_STARTED, "CMD-RUN-REOPEN")
         )
 
+    def test_cmd_gate_quality_not_allowed_until_repair_returns_to_draft(self):
+        self.assertFalse(
+            self.is_command_allowed(
+                self.RunStatus.QUALITY_GATE_FAILED, "CMD-GATE-QUALITY"
+            )
+        )
+        self.assertFalse(
+            self.is_command_allowed(
+                self.RunStatus.CHECKPOINT_CHANGES_REQUESTED, "CMD-GATE-QUALITY"
+            )
+        )
+
+    def test_cmd_stage_ready_not_allowed_until_requested_changes_are_repaired(self):
+        self.assertFalse(
+            self.is_command_allowed(
+                self.RunStatus.CHECKPOINT_CHANGES_REQUESTED, "CMD-STAGE-READY"
+            )
+        )
+
 
 class TestWorkId(unittest.TestCase):
     def setUp(self):

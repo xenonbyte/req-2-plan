@@ -25,7 +25,8 @@ Run each via Bash using the scripts in `{{R2P_BIN_DIR}}`:
 1. `r2p-start "<requirement>"` — start a new run
 2. `r2p-continue` — repeatedly; runs safe automatic steps, stops and suggests the next command when a human action is needed
    - Stops at: tier not locked, needs stage artifact content, needs stage ready mark, needs human checkpoint approval, entry gate failed, needs repair (Quality Gate failed or changes requested)
-   - When stopped, run the printed `next:` command exactly; if an `alt:` command is shown, use it only when that alternate decision is intended
+   - When stopped at `needs_content` or `needs_repair`, write the required artifact content into the printed `content_file`, then run the printed `next:` command exactly
+   - For other stops, run the printed `next:` command exactly; if an `alt:` command is shown, use it only when that alternate decision is intended
    - Auto-runs: eligible entry gates, eligible Quality Gates, opens checkpoint review (`review-checkpoint`)
    - Auto-advances: moves to the next stage after non-PLAN checkpoint approval, then runs that stage's entry gate
    - Auto-closes: closes the run when the PLAN checkpoint is approved and no open routes remain

@@ -206,6 +206,7 @@ Behavior:
 - If the selected run is open, inspects the next allowed operation.
 - May compose only safe unambiguous operations that do not create semantic stage content, grant approval, choose route ownership, or invent confirmation evidence.
 - In the local concrete wrapper, safe composition is intentionally narrow: it delegates `run resume` and `run close` when those are the next valid operation, and otherwise prints the next explicit command for the operator or agent to run.
+- For stage content and repair stops, creates or reuses `.req-to-plan/<work-id>/inputs/<stage>-content.md` or `.req-to-plan/<work-id>/inputs/<stage>-repair.md`, prints it as `content_file`, and prints a complete `stage-produce` or `stage-update --content-file <path>` command as `next`.
 - May close only by composing `CMD-RUN-CLOSE` after an approved PLAN Checkpoint, no open route, and no stale or superseded final references.
 - Stops whenever user confirmation, checkpoint approval, route ownership, upstream repair, ambiguous state, or stale input is required.
 - When the tier is unlocked, surfaces `r2p-tier-lock` as the next required command instead of advancing the stage.
