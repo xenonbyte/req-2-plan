@@ -138,6 +138,9 @@ def test_operator_runbook_uses_current_cli_surface():
 
     forbidden = [
         "--source <requirement.md>",
+        "duplicate_active_run",
+        "duplicate_closed_run",
+        "before using `--confirm`",
         "review-merge",
         "confirm-record",
         "checkpoint-bundle",
@@ -153,6 +156,7 @@ def test_operator_runbook_uses_current_cli_surface():
 
     required = [
         "--requirement \"<raw requirement>\"",
+        "--overwrite",
         "--base <light|standard>",
         "--modifier migration",
         "--content-file <stage-artifact-body.md>",

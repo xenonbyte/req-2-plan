@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import re
+import shutil
 import sys
 from pathlib import Path
 
@@ -134,10 +135,23 @@ def _parse_modifiers(raw: str | None) -> frozenset[TierModifier]:
 
 def _cmd_run_start(args):
     work_id = _validate_work_id(args.work_id)
+    if not args.requirement.strip():
+        print_and_exit(
+            format_error("Requirement must not be blank", exit_code=EXIT_CLI_ERR),
+            EXIT_CLI_ERR,
+        )
     run_dir = _get_run_dir(work_id, args.base_path)
     mgr = RunStateManager(run_dir)
 
-    if (run_dir / "run.md").exists() and not getattr(args, "overwrite", False):
+    run_dir_occupied = False
+    if run_dir.exists():
+        run_dir_occupied = (
+            True
+            if run_dir.is_symlink() or not run_dir.is_dir()
+            else any(run_dir.iterdir())
+        )
+
+    if run_dir_occupied and not getattr(args, "overwrite", False):
         print_and_exit(
             format_error(
                 f"Run {work_id!r} already exists. Use --overwrite to reset or choose a different --work-id.",
@@ -145,6 +159,11 @@ def _cmd_run_start(args):
             ),
             EXIT_CONFLICT,
         )
+    if run_dir_occupied and getattr(args, "overwrite", False):
+        if run_dir.is_symlink() or run_dir.is_file():
+            run_dir.unlink()
+        else:
+            shutil.rmtree(run_dir)
 
     # Create run record
     record = create_run_record(work_id)

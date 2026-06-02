@@ -230,6 +230,16 @@ class TestCmdSwitch:
 
 
 class TestCmdStart:
+    def test_requires_requirement_argument(self, capsys):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            _invoke(["start"], base, expect_exit=2)
+
+    def test_rejects_blank_requirement_argument(self, capsys):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            _invoke(["start", "   "], base, expect_exit=2)
+
     def test_creates_run_and_writes_pointer(self, capsys):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)

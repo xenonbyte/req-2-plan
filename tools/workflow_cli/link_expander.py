@@ -56,7 +56,14 @@ def _fetch_url(url: str) -> LinkExpansionResult:
 
 def _expand_local(path_str: str, base_path: Path | None) -> LinkExpansionResult:
     if base_path is not None:
-        candidate = (base_path / path_str).resolve()
+        base = base_path.resolve()
+        candidate = (base / path_str).resolve()
+        if not candidate.is_relative_to(base):
+            return LinkExpansionResult(
+                url=path_str,
+                status=LinkStatus.LOCAL_MISSING,
+                error=f"Local path is outside base path: {candidate}",
+            )
     else:
         candidate = Path(path_str).resolve()
 

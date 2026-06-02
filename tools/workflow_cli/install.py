@@ -6,6 +6,7 @@ Supports: claude, codex, gemini
 from __future__ import annotations
 
 import json
+import hashlib
 import shutil
 import shlex
 from datetime import datetime, timezone
@@ -577,6 +578,17 @@ def _parse_manifest_scalar(value: str) -> Any:
     return value
 
 
+def _backup_path(backup_dir: Path, dest: Path) -> Path:
+    path_hash = hashlib.sha256(str(dest).encode("utf-8")).hexdigest()[:12]
+    base = backup_dir / f"{dest.name}.{path_hash}.{_now_ts()}"
+    candidate = base
+    suffix = 1
+    while candidate.exists():
+        candidate = backup_dir / f"{base.name}.{suffix}"
+        suffix += 1
+    return candidate
+
+
 def _safe_copy(
     src: Path,
     dest: Path,
@@ -588,9 +600,8 @@ def _safe_copy(
     """Copy src to dest, backing up dest to backup_dir if it already exists."""
     dest.parent.mkdir(parents=True, exist_ok=True)
     if dest.exists():
-        ts = _now_ts()
         backup_dir.mkdir(parents=True, exist_ok=True)
-        backup = backup_dir / f"{dest.name}.{ts}"
+        backup = _backup_path(backup_dir, dest)
         shutil.copy2(str(dest), str(backup))
         backups.append({"target": str(dest), "backup": str(backup)})
     shutil.copy2(str(src), str(dest))
@@ -609,9 +620,8 @@ def _safe_write(
     """Write content to dest, backing up dest to backup_dir if it already exists."""
     dest.parent.mkdir(parents=True, exist_ok=True)
     if dest.exists():
-        ts = _now_ts()
         backup_dir.mkdir(parents=True, exist_ok=True)
-        backup = backup_dir / f"{dest.name}.{ts}"
+        backup = _backup_path(backup_dir, dest)
         shutil.copy2(str(dest), str(backup))
         backups.append({"target": str(dest), "backup": str(backup)})
     dest.write_text(content, encoding="utf-8")

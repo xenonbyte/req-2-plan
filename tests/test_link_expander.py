@@ -129,6 +129,20 @@ class TestExpandLinksLocalFiles(unittest.TestCase):
         results = expand_links("See ./nonexistent.md", base_path=Path("/tmp"))
         self.assertIn("nonexistent.md", results[0].error)
 
+    def test_parent_relative_path_outside_base_is_not_read(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            base = root / "repo"
+            base.mkdir()
+            outside = root / "secret.md"
+            outside.write_text("SECRET", encoding="utf-8")
+
+            results = expand_links("See ../secret.md", base_path=base)
+
+            self.assertEqual(results[0].status, LinkStatus.LOCAL_MISSING)
+            self.assertEqual(results[0].content_preview, "")
+            self.assertIn("outside base path", results[0].error)
+
     def test_local_file_url_field(self):
         results = expand_links("See ./nonexistent.md", base_path=Path("/tmp"))
         self.assertEqual(results[0].url, "./nonexistent.md")

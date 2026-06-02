@@ -235,6 +235,10 @@ def _stage_content_command(
 
 
 def _cmd_start(ns: argparse.Namespace, base_path: Path) -> None:
+    if not ns.requirement.strip():
+        print("blocked: missing_requirement\nnext: r2p-start \"<raw requirement>\"\n")
+        sys.exit(2)
+
     pointer = read_active_pointer(base_path)
     open_runs = scan_open_runs(base_path)
 
@@ -545,7 +549,7 @@ def _build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="subcommand", required=True)
 
     p_start = sub.add_parser("start")
-    p_start.add_argument("requirement", nargs="?", default="")
+    p_start.add_argument("requirement")
     p_start.add_argument("--separate", action="store_true")
 
     sub.add_parser("continue")

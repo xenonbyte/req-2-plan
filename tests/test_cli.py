@@ -115,6 +115,14 @@ class TestRunStart:
                 main(["--base-path", str(tmp), "run-start", "--work-id", "INVALID", "--requirement", "foo"])
             assert exc.value.code != 0
 
+    def test_blank_requirement_exits_cli_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            invoke(
+                ["run-start", "--work-id", "WF-20260527-test", "--requirement", "   "],
+                base_path=tmp,
+                expect_exit=2,
+            )
+
     def test_second_run_start_same_work_id_exits_conflict(self):
         with tempfile.TemporaryDirectory() as tmp:
             invoke(["run-start", "--work-id", "WF-20260527-test", "--requirement", "foo"], base_path=tmp)
@@ -128,6 +136,42 @@ class TestRunStart:
             invoke(["run-start", "--work-id", "WF-20260527-test", "--requirement", "bar", "--overwrite"], base_path=tmp)
             run_md = Path(tmp) / ".req-to-plan" / "WF-20260527-test" / "run.md"
             assert run_md.exists()
+
+    def test_run_start_with_overwrite_clears_stale_run_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work_id = "WF-20260527-test"
+            run_dir = Path(tmp) / ".req-to-plan" / work_id
+            invoke(["run-start", "--work-id", work_id, "--requirement", "foo"], base_path=tmp)
+            stale_artifact = run_dir / "03-requirement-brief.md"
+            stale_marker = run_dir / "reviews" / "raw_requirement-checkpoint-review-v1.md"
+            stale_marker.parent.mkdir(parents=True, exist_ok=True)
+            stale_artifact.write_text("old requirement brief", encoding="utf-8")
+            stale_marker.write_text("old review marker", encoding="utf-8")
+
+            invoke(["run-start", "--work-id", work_id, "--requirement", "bar", "--overwrite"], base_path=tmp)
+
+            assert not stale_artifact.exists()
+            assert not stale_marker.exists()
+
+    def test_run_start_refuses_partial_run_dir_without_overwrite(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work_id = "WF-20260527-test"
+            run_dir = Path(tmp) / ".req-to-plan" / work_id
+            stale_marker = run_dir / "reviews" / "raw_requirement-checkpoint-review-v1.md"
+            stale_marker.parent.mkdir(parents=True, exist_ok=True)
+            stale_marker.write_text("old review marker", encoding="utf-8")
+
+            invoke(
+                ["run-start", "--work-id", work_id, "--requirement", "bar"],
+                base_path=tmp,
+                expect_exit=6,
+            )
+            invoke(
+                ["run-start", "--work-id", work_id, "--requirement", "bar", "--overwrite"],
+                base_path=tmp,
+            )
+
+            assert not stale_marker.exists()
 
 
 # ---------------------------------------------------------------------------

@@ -122,6 +122,34 @@ class TestInstallService:
         assert backup_path.exists(), "backup file should exist on disk"
         assert backup_path.read_text() == "old content"
 
+    def test_install_keeps_backups_unique_for_same_named_targets(self, tmp_path):
+        svc, manifest_root, ph_root = make_service(tmp_path)
+        first = ph_root / "codex" / "skills" / "r2p-start" / "SKILL.md"
+        second = ph_root / "codex" / "skills" / "r2p-continue" / "SKILL.md"
+        first.parent.mkdir(parents=True, exist_ok=True)
+        second.parent.mkdir(parents=True, exist_ok=True)
+        first.write_text("original start", encoding="utf-8")
+        second.write_text("original continue", encoding="utf-8")
+
+        with patch("tools.workflow_cli.install._now_ts", return_value="20260602T000000"):
+            svc.install("codex")
+
+        manifest = yaml.safe_load(
+            (manifest_root / "install" / "codex.yaml").read_text()
+        )
+        target_backups = [
+            b for b in manifest["backups"] if b["target"] in {str(first), str(second)}
+        ]
+        backup_paths = [b["backup"] for b in target_backups]
+
+        assert len(target_backups) == 2
+        assert len(set(backup_paths)) == 2
+
+        svc.uninstall("codex")
+
+        assert first.read_text(encoding="utf-8") == "original start"
+        assert second.read_text(encoding="utf-8") == "original continue"
+
     def test_install_rollback_on_failure(self, tmp_path):
         svc, manifest_root, ph_root = make_service(tmp_path)
 

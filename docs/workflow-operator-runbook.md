@@ -53,7 +53,7 @@ env PYTHONDONTWRITEBYTECODE=1 python3 -m tools.workflow_cli run-start \
   --requirement "<raw requirement>"
 ```
 
-If the command returns `duplicate_active_run` or `duplicate_closed_run`, inspect the existing run before using `--confirm`.
+If the command reports that the run already exists, inspect the existing run before rerunning with `--overwrite`. `--overwrite` clears the existing `.req-to-plan/<work-id>/` run directory before creating the replacement run.
 
 ## Tier Workflow
 
