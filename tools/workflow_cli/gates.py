@@ -464,8 +464,8 @@ def check_forced_subagent_review(
         issues=[
             f"Forced subagent review required for stage {stage.value!r} "
             f"with modifier(s) {triggering!r}. "
-            f"No version-matched review file '{subagent_file.name}' found in {reviews_dir}. "
-            f"Run subagent review before checkpoint approval."
+            f"Run a review subagent and write its findings to {subagent_file} "
+            f"(the filename must match {subagent_file.name!r}), then retry checkpoint approval."
         ],
         exit_code=5,
     )

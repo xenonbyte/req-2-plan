@@ -77,7 +77,7 @@ Groups:
 This repository also exposes optional project-level shortcut wrappers:
 
 ```text
-r2p-start [--separate] "<raw requirement>"
+r2p-start [--separate] ("<raw requirement>" | --file <path>)
 r2p-continue
 r2p-tier-lock --work-id <id> --base <light|standard> --confirm
 r2p-status [--all]
@@ -262,7 +262,7 @@ If a required input is not provided as a flag, the CLI may derive it only from `
 
 | CLI command | Command intent | Required CLI inputs | Notes |
 |---|---|---|---|
-| `workflow run-start` | `CMD-RUN-START` | `--work-id`, `--requirement`, optional `--repo-path`, optional `--overwrite` | Creates artifact root, `run.md`, and the raw requirement artifact. Implemented. |
+| `workflow run-start` | `CMD-RUN-START` | `--work-id`, `--requirement` (or `--requirement-file <path>`), optional `--repo-path`, optional `--overwrite` | Creates artifact root, `run.md`, and the raw requirement artifact. `--requirement` and `--requirement-file` are mutually exclusive and exactly one is required; `--requirement-file` reads the requirement text from a file (a missing/empty file fails loudly). Implemented. |
 | `workflow run-resume` | `CMD-RUN-RESUME` | `--work-id` | Loads `Resume Context`; read-only. Implemented. |
 | `workflow run-close` | `CMD-RUN-CLOSE` | `--work-id` | Closes only after approved PLAN checkpoint and no open route. Implemented. |
 | `workflow run-reopen` | `CMD-RUN-REOPEN` | `--from`, `--stage`, `--reason` | Copies the closed source run to a new `<source-work-id>-rN` run starting from `--stage`; the source `run.md` and approved artifacts are not modified. Implemented. |
@@ -322,7 +322,7 @@ changes_requested
 |---|---|---|---|
 | `workflow subagent-dispatch` | `CMD-SUBAGENT-DISPATCH` | `--work-id` or `--run`, `--stage`, `--task-type`, `--scope`, `--source`, `--template` | Dispatches allowed evidence-gathering work. |
 | `workflow subagent-merge` | `CMD-SUBAGENT-MERGE` | `--work-id` or `--run`, `--stage`, `--finding` | Merges findings and preserves unresolved conflicts. |
-| `workflow subagent-review` | `CMD-SUBAGENT-REVIEW` | `--work-id` or `--run`, `--stage`, `--scope`, `--template` | Runs checkpoint review subagents after Quality Gate `ready`. |
+| `workflow subagent-review` | `CMD-SUBAGENT-REVIEW` | `--work-id` or `--run`, `--stage`, `--scope`, `--template` | Runs checkpoint review subagents after Quality Gate `ready`. Agent-performed: there is no implemented CLI subcommand. The agent runs the review subagent and writes the review file `reviews/<stage>-subagent-review-v<artifact-version>.md`, which the Forced Subagent Review Rule requires before approving `design`/`spec`/`plan` checkpoints on forced-modifier runs. |
 
 ### Gap And Artifact Freshness
 

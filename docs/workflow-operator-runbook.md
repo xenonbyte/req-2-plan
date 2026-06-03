@@ -216,7 +216,7 @@ For PLAN stage checkpoint approval, close the run instead (no stage-advance for 
 For agent-oriented operation, the repository also exposes:
 
 ```text
-r2p-start "<raw requirement>"
+r2p-start ("<raw requirement>" | --file <path>)
 r2p-continue
 r2p-tier-lock --work-id <work-id> --base <light|standard> --confirm
 r2p-status [--all]

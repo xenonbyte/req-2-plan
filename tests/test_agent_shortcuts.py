@@ -292,6 +292,60 @@ class TestCmdStart:
 
 
 # ---------------------------------------------------------------------------
+# TestCmdStartFile — `r2p-start --file <path>`
+# ---------------------------------------------------------------------------
+
+
+class TestCmdStartFile:
+    def test_start_with_file_reads_content(self, capsys):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            req_file = base / "req.md"
+            req_file.write_text("Add OAuth login with Google and GitHub", encoding="utf-8")
+            with pytest.raises(SystemExit):
+                main(["start", "--file", str(req_file)], base_path=base)
+            work_id = read_active_pointer(base)["selected_work_id"]
+            raw = base / ".req-to-plan" / work_id / "00-raw-requirement.md"
+            assert "Add OAuth login with Google and GitHub" in raw.read_text(encoding="utf-8")
+
+    def test_start_with_file_work_id_from_content_not_path(self, capsys):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            req_file = base / "req.md"
+            req_file.write_text("Add OAuth login support", encoding="utf-8")
+            with pytest.raises(SystemExit):
+                main(["start", "--file", str(req_file)], base_path=base)
+            work_id = read_active_pointer(base)["selected_work_id"]
+            # Slug must derive from file CONTENT (oauth/login), not the filename (req).
+            assert "oauth" in work_id.lower()
+
+    def test_start_with_missing_file_blocks(self, capsys):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            _invoke(["start", "--file", str(base / "nope.md")], base, expect_exit=2)
+            out = capsys.readouterr().out
+            assert "requirement_file_not_found" in out
+
+    def test_start_with_empty_file_blocks(self, capsys):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            f = base / "empty.md"
+            f.write_text("  \n", encoding="utf-8")
+            _invoke(["start", "--file", str(f)], base, expect_exit=2)
+            out = capsys.readouterr().out
+            assert "empty_requirement_file" in out
+
+    def test_start_rejects_both_positional_and_file(self, capsys):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            f = base / "req.md"
+            f.write_text("content", encoding="utf-8")
+            _invoke(["start", "inline req", "--file", str(f)], base, expect_exit=2)
+            out = capsys.readouterr().out
+            assert "ambiguous_requirement" in out
+
+
+# ---------------------------------------------------------------------------
 # TestCmdContinue
 # ---------------------------------------------------------------------------
 
@@ -712,3 +766,88 @@ class TestContinueDriver:
             assert "entry_gate_failed" in out
             assert _expected_workflow_cli_prefix(base) in out
             assert f"gate-entry --work-id {work_id} --stage requirement_brief" in out
+
+    def _make_forced_review_run(self, base):
+        """Build a CHECKPOINT_REVIEW run at DESIGN with a migration-locked tier."""
+        from tools.workflow_cli import agent_shortcuts as A
+        from tools.workflow_cli.models import RunStatus, Stage, TierBase, TierEstimate, TierModifier
+        from tools.workflow_cli.state import RunStateManager, upsert_active_artifact
+        with pytest.raises(SystemExit):
+            A.main(["start", "Migrate the data store"], base_path=base)
+        work_id = A.read_active_pointer(base)["selected_work_id"]
+        manager = RunStateManager(base / ".req-to-plan" / work_id)
+        record = manager.load()
+        record.tier_locked = TierEstimate(TierBase.STANDARD, frozenset({TierModifier.MIGRATION}))
+        record.current_stage = Stage.DESIGN
+        record.status = RunStatus.CHECKPOINT_REVIEW
+        upsert_active_artifact(record, Stage.DESIGN, "04-design.md", 1, "ready")
+        manager.save(record)
+        return work_id
+
+    def test_continue_forced_review_stops_with_review_file(self, capsys):
+        import tempfile
+        from pathlib import Path
+        from tools.workflow_cli import agent_shortcuts as A
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            work_id = self._make_forced_review_run(base)
+
+            with pytest.raises(SystemExit):
+                A.main(["continue"], base_path=base)
+
+            out = capsys.readouterr().out
+            review_file = (
+                base / ".req-to-plan" / work_id / "reviews" / "design-subagent-review-v1.md"
+            )
+            assert "needs_subagent_review" in out
+            assert str(review_file) in out
+            # Forced review must precede human approval, not skip it.
+            assert "needs_human_approval" not in out
+
+    def test_continue_forced_review_satisfied_then_human_approval(self, capsys):
+        import tempfile
+        from pathlib import Path
+        from tools.workflow_cli import agent_shortcuts as A
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            work_id = self._make_forced_review_run(base)
+            reviews = base / ".req-to-plan" / work_id / "reviews"
+            reviews.mkdir(parents=True, exist_ok=True)
+            (reviews / "design-subagent-review-v1.md").write_text("findings", encoding="utf-8")
+
+            with pytest.raises(SystemExit):
+                A.main(["continue"], base_path=base)
+
+            out = capsys.readouterr().out
+            assert "needs_human_approval" in out
+            assert "needs_subagent_review" not in out
+            assert (
+                f"checkpoint-decide --work-id {work_id} --stage design "
+                "--decision approved --confirm"
+            ) in out
+
+    def test_continue_light_tier_checkpoint_skips_subagent_review(self, capsys):
+        import tempfile
+        from pathlib import Path
+        from tools.workflow_cli import agent_shortcuts as A
+        from tools.workflow_cli.models import RunStatus, Stage, TierBase, TierEstimate
+        from tools.workflow_cli.state import RunStateManager, upsert_active_artifact
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            with pytest.raises(SystemExit):
+                A.main(["start", "Add a tooltip"], base_path=base)
+            work_id = A.read_active_pointer(base)["selected_work_id"]
+            manager = RunStateManager(base / ".req-to-plan" / work_id)
+            record = manager.load()
+            record.tier_locked = TierEstimate(TierBase.LIGHT)
+            record.current_stage = Stage.DESIGN
+            record.status = RunStatus.CHECKPOINT_REVIEW
+            upsert_active_artifact(record, Stage.DESIGN, "04-design.md", 1, "ready")
+            manager.save(record)
+
+            with pytest.raises(SystemExit):
+                A.main(["continue"], base_path=base)
+
+            out = capsys.readouterr().out
+            assert "needs_subagent_review" not in out
+            assert "needs_human_approval" in out

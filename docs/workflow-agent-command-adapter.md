@@ -130,7 +130,7 @@ Only `r2p-switch` and `r2p-tier-lock` accept an explicit `--work-id`. `r2p-start
 The public command set is intentionally small:
 
 ```text
-r2p-start [--separate] "<raw requirement>"
+r2p-start [--separate] ("<raw requirement>" | --file <path>)
 r2p-continue
 r2p-tier-lock --work-id <id> --base <light|standard> --confirm
 r2p-status [--all]
@@ -144,7 +144,7 @@ Project shortcuts compose internal `CMD-*` command intents, but they must preser
 
 ## Command Semantics
 
-### `r2p-start [--separate] "<raw requirement>"`
+### `r2p-start [--separate] ("<raw requirement>" | --file <path>)`
 
 Starts a workflow run from a raw requirement.
 
@@ -155,6 +155,7 @@ Behavior:
 - Without `--separate`, stops with `open_run_exists` when exactly one unselected open run exists.
 - Without `--separate`, stops with `open_runs_exist` when multiple open runs exist and no selected open run owns the next action.
 - With `--separate`, creates an independent new run even when another open run exists.
+- Accepts `--file <path>` to read the requirement from a document instead of inline text; the file contents become the requirement (the path is never stored as the requirement) and the `work-id` slug derives from the contents. `--file` and a positional requirement are mutually exclusive; a missing or empty file stops with `requirement_file_not_found` or `empty_requirement_file`.
 - Generates a new `work-id` internally.
 - Creates `.req-to-plan/<work-id>/`, `run.md`, and initial raw requirement artifact.
 - Updates `.req-to-plan/.workflow-active` to the new run.
@@ -211,6 +212,7 @@ Behavior:
 - Stops whenever user confirmation, checkpoint approval, route ownership, upstream repair, ambiguous state, or stale input is required.
 - When the tier is unlocked, surfaces `r2p-tier-lock` as the next required command instead of advancing the stage.
 - When Risk Discovery or DESIGN has surfaced modifier candidates that are not yet recorded in the locked tier, surfaces `workflow tier-escalate` with the candidate modifier and reason.
+- When the locked tier forces a subagent review (a `migration`/`safety`/`cross_project` modifier at `design`/`spec`/`plan`) and no version-matched review file exists, stops with `needs_subagent_review` before `needs_human_approval`, prints the exact `review_file` to write, and authorizes running a read-only review subagent autonomously (no separate human approval for the spawn). After the review file is written, the next `r2p-continue` proceeds to `needs_human_approval`.
 
 If the selected run is terminal:
 

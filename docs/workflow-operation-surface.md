@@ -597,7 +597,7 @@ Do not approve downstream handoff, silently drop review findings, or resolve dir
 Ready artifact, merged checkpoint findings, and required user confirmations.
 
 **Preconditions**
-Quality Gate is `ready` and checkpoint findings are merged. The Forced Subagent Review Rule in `workflow-invariants.md#workflow-complexity-tier-rule` applies: when the locked tier carries any modifier in `{ migration, safety, cross_project }` and the current stage is in `{ design, spec, plan }`, an `approved` decision is refused unless a `reviews/<stage>-checkpoint-review-*.md` or `reviews/<stage>-subagent-review-*.md` file exists for the current stage and active artifact version. Non-approval decisions remain allowed.
+Quality Gate is `ready` and checkpoint findings are merged. Every approval requires the version-matched checkpoint marker `reviews/<stage>-checkpoint-review-v<artifact-version>.md`. The Forced Subagent Review Rule in `workflow-invariants.md#workflow-complexity-tier-rule` also applies: when the locked tier carries any modifier in `{ migration, safety, cross_project }` and the current stage is in `{ design, spec, plan }`, an `approved` decision is refused unless `reviews/<stage>-subagent-review-v<artifact-version>.md` exists for the current stage and active artifact version. Non-approval decisions remain allowed.
 
 **Allowed Artifact Writes**
 Update checkpoint section in the stage artifact and update `run.md`.

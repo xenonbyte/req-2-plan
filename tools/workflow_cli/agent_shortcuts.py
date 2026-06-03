@@ -229,15 +229,109 @@ def _stage_content_command(
     )
 
 
+def _emit_checkpoint_stop(
+    base_path: Path,
+    work_id: str,
+    stage: str,
+    record,
+    run_dir: Path,
+) -> None:
+    """Print the correct checkpoint stop for the current run.
+
+    Forced-review runs (a migration/safety/cross_project modifier at
+    DESIGN/SPEC/PLAN) that lack a version-matched subagent review file stop with
+    ``needs_subagent_review``: the agent is authorized to run a read-only review
+    subagent autonomously and write its findings to the printed ``review_file``,
+    with no separate human authorization. Every other checkpoint stops with
+    ``needs_human_approval`` for an explicit ``checkpoint-decide``.
+    """
+    from tools.workflow_cli.gates import check_forced_subagent_review
+    from tools.workflow_cli.state import get_active_artifact
+
+    aa = get_active_artifact(record, record.current_stage)
+    version = aa.version if aa is not None else 1
+    reviews_dir = run_dir / "reviews"
+    review_result = check_forced_subagent_review(
+        record.current_stage, record.tier_locked, reviews_dir, version
+    )
+    if not review_result.passed:
+        review_file = reviews_dir / f"{stage}-subagent-review-v{version}.md"
+        modifiers = (
+            ", ".join(sorted(m.value for m in record.tier_locked.modifiers))
+            if record.tier_locked is not None
+            else ""
+        )
+        print(
+            "stop: needs_subagent_review\n"
+            f"stage: {stage}\n"
+            f"review_file: {review_file}\n"
+            f"reason: forced subagent review required (tier modifier: {modifiers})\n"
+            "note: you are authorized to spawn a read-only review subagent now; "
+            "separate human approval is NOT required for this step\n"
+            "next: have the review subagent audit the stage artifact, write its "
+            "findings to review_file, then r2p-continue\n"
+        )
+        return
+
+    approve_cmd = _workflow_cli_command(
+        base_path,
+        ["checkpoint-decide", "--work-id", work_id, "--stage", stage,
+         "--decision", "approved", "--confirm"],
+    )
+    changes_cmd = _workflow_cli_command(
+        base_path,
+        ["checkpoint-decide", "--work-id", work_id, "--stage", stage,
+         "--decision", "changes_requested"],
+    )
+    print(
+        f"stop: needs_human_approval\nstage: {stage}\n"
+        "next: "
+        f"{approve_cmd}\n"
+        "alt: "
+        f"{changes_cmd}\n"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Subcommand handlers
 # ---------------------------------------------------------------------------
 
 
-def _cmd_start(ns: argparse.Namespace, base_path: Path) -> None:
-    if not ns.requirement.strip():
+def _resolve_start_requirement(ns: argparse.Namespace) -> tuple[str, Path | None]:
+    """Resolve the start requirement from either --file or the positional arg.
+
+    Returns (requirement_text, file_path); file_path is None for inline text.
+    Exits with a structured ``blocked:`` message (exit 2) on bad input.
+    """
+    file_arg = getattr(ns, "file", None)
+    raw = ns.requirement
+
+    if file_arg and raw:
+        print(
+            "blocked: ambiguous_requirement\n"
+            "next: pass either a positional requirement or --file, not both\n"
+        )
+        sys.exit(2)
+
+    if file_arg:
+        file_path = Path(file_arg)
+        if not file_path.is_file():
+            print(f"blocked: requirement_file_not_found\nfile: {file_arg}\n")
+            sys.exit(2)
+        text = file_path.read_text(encoding="utf-8")
+        if not text.strip():
+            print(f"blocked: empty_requirement_file\nfile: {file_arg}\n")
+            sys.exit(2)
+        return text, file_path.resolve()
+
+    if not raw or not raw.strip():
         print("blocked: missing_requirement\nnext: r2p-start \"<raw requirement>\"\n")
         sys.exit(2)
+    return raw, None
+
+
+def _cmd_start(ns: argparse.Namespace, base_path: Path) -> None:
+    requirement, file_path = _resolve_start_requirement(ns)
 
     pointer = read_active_pointer(base_path)
     open_runs = scan_open_runs(base_path)
@@ -255,11 +349,12 @@ def _cmd_start(ns: argparse.Namespace, base_path: Path) -> None:
             print(f"blocked: open_runs_exist\nopen_runs: {ids}\nnext: r2p-switch --work-id <id>\n")
             sys.exit(1)
 
-    work_id = generate_work_id(ns.requirement, base_path)
-    exit_code = _run_cli(
-        ["run-start", "--work-id", work_id, "--requirement", ns.requirement],
-        base_path,
-    )
+    work_id = generate_work_id(requirement, base_path)
+    if file_path is not None:
+        run_args = ["run-start", "--work-id", work_id, "--requirement-file", str(file_path)]
+    else:
+        run_args = ["run-start", "--work-id", work_id, "--requirement", requirement]
+    exit_code = _run_cli(run_args, base_path)
     if exit_code != 0:
         sys.exit(exit_code)
 
@@ -342,57 +437,11 @@ def _cmd_continue(ns: argparse.Namespace, base_path: Path) -> None:
             code = _run_cli(["review-checkpoint", "--work-id", work_id, "--stage", stage], base_path)
             if code != 0:
                 sys.exit(code)
-            approve_cmd = _workflow_cli_command(
-                base_path,
-                [
-                    "checkpoint-decide",
-                    "--work-id", work_id,
-                    "--stage", stage,
-                    "--decision", "approved",
-                    "--confirm",
-                ],
-            )
-            changes_cmd = _workflow_cli_command(
-                base_path,
-                [
-                    "checkpoint-decide",
-                    "--work-id", work_id,
-                    "--stage", stage,
-                    "--decision", "changes_requested",
-                ],
-            )
-            print(f"stop: needs_human_approval\nstage: {stage}\n"
-                  "next: "
-                  f"{approve_cmd}\n"
-                  "alt: "
-                  f"{changes_cmd}\n")
+            _emit_checkpoint_stop(base_path, work_id, stage, manager.load(), run_path.parent)
             sys.exit(0)
 
         if s == RunStatus.CHECKPOINT_REVIEW:
-            approve_cmd = _workflow_cli_command(
-                base_path,
-                [
-                    "checkpoint-decide",
-                    "--work-id", work_id,
-                    "--stage", stage,
-                    "--decision", "approved",
-                    "--confirm",
-                ],
-            )
-            changes_cmd = _workflow_cli_command(
-                base_path,
-                [
-                    "checkpoint-decide",
-                    "--work-id", work_id,
-                    "--stage", stage,
-                    "--decision", "changes_requested",
-                ],
-            )
-            print(f"stop: needs_human_approval\nstage: {stage}\n"
-                  "next: "
-                  f"{approve_cmd}\n"
-                  "alt: "
-                  f"{changes_cmd}\n")
+            _emit_checkpoint_stop(base_path, work_id, stage, record, run_path.parent)
             sys.exit(0)
 
         if s == RunStatus.CHECKPOINT_APPROVED:
@@ -549,8 +598,14 @@ def _build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="subcommand", required=True)
 
     p_start = sub.add_parser("start")
-    p_start.add_argument("requirement")
+    p_start.add_argument("requirement", nargs="?", default=None)
     p_start.add_argument("--separate", action="store_true")
+    p_start.add_argument(
+        "--file",
+        dest="file",
+        default=None,
+        help="Read the requirement from a file instead of a positional argument",
+    )
 
     sub.add_parser("continue")
 

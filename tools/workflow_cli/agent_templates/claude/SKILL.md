@@ -13,7 +13,7 @@ Run each via Bash using the scripts in `{{R2P_BIN_DIR}}`:
 
 | Command | Purpose |
 |---|---|
-| `{{R2P_BIN_DIR}}/r2p-start [--separate] "<requirement>"` | Start a new workflow run |
+| `{{R2P_BIN_DIR}}/r2p-start [--separate] ("<requirement>" \| --file <path>)` | Start a new workflow run |
 | `{{R2P_BIN_DIR}}/r2p-continue` | Continue the active run |
 | `{{R2P_BIN_DIR}}/r2p-tier-lock --work-id <id> --base <light\|standard> --confirm` | Lock the tier for a run |
 | `{{R2P_BIN_DIR}}/r2p-status [--all]` | Inspect run state (read-only) |
@@ -22,7 +22,7 @@ Run each via Bash using the scripts in `{{R2P_BIN_DIR}}`:
 
 ## Usage Pattern
 
-1. `r2p-start "<requirement>"` — start a new run
+1. `r2p-start ("<requirement>" | --file <path>)` — start a new run
 2. `r2p-continue` — repeatedly; runs safe automatic steps, stops and suggests the next command when a human action is needed
    - Stops at: tier not locked, needs stage artifact content, needs stage ready mark, needs human checkpoint approval, entry gate failed, needs repair (Quality Gate failed or changes requested)
    - When stopped at `needs_content` or `needs_repair`, write the required artifact content into the printed `content_file`, then run the printed `next:` command exactly

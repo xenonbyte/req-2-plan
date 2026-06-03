@@ -220,7 +220,7 @@ Bundle rules:
 
 The rule requires a version-matched subagent review file with the exact artifact version in the filename. The checkpoint-review marker is a separate, always-required precondition for approved decisions: Quality Gate must pass and `reviews/<stage>-checkpoint-review-v<artifact-version>.md` must exist before approval. Non-approval decisions such as `changes_requested` may still be recorded from `checkpoint_review` so repair work is not blocked by a missing marker.
 
-The refusal surfaces the missing review file path and the suggested command for `CMD-SUBAGENT-REVIEW`. Other checkpoint decisions (`changes_requested`, `blocked`, `upstream_gap_detected`, `route_upstream`) remain allowed so the operator can still record non-approval outcomes.
+The refusal surfaces the missing review file path. There is no `subagent-review` CLI subcommand: the review is agent-performed — the main agent runs a read-only review subagent and writes its findings to that path before retrying approval, with no separate human authorization for the spawn. When this gate fires inside `r2p-continue`, the run stops with `needs_subagent_review` and prints the exact `review_file` to write. Other checkpoint decisions (`changes_requested`, `blocked`, `upstream_gap_detected`, `route_upstream`) remain allowed so the operator can still record non-approval outcomes.
 
 ## Subagent Model Rule
 

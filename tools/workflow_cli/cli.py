@@ -133,9 +133,28 @@ def _parse_modifiers(raw: str | None) -> frozenset[TierModifier]:
 # ---------------------------------------------------------------------------
 
 
+def _read_requirement_arg(args) -> str:
+    """Return the raw requirement text from --requirement or --requirement-file.
+
+    --requirement-file reads the file's contents (deterministic input ingestion).
+    A missing file fails loudly with EXIT_CLI_ERR rather than silently falling back.
+    """
+    req_file = getattr(args, "requirement_file", None)
+    if req_file:
+        path = Path(req_file)
+        if not path.is_file():
+            print_and_exit(
+                format_error(f"Requirement file not found: {req_file}", exit_code=EXIT_CLI_ERR),
+                EXIT_CLI_ERR,
+            )
+        return path.read_text(encoding="utf-8")
+    return args.requirement or ""
+
+
 def _cmd_run_start(args):
     work_id = _validate_work_id(args.work_id)
-    if not args.requirement.strip():
+    requirement = _read_requirement_arg(args)
+    if not requirement.strip():
         print_and_exit(
             format_error("Requirement must not be blank", exit_code=EXIT_CLI_ERR),
             EXIT_CLI_ERR,
@@ -170,11 +189,11 @@ def _cmd_run_start(args):
 
     # Write raw requirement artifact
     run_dir.mkdir(parents=True, exist_ok=True)
-    write_artifact(run_dir, Stage.RAW_REQUIREMENT, args.requirement, version=1, status="draft")
+    write_artifact(run_dir, Stage.RAW_REQUIREMENT, requirement, version=1, status="draft")
 
     # Tier estimation
     repo_path = Path(args.repo_path) if args.repo_path else None
-    tier_estimate, evidence = estimate_tier(args.requirement, repo_path=repo_path)
+    tier_estimate, evidence = estimate_tier(requirement, repo_path=repo_path)
     record.tier_estimate = tier_estimate
 
     # Update active artifacts in record
@@ -186,7 +205,7 @@ def _cmd_run_start(args):
         "# Intake Brief",
         "",
         f"work_id: {work_id}",
-        f"requirement: {args.requirement}",
+        f"requirement: {requirement}",
         "",
         "## Tier Estimate",
         f"base: {tier_estimate.base.value}",
@@ -1043,7 +1062,14 @@ def _register_run_commands(subparsers):
     # run-start
     p = subparsers.add_parser("run-start", help="Start a new workflow run")
     p.add_argument("--work-id", required=True, help="Workflow ID (WF-YYYYMMDD-slug)")
-    p.add_argument("--requirement", required=True, help="Raw requirement text")
+    src = p.add_mutually_exclusive_group(required=True)
+    src.add_argument("--requirement", default=None, help="Raw requirement text")
+    src.add_argument(
+        "--requirement-file",
+        dest="requirement_file",
+        default=None,
+        help="Path to a file whose contents are the raw requirement",
+    )
     p.add_argument("--repo-path", default=None, help="Path to repository for baseline scan")
     p.add_argument("--overwrite", action="store_true", help="Overwrite an existing run")
     p.set_defaults(func=_cmd_run_start)

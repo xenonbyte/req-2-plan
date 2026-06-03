@@ -175,6 +175,76 @@ class TestRunStart:
 
 
 # ---------------------------------------------------------------------------
+# run-start --requirement-file
+# ---------------------------------------------------------------------------
+
+
+class TestRunStartRequirementFile:
+    def test_reads_requirement_from_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            req_file = Path(tmp) / "req.md"
+            req_file.write_text("Add OAuth login support with Google", encoding="utf-8")
+            invoke(
+                ["run-start", "--work-id", "WF-20260527-test",
+                 "--requirement-file", str(req_file)],
+                base_path=tmp,
+            )
+            raw = Path(tmp) / ".req-to-plan" / "WF-20260527-test" / "00-raw-requirement.md"
+            assert "Add OAuth login support with Google" in raw.read_text(encoding="utf-8")
+
+    def test_brief_stores_file_content_not_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            req_file = Path(tmp) / "req.md"
+            req_file.write_text("Migrate from MySQL to PostgreSQL", encoding="utf-8")
+            invoke(
+                ["run-start", "--work-id", "WF-20260527-test",
+                 "--requirement-file", str(req_file)],
+                base_path=tmp,
+            )
+            brief = (
+                Path(tmp) / ".req-to-plan" / "WF-20260527-test" / "01-intake-brief.md"
+            ).read_text(encoding="utf-8")
+            assert "Migrate from MySQL to PostgreSQL" in brief
+            # The literal file path must NOT be stored as the requirement.
+            assert f"requirement: {req_file}" not in brief
+
+    def test_missing_file_exits_cli_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            invoke(
+                ["run-start", "--work-id", "WF-20260527-test",
+                 "--requirement-file", str(Path(tmp) / "nope.md")],
+                base_path=tmp,
+                expect_exit=2,
+            )
+
+    def test_empty_file_exits_cli_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            req_file = Path(tmp) / "empty.md"
+            req_file.write_text("   \n", encoding="utf-8")
+            invoke(
+                ["run-start", "--work-id", "WF-20260527-test",
+                 "--requirement-file", str(req_file)],
+                base_path=tmp,
+                expect_exit=2,
+            )
+
+    def test_requirement_and_file_are_mutually_exclusive(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            req_file = Path(tmp) / "req.md"
+            req_file.write_text("content", encoding="utf-8")
+            with pytest.raises(SystemExit) as exc:
+                main(["--base-path", str(tmp), "run-start", "--work-id", "WF-20260527-test",
+                      "--requirement", "inline", "--requirement-file", str(req_file)])
+            assert exc.value.code != 0
+
+    def test_neither_requirement_nor_file_errors(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with pytest.raises(SystemExit) as exc:
+                main(["--base-path", str(tmp), "run-start", "--work-id", "WF-20260527-test"])
+            assert exc.value.code != 0
+
+
+# ---------------------------------------------------------------------------
 # tier-status
 # ---------------------------------------------------------------------------
 

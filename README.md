@@ -98,6 +98,8 @@ After install, platform templates call the shared wrappers:
 
 ```bash
 r2p-start "Add rate limiting"
+# or start from a requirement document (reads the file contents, not the path):
+r2p-start --file ./requirement.md
 r2p-continue
 r2p-tier-lock --work-id WF-YYYYMMDD-slug --base light --confirm
 r2p-status
