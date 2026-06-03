@@ -53,7 +53,7 @@
 - Always pass `base_path=Path(tmp)` to CLI/shortcuts — never use real `.req-to-plan/`.
 - Test runner: `.venv/bin/python -m pytest` (never bare `pytest` or `python -m pytest`).
 - New features: write tests first (red → green → commit).
-- Baseline: 589 tests passing. All must stay green.
+- Baseline: 602 tests passing. All must stay green.
 
 ## Key Invariants
 
@@ -66,10 +66,8 @@
 
 ## Workflow Docs
 
-Stage-specific rules live in `docs/`:
-- `workflow-command-surface.md` — CMD-* intent matrix
-- `workflow-cli-adapter.md` — CLI command map
-- `workflow-agent-command-adapter.md` — r2p-* shortcut semantics
-- `workflow-invariants.md` — Complexity Tier Rule (canonical tier tables)
-- `workflow-install-surface.md` — r2p install/uninstall contract
-- `workflow-operator-runbook.md` — operator setup and daily use
+- `docs/req-to-plan-design.md` — the authoritative entry doc: background, goals,
+  architecture, and the per-stage quality model (enforced gate criteria).
+
+Machine facts (exit codes, statuses, `ALLOWED_TRANSITIONS`, tier tables, command
+and flag names) are owned by code under `tools/workflow_cli/`, not by prose docs.

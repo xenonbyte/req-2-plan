@@ -143,6 +143,4 @@ Shared wrappers in `~/.req-to-plan/bin/` are removed only when no installed plat
 
 ## Documentation
 
-- [Workflow overview](docs/README.md)
-- [Install surface](docs/workflow-install-surface.md)
-- [Operator runbook](docs/workflow-operator-runbook.md)
+- [Requirement & design (authoritative doc)](docs/req-to-plan-design.md)
