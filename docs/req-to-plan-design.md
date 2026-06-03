@@ -5,6 +5,9 @@
 > 文档。机器事实（exit code、状态、状态转移、tier 表、命令与参数名）的唯一真相在
 > 代码 `tools/workflow_cli/`，本文档只做高层描述、不复述，以免成为漂移源。本文档与
 > 代码在机器事实上冲突时，以**代码为准**，本文档即缺陷。
+>
+> **可执行性边界**：本文档里的"强制"首先是产品/流程规则；其中由 CLI 机械检查的子集见
+> §5.5。尚未机械化的语义规则必须由 agent 生成、子 agent 审查和人工/主控检查点执行。
 
 ---
 
@@ -60,7 +63,7 @@ specify→plan→tasks；AWS Kiro 的 requirements→design→tasks）中加固�
 
 - **Stage-Gate 纪律**——每次交接有一道质量门（进入/退出标准）加一个人工/主控检查点。
 - **双向可追溯**——每个下游条目都导入一个稳定的上游 ID 并必须闭合它
-  （`covered` / `preserve` / `no-op` / 路由），从而需求可追到任务、也可反追。
+  （闭合标记或路由；具体闭合取值以代码为准），从而需求可追到任务、也可反追。
 - **变更影响路由**——下游阶段发现上游缺了某个决策时，往回路由给拥有它的阶段而不是
   自己猜（上游缺口路由；具体状态名以代码 `RunStatus` 为准），并伴随失效标记（`stale`）级联。
 - **Agent/CLI 分离**——CLI 管状态、校验结构；Agent 生成语义内容。CLI 从不写 artifact
@@ -113,10 +116,10 @@ specify→plan→tasks；AWS Kiro 的 requirements→design→tasks）中加固�
 |---|---|---|
 | Work-id / run | 一个需求的工作流实例（id 形如 `WF-<日期>-<slug>`） | `models.py`, `state.py` |
 | Artifact | 带 YAML frontmatter、按阶段顺序编号的阶段产物文件 | `artifact.py` |
-| Stage | 五个工作阶段之一，每个只有一种权威 | `models.py`（`Stage`） |
+| Stage | 工作流阶段枚举；包含入口 `raw_requirement`、五个规划阶段和关闭哨兵 | `models.py`（`Stage`） |
 | Run 状态 | run 生命周期状态机；取值与合法转移以代码为准 | `models.py`（`RunStatus`, `ALLOWED_TRANSITIONS`） |
 | Artifact 状态 | 单个 artifact 的状态字段，与 run 状态是**两套不同取值** | `artifact.py` |
-| Quality Gate | 阶段退出标准；检查点评审前必须就绪 | `gates.py` |
+| Quality Gate | 阶段退出标准；CLI 机械检查结构子集，语义标准由检查点评审执行 | `gates.py`；语义标准见 §5 + 检查点评审 |
 | Checkpoint | 人工/主控冻结决策；唯一能批准（approve）的环节 | `state.py` |
 | Tier | 复杂度下限，决定所需刚性；档位取值与估算以代码为准 | `tier.py`（`TierBase`）, `tier_keywords.yaml` |
 | 追溯链 | `Risk Plan Input → DESIGN Plan Input → SPEC-PLAN-* → PLAN item`，逐级闭合 | `models.py`, `state.py` |
@@ -136,17 +139,21 @@ specify→plan→tasks；AWS Kiro 的 requirements→design→tasks）中加固�
 
 ## 4. 流水线
 
-每个阶段都是：**进入门 → 工作步骤 → Quality Gate → 子 agent 检查点评审 → 人工/主控
-检查点**。下表给各阶段的本质（权威/禁区/产物）。
+除入口摄取外，每个规划阶段都是：**进入门 → 工作步骤 → Quality Gate → 检查点评审 →
+人工/主控检查点**。子 agent 审查在带特定高风险 modifier（migration / safety /
+cross_project）的 DESIGN / SPEC / PLAN 上是强制要求，也是普通阶段的推荐审查方式；
+最终批准仍只能由人工/主控检查点完成。下表给各阶段的本质（权威/禁区/产物）。
 
 > **注意（诚实声明）：各阶段逐步执行的方法论——如何具体产出每种 artifact、各门的检查
 > 清单与模板——当前不在本仓库内。** 它随旧 `*-workflow.md` 文档一并移除，仅存于 git
 > 历史。本文档只确立权威边界与质量底线（§2、§5），不是逐步操作手册；CLI 代码做的是
 > 状态管理与结构校验，也不含语义方法论。需要逐步细节时，从 git 历史取回相应
-> `*-workflow.md` 并入本文档或另存，不要假设它能"运行时凭空生成"。
+> `*-workflow.md` 并入本文档或另存，不要假设它能"运行时凭空生成"。现有 agent 模板只负责
+> 驱动 `r2p-*` 停点和命令，不提供完整 artifact 写作方法论。
 
 | 阶段 | 拥有的权威 | 不得做 | 关键产物 |
 |---|---|---|---|
+| **原始需求** | 捕获用户原始输入、生成 run 与 tier 初估证据 | 改写需求含义、补全范围 | `00-raw-requirement.md`、`01-intake-brief.md` |
 | **需求简报** | 目标、范围、非范围、验收、来源出处 | 选方案 | 稳定简报、范围清单、验收标准 |
 | **风险与问题发现** | 阻塞项、假设、风险、讨论点、下游输入 | 解决不属于自己的阻塞项 | 风险清单、设计触发器、spec/plan 输入 |
 | **DESIGN** | 唯一方案 + 理由、边界、迁移、回滚、变更点 | 重定义需求 | Option Analysis（推荐/最小/被否决）、变更点清单、Spec/Plan 输入 |
@@ -155,12 +162,13 @@ specify→plan→tasks；AWS Kiro 的 requirements→design→tasks）中加固�
 
 ---
 
-## 5. 质量模型（强制门控标准）
+## 5. 质量模型（强制门控标准与执行边界）
 
 各门已经把*结构*管得很好；残余风险是**空心达标**——一份 artifact 通过了每一道结构门，
 实质却是空的。LLM 生成尤其易犯此病：它擅长把模板填得令人信服。质量模型是同时加固生成
-与评审、对抗空心的唯一杠杆，**以下各项是 Quality Gate 的强制退出条件——不满足即判不
-合格，等同于缺段落，不再作为"建议"**：
+与评审、对抗空心的唯一杠杆，**以下各项是阶段完成的强制退出条件——不满足即判不合格，
+等同于缺段落，不再作为"建议"**。其中可被 CLI 机械检查的项目见 §5.5；其余项目必须在
+生成、子 agent 审查和检查点批准时执行。
 
 > **让每条承重断言可证伪，然后按"找反例"而非"查齐全"来评审。**
 
@@ -202,7 +210,35 @@ falsifier 字段天然抗套话：`收益：提升性能` 可以随便写；`失
 | 风险发现 | 每个风险：触发输入/条件 + 不处理的最坏结果 | 对手 + SRE | 风险无触发条件；风险未路由到拥有者 |
 | DESIGN | 每个决策：应退回某被否决方案的条件 | 实现者 + 迁移/回滚 + 成本对手 | 套话式否决理由；最小方案形同虚设 |
 | SPEC | 每条契约：一个通过示例 + 一个违反示例 | 测试者（写不出失败测试=不可测）+ 实现者 | 标"可测"却写不出测试；场景复述需求 |
-| PLAN | 每个任务验证：什么结果算失败 | 执行 agent + 回滚 + 追溯审计 | 任务藏隐含决策；验证不可判定；`covered` 对不上 |
+| PLAN | 每个任务验证：什么结果算失败 | 执行 agent + 回滚 + 追溯审计 | 任务藏隐含决策；验证不可判定；闭合对不上 |
+
+### 5.5 当前实现覆盖与缺口
+
+当前 `tools/workflow_cli/` 已经机械执行的检查子集如下（前六项属 Quality Gate
+`check_quality_gate`，exit 3；末项是检查点批准前置的独立检查 `check_forced_subagent_review`，
+exit 5，不在 Quality Gate 内）：
+
+- tier 必须先锁定；
+- artifact 正文不能为空；
+- 被引用的上游 ID 必须带显式闭合标记；
+- artifact 内定义的 ID 不能重复；
+- SPEC 必须包含非空、非占位的外部文档检查清单，或显式说明没有外部依赖；
+- standard tier 的 PLAN 必须包含 `PLAN-TASK-*` 任务锚点；`TDD Applicable: yes` 的任务必须在
+  `Skeleton` 字段里有非空、带语言标记的代码块；
+- 带 `migration`、`safety` 或 `cross_project` modifier 的 DESIGN / SPEC / PLAN，在检查点批准前
+  必须存在版本匹配的只读 subagent review 文件。
+
+当前尚未由 CLI 机械证明、但仍是检查点批准前的强制语义要求：
+
+- falsifier / pre-mortem / 通过与违反示例是否真实有效；
+- 多视角审查是否覆盖 §5.2 的视角，以及审查发现是否按 severity 闭合；
+- `DEFERRED`、`N/A`、`OUT-OF-SCOPE` 等闭合是否合理，而不是绕过追溯；
+- PLAN 是否真正执行器中立、没有隐藏设计选择；
+- 下游重新派生是否完整反映了上游修复。
+
+因此，当前可行的落地方式是：CLI 阻断结构性缺陷，agent 负责生成语义内容，子 agent /
+人工/主控检查点按 §5.1-§5.4 阻断空心达标。若希望这些语义标准也自动化，需要在
+`gates.py` 或独立审查器中新增可测试规则，并为对应 fixture 添加回归测试。
 
 ---
 
