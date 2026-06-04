@@ -1051,17 +1051,48 @@ class TestInstallCli:
         out = capsys.readouterr().out
         assert R2P_VERSION in out
 
-    def test_installed_stub(self, capsys):
+    def test_status_stub(self, capsys):
         from tools.workflow_cli.install_cli import main as install_main
-        install_main(["installed"])
+        install_main(["status"])
         out = capsys.readouterr().out
         assert len(out.strip()) > 0
 
-    def test_doctor_stub(self, capsys):
+    def test_no_args_prints_help(self, capsys):
         from tools.workflow_cli.install_cli import main as install_main
-        install_main(["doctor"])
+        install_main([])
         out = capsys.readouterr().out
-        assert len(out.strip()) > 0
+        assert "install" in out and "uninstall" in out and "status" in out
+
+    def test_version_flag(self, capsys):
+        from tools.workflow_cli.install_cli import main as install_main
+        from tools.workflow_cli.version import R2P_VERSION
+        install_main(["--version"])
+        assert R2P_VERSION in capsys.readouterr().out
+        install_main(["-v"])
+        assert R2P_VERSION in capsys.readouterr().out
+
+    def test_status_json_is_parseable(self, capsys):
+        import json
+        from tools.workflow_cli.install_cli import main as install_main
+        install_main(["status", "--json"])
+        data = json.loads(capsys.readouterr().out)
+        assert isinstance(data, list)
+
+    def test_parse_platforms_defaults_to_all(self):
+        from tools.workflow_cli.install_cli import _parse_platforms
+        assert _parse_platforms(None, ("claude", "codex", "gemini")) == [
+            "claude",
+            "codex",
+            "gemini",
+        ]
+
+    def test_install_unknown_platform_exits_before_writing(self):
+        # _parse_platforms rejects an unknown platform before any service.install,
+        # so this never touches the real ~/.req-to-plan.
+        from tools.workflow_cli.install_cli import main as install_main
+        with pytest.raises(SystemExit) as exc:
+            install_main(["install", "--platform", "bogus-platform"])
+        assert exc.value.code != 0
 
 
 # ---------------------------------------------------------------------------

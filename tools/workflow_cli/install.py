@@ -63,20 +63,19 @@ class InstallService:
     # Public API
     # ------------------------------------------------------------------
 
-    def install(self, platform: str, confirm: bool = False) -> dict:
-        """Install platform. Returns manifest dict. Raises ValueError on unknown platform."""
+    def install(self, platform: str) -> dict:
+        """Install platform, overwriting any existing install. Returns manifest dict.
+
+        Raises ValueError on unknown platform. An existing install is removed first
+        (clean reinstall); per-file backups still guard pre-existing user files.
+        """
         if platform not in SUPPORTED_PLATFORMS:
             raise ValueError(
                 f"Unknown platform: {platform!r}. Supported: {SUPPORTED_PLATFORMS}"
             )
 
         manifest_path = self._manifest_path(platform)
-        if manifest_path.exists() and not confirm:
-            raise FileExistsError(
-                f"Platform {platform!r} is already installed. "
-                "Pass confirm=True to reinstall."
-            )
-        if manifest_path.exists() and confirm:
+        if manifest_path.exists():
             self.uninstall(platform)
 
         installed_paths: list[str] = []
@@ -248,54 +247,75 @@ class InstallService:
 
         return {"removed": removed, "restored": restored, "platform": platform}
 
-    def installed(self) -> list[dict]:
-        """Return list of installed manifest dicts."""
+    def status(self) -> list[dict]:
+        """Read-only install status per platform.
+
+        Each item: {platform, schema_version, r2p_version, installed_at,
+        status: 'ok' | 'drift' | 'invalid', issues: [str]}.
+
+        A manifest that is unreadable or has the wrong shape reports `invalid`
+        rather than crashing or being mistaken for a healthy install.
+        """
         result = []
         install_dir = self.manifest_root / "install"
         if not install_dir.exists():
             return result
         for platform in SUPPORTED_PLATFORMS:
             mp = self._manifest_path(platform)
-            if mp.exists():
-                data = _load_manifest(mp)
-                result.append(
-                    {
-                        "schema_version": data.get("schema_version"),
-                        "platform": data.get("platform"),
-                        "r2p_version": data.get("r2p_version"),
-                        "installed_at": data.get("installed_at"),
-                    }
-                )
-        return result
-
-    def doctor(self) -> list[dict]:
-        """Return list of drift reports. Each item: {platform, status, issues: [str]}."""
-        reports = []
-        for platform in SUPPORTED_PLATFORMS:
-            mp = self._manifest_path(platform)
             if not mp.exists():
                 continue
-            manifest = _load_manifest(mp)
-            issues: list[str] = []
 
-            for path_str in manifest.get("installed_paths", []):
+            try:
+                data = _load_manifest(mp)
+            except Exception as exc:  # truncated / unparseable manifest
+                result.append(
+                    {
+                        "platform": platform,
+                        "schema_version": None,
+                        "r2p_version": None,
+                        "installed_at": None,
+                        "status": "invalid",
+                        "issues": [f"unreadable_manifest: {exc}"],
+                    }
+                )
+                continue
+
+            shape_issues = _manifest_shape_issues(data, platform)
+            if shape_issues:
+                meta = data if isinstance(data, dict) else {}
+                result.append(
+                    {
+                        "platform": meta.get("platform", platform),
+                        "schema_version": meta.get("schema_version"),
+                        "r2p_version": meta.get("r2p_version"),
+                        "installed_at": meta.get("installed_at"),
+                        "status": "invalid",
+                        "issues": shape_issues,
+                    }
+                )
+                continue
+
+            issues: list[str] = []
+            for path_str in data.get("installed_paths", []):
                 if not Path(path_str).exists():
                     issues.append(f"missing_file: {path_str}")
-
-            if manifest.get("r2p_version") != R2P_VERSION:
+            if data.get("r2p_version") != R2P_VERSION:
                 issues.append(
-                    f"version_mismatch: manifest={manifest.get('r2p_version')!r} "
+                    f"version_mismatch: manifest={data.get('r2p_version')!r} "
                     f"current={R2P_VERSION!r}"
                 )
 
-            reports.append(
+            result.append(
                 {
-                    "platform": platform,
+                    "platform": data.get("platform"),
+                    "schema_version": data.get("schema_version"),
+                    "r2p_version": data.get("r2p_version"),
+                    "installed_at": data.get("installed_at"),
                     "status": "ok" if not issues else "drift",
                     "issues": issues,
                 }
             )
-        return reports
+        return result
 
     # ------------------------------------------------------------------
     # Helpers
@@ -499,6 +519,28 @@ def _load_manifest(path: Path) -> dict[str, Any]:
     if not isinstance(data, dict):
         raise ValueError(f"Invalid manifest at {path}: expected object")
     return data
+
+
+def _manifest_shape_issues(data: Any, platform: str) -> list[str]:
+    """Return shape problems that make a parseable manifest still invalid.
+
+    A truncated or partial write can parse yet be missing required fields or
+    name the wrong platform; such a manifest must report `invalid`, not `ok`.
+    """
+    if not isinstance(data, dict):
+        return ["manifest_not_a_mapping"]
+    issues: list[str] = []
+    if data.get("schema_version") is None:
+        issues.append("missing_schema_version")
+    if data.get("platform") != platform:
+        issues.append(
+            f"platform_mismatch: manifest={data.get('platform')!r} expected={platform!r}"
+        )
+    if not isinstance(data.get("installed_paths"), list):
+        issues.append("installed_paths_not_a_list")
+    if data.get("r2p_version") is None:
+        issues.append("missing_r2p_version")
+    return issues
 
 
 def _load_legacy_manifest_yaml(text: str) -> dict[str, Any]:
