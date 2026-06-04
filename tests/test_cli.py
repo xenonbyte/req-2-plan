@@ -2112,3 +2112,67 @@ def test_gap_resolve_closes_route_when_owner_checkpoint_ready():
         rec = load_record(tmp, work_id)
         assert rec.open_routes[0].status == "repaired"
         assert not [r for r in rec.open_routes if r.status == "open"]
+
+
+def test_checkpoint_decide_blocked_while_route_open_then_allowed_after_resolve():
+    with tempfile.TemporaryDirectory() as tmp:
+        work_id, _ = _open_gap_to_design(tmp)
+        invoke(["stage-update", "--work-id", work_id, "--stage", "design",
+                "--content", "# design v2\n"], base_path=tmp, expect_exit=0)
+        invoke(["stage-ready", "--work-id", work_id, "--stage", "design"],
+               base_path=tmp, expect_exit=0)
+        invoke(["gate-quality", "--work-id", work_id, "--stage", "design"],
+               base_path=tmp, expect_exit=0)
+        invoke(["review-checkpoint", "--work-id", work_id, "--stage", "design"],
+               base_path=tmp, expect_exit=0)
+        # route still open -> approval blocked (exit 6)
+        invoke(["checkpoint-decide", "--work-id", work_id, "--stage", "design",
+                "--decision", "approved", "--confirm"], base_path=tmp, expect_exit=6)
+        # resolve, then approval works
+        invoke(["gap-resolve", "--work-id", work_id, "--route-id", "R-1"],
+               base_path=tmp, expect_exit=0)
+        invoke(["checkpoint-decide", "--work-id", work_id, "--stage", "design",
+                "--decision", "approved", "--confirm"], base_path=tmp, expect_exit=0)
+
+
+def test_stage_advance_blocked_while_route_open():
+    with tempfile.TemporaryDirectory() as tmp:
+        work_id, _ = _open_gap_to_design(tmp)
+        # Force the other stage-advance preconditions true so this test reaches
+        # the open-route guard instead of a status/artifact/checkpoint guard.
+        rec = load_record(tmp, work_id)
+        rec.status = RunStatus.CHECKPOINT_APPROVED
+        save_record(tmp, rec)
+        invoke(["stage-advance", "--work-id", work_id], base_path=tmp, expect_exit=6)
+
+
+def test_stage_advance_rejects_stale_downstream_after_route_resolved():
+    with tempfile.TemporaryDirectory() as tmp:
+        work_id, _ = _open_gap_to_design(tmp)
+
+        invoke(["stage-update", "--work-id", work_id, "--stage", "design",
+                "--content", "# design v2\n"], base_path=tmp, expect_exit=0)
+        invoke(["stage-ready", "--work-id", work_id, "--stage", "design"],
+               base_path=tmp, expect_exit=0)
+        invoke(["gate-quality", "--work-id", work_id, "--stage", "design"],
+               base_path=tmp, expect_exit=0)
+        invoke(["gap-resolve", "--work-id", work_id, "--route-id", "R-1"],
+               base_path=tmp, expect_exit=0)
+        invoke(["review-checkpoint", "--work-id", work_id, "--stage", "design"],
+               base_path=tmp, expect_exit=0)
+        invoke(["checkpoint-decide", "--work-id", work_id, "--stage", "design",
+                "--decision", "approved", "--confirm"], base_path=tmp, expect_exit=0)
+        invoke(["stage-advance", "--work-id", work_id], base_path=tmp, expect_exit=0)
+        invoke(["gate-entry", "--work-id", work_id, "--stage", "spec"],
+               base_path=tmp, expect_exit=0)
+
+        rec = load_record(tmp, work_id)
+        assert rec.current_stage == Stage.SPEC
+        assert {aa.stage: aa.status for aa in rec.active_artifacts}[Stage.SPEC] == "stale"
+        assert not any(cp.stage == Stage.SPEC for cp in rec.approved_checkpoints)
+
+        # Force only the status precondition true; stage-advance must still reject
+        # the stale spec active artifact instead of skipping re-derivation.
+        rec.status = RunStatus.CHECKPOINT_APPROVED
+        save_record(tmp, rec)
+        invoke(["stage-advance", "--work-id", work_id], base_path=tmp, expect_exit=6)
