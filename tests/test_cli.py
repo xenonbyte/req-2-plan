@@ -1920,6 +1920,53 @@ def test_gap_open_routes_back_and_invalidates_downstream(capsys):
         assert "r2p_status: stale" in (Path(tmp) / ".req-to-plan" / work_id / STAGE_ARTIFACT_MAP[Stage.PLAN]).read_text(encoding="utf-8")
 
 
+def test_gap_open_invalidates_reopened_copied_artifacts_without_active_records():
+    with tempfile.TemporaryDirectory() as tmp:
+        source_work_id, _ = _seed_plan_approved_run(tmp)
+        source = load_record(tmp, source_work_id)
+        source.status = RunStatus.CLOSED_AT_PLAN_CHECKPOINT
+        save_record(tmp, source)
+
+        invoke(
+            ["run-reopen", "--from", source_work_id, "--stage", "plan", "--reason", "repair plan"],
+            base_path=tmp,
+            expect_exit=0,
+        )
+        work_id = f"{source_work_id}-r1"
+        reopened = load_record(tmp, work_id)
+        assert reopened.active_artifacts == []
+        assert {cp.stage for cp in reopened.approved_checkpoints} == {
+            Stage.REQUIREMENT_BRIEF,
+            Stage.RISK_DISCOVERY,
+            Stage.DESIGN,
+            Stage.SPEC,
+        }
+
+        invoke(
+            ["gap-open", "--work-id", work_id, "--owner-stage", "design",
+             "--required-action", "copied design was wrong"],
+            base_path=tmp,
+            expect_exit=0,
+        )
+
+        rec = load_record(tmp, work_id)
+        assert {aa.stage: aa.status for aa in rec.active_artifacts} == {
+            Stage.DESIGN: "stale",
+            Stage.SPEC: "stale",
+        }
+        assert {cp.stage for cp in rec.approved_checkpoints} == {
+            Stage.REQUIREMENT_BRIEF,
+            Stage.RISK_DISCOVERY,
+        }
+        run_dir = Path(tmp) / ".req-to-plan" / work_id
+        assert "r2p_status: stale" in (
+            run_dir / STAGE_ARTIFACT_MAP[Stage.DESIGN]
+        ).read_text(encoding="utf-8")
+        assert "r2p_status: stale" in (
+            run_dir / STAGE_ARTIFACT_MAP[Stage.SPEC]
+        ).read_text(encoding="utf-8")
+
+
 def test_gap_open_missing_downstream_artifact_is_atomic():
     with tempfile.TemporaryDirectory() as tmp:
         work_id, run_dir = _seed_plan_approved_run(tmp)

@@ -542,10 +542,17 @@ def _cmd_gap_open(args):
     affected = []
     for d in STAGE_ORDER[STAGE_ORDER.index(owner): STAGE_ORDER.index(cur) + 1]:
         aa = get_active_artifact(record, d)
-        if aa is None:
-            continue
+        cp = next(
+            (checkpoint for checkpoint in record.approved_checkpoints if checkpoint.stage == d),
+            None,
+        )
         artifact_file = STAGE_ARTIFACT_MAP[d]
         artifact_path = run_dir / artifact_file
+        if aa is None and cp is None and not artifact_path.exists():
+            continue
+        version = aa.version if aa is not None else (
+            cp.version if cp is not None else get_artifact_version(run_dir, d)
+        )
         if not artifact_path.exists():
             print_and_exit(
                 format_error(
@@ -555,7 +562,13 @@ def _cmd_gap_open(args):
                 EXIT_NOT_FOUND,
             )
         affected.append(
-            (d, aa, artifact_file, artifact_path, artifact_path.read_text(encoding="utf-8"))
+            (
+                d,
+                version,
+                artifact_file,
+                artifact_path,
+                artifact_path.read_text(encoding="utf-8"),
+            )
         )
 
     route_id = f"R-{len(record.open_routes) + 1}"
@@ -564,13 +577,13 @@ def _cmd_gap_open(args):
     staled = []
     try:
         add_open_route(record, route_id, from_stage=cur, owner_stage=owner, required_action=args.required_action)
-        for d, aa, artifact_file, _artifact_path, _artifact_before in affected:
+        for d, version, artifact_file, _artifact_path, _artifact_before in affected:
             record_stale_artifact(
                 record, artifact=artifact_file, reason=reason,
                 replaced_by="(pending re-derivation)", required_action=route_id,
             )
             am.mark_stale(d, reason, "(pending re-derivation)")
-            upsert_active_artifact(record, d, artifact_file, aa.version, "stale")
+            upsert_active_artifact(record, d, artifact_file, version, "stale")
             record.approved_checkpoints = [cp for cp in record.approved_checkpoints if cp.stage != d]
             staled.append(d.value)
 
