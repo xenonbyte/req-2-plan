@@ -2051,3 +2051,64 @@ def test_gap_open_rejects_missing_run():
     with tempfile.TemporaryDirectory() as tmp:
         invoke(["gap-open", "--work-id", "WF-20260604-none", "--owner-stage", "design",
                 "--required-action", "x"], base_path=tmp, expect_exit=7)
+
+
+# ---------------------------------------------------------------------------
+# gap-resolve tests
+# ---------------------------------------------------------------------------
+
+
+def _open_gap_to_design(tmp):
+    work_id, run_dir = _seed_plan_approved_run(tmp)
+    invoke(["gap-open", "--work-id", work_id, "--owner-stage", "design",
+            "--required-action", "fix"], base_path=tmp, expect_exit=0)
+    return work_id, run_dir
+
+
+def test_gap_resolve_rejects_when_owner_not_ready():
+    with tempfile.TemporaryDirectory() as tmp:
+        work_id, _ = _open_gap_to_design(tmp)
+        invoke(["gap-resolve", "--work-id", work_id, "--route-id", "R-1"],
+               base_path=tmp, expect_exit=6)
+
+
+def test_gap_resolve_rejects_before_owner_quality_gate():
+    with tempfile.TemporaryDirectory() as tmp:
+        work_id, _ = _open_gap_to_design(tmp)
+        invoke(["stage-update", "--work-id", work_id, "--stage", "design",
+                "--content", "# design v2\n"], base_path=tmp, expect_exit=0)
+        invoke(["stage-ready", "--work-id", work_id, "--stage", "design"],
+               base_path=tmp, expect_exit=0)
+        # artifact is ready, but the run is still active_stage_draft until gate-quality passes
+        invoke(["gap-resolve", "--work-id", work_id, "--route-id", "R-1"],
+               base_path=tmp, expect_exit=6)
+
+
+def test_gap_resolve_rejects_unknown_route():
+    with tempfile.TemporaryDirectory() as tmp:
+        work_id, _ = _open_gap_to_design(tmp)
+        invoke(["gap-resolve", "--work-id", work_id, "--route-id", "R-9"],
+               base_path=tmp, expect_exit=7)
+
+
+def test_gap_resolve_rejects_missing_run():
+    with tempfile.TemporaryDirectory() as tmp:
+        invoke(["gap-resolve", "--work-id", "WF-20260604-none", "--route-id", "R-1"],
+               base_path=tmp, expect_exit=7)
+
+
+def test_gap_resolve_closes_route_when_owner_checkpoint_ready():
+    with tempfile.TemporaryDirectory() as tmp:
+        work_id, _ = _open_gap_to_design(tmp)
+        # Re-work the owner: update design (-> v2 draft), mark ready, then pass quality gate
+        invoke(["stage-update", "--work-id", work_id, "--stage", "design",
+                "--content", "# design v2\n"], base_path=tmp, expect_exit=0)
+        invoke(["stage-ready", "--work-id", work_id, "--stage", "design"],
+               base_path=tmp, expect_exit=0)
+        invoke(["gate-quality", "--work-id", work_id, "--stage", "design"],
+               base_path=tmp, expect_exit=0)
+        invoke(["gap-resolve", "--work-id", work_id, "--route-id", "R-1"],
+               base_path=tmp, expect_exit=0)
+        rec = load_record(tmp, work_id)
+        assert rec.open_routes[0].status == "repaired"
+        assert not [r for r in rec.open_routes if r.status == "open"]

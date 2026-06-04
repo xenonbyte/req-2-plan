@@ -437,6 +437,52 @@ def _cmd_run_reopen(args):
     )
 
 
+def _cmd_gap_resolve(args):
+    record, mgr, run_dir = _load_run(args.work_id, args.base_path)
+    route = next(
+        (r for r in record.open_routes if r.route_id == args.route_id and r.status == "open"),
+        None,
+    )
+    if route is None:
+        print_and_exit(
+            format_error(f"No open route with id {args.route_id!r}", exit_code=EXIT_NOT_FOUND),
+            EXIT_NOT_FOUND,
+        )
+    owner = route.owner_stage
+    aa = get_active_artifact(record, owner)
+    checkpoint_ready_statuses = {
+        RunStatus.READY_FOR_CHECKPOINT_REVIEW,
+        RunStatus.CHECKPOINT_REVIEW,
+    }
+    if aa is None or aa.status != "ready" or record.status not in checkpoint_ready_statuses:
+        print_and_exit(
+            format_error(
+                f"Owner stage {owner.value!r} must pass gate-quality before resolving the route",
+                exit_code=EXIT_CONFLICT,
+            ),
+            EXIT_CONFLICT,
+        )
+    close_route(record, args.route_id)
+    next_operation = (
+        "checkpoint_decide"
+        if record.status == RunStatus.CHECKPOINT_REVIEW
+        else "checkpoint_review"
+    )
+    update_resume_context(
+        record, last_operation=f"gap_resolve_{args.route_id}",
+        next_operation=next_operation, active_item=owner.value,
+    )
+    mgr.save(record)
+    print_and_exit(
+        format_success(
+            {"route_id": args.route_id, "status": "repaired", "owner_stage": owner.value,
+             "resume_from": owner.value},
+            message=f"Route {args.route_id} resolved; continue owner checkpoint approval",
+        ),
+        EXIT_OK,
+    )
+
+
 def _cmd_gap_open(args):
     record, mgr, run_dir = _load_run(args.work_id, args.base_path)
     owner = _parse_stage(args.owner_stage)
@@ -1619,6 +1665,13 @@ def _register_route_commands(subparsers):
     p.add_argument("--required-action", required=True)
     p.add_argument("--confirm", action="store_true")
     p.set_defaults(func=_cmd_gap_open)
+
+    # gap-resolve
+    p = subparsers.add_parser("gap-resolve", help="Resolve an open upstream-gap route")
+    p.add_argument("--work-id", required=True)
+    p.add_argument("--route-id", required=True)
+    p.add_argument("--confirm", action="store_true")
+    p.set_defaults(func=_cmd_gap_resolve)
 
 
 # ---------------------------------------------------------------------------
