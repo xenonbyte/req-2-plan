@@ -22,7 +22,7 @@ Claude Code、Codex、Gemini，让工作流在三个平台上表现一致。
 - **单一生命周期 CLI**——`r2p install`、`r2p uninstall`、`r2p status`、`r2p version`、`r2p help`，只依赖 Python 标准库。
 - **一份源、多平台**——为 `claude`、`codex`、`gemini` 生成 skill。
 - **owned-only、manifest 背书的安装**——卸载只删 `r2p` 创建的文件；已存在的用户文件会被备份并保留。
-- **紧凑的 agent 快捷命令**——`r2p-start`、`r2p-continue`、`r2p-status`、`r2p-switch`、`r2p-reopen`、`r2p-tier-lock` 驱动日常循环。
+- **紧凑的 agent 技能**——八个 `r2p-*` wrapper 驱动日常循环。
 
 ## Supported platforms
 
@@ -49,7 +49,7 @@ r2p help
 ```
 
 > [!NOTE]
-> 生命周期命令只需 Python 标准库，但日常 `r2p-*` 快捷命令依赖 `pyyaml`。在仓库 checkout
+> 生命周期命令只需 Python 标准库，但日常 `r2p-*` 技能依赖 `pyyaml`。在仓库 checkout
 > 内用 `python3 -m pip install --user -r requirements.txt` 安装，或直接
 > `python3 -m pip install --user "pyyaml>=6.0"`。
 
@@ -68,7 +68,7 @@ r2p-continue                      # 逐阶段推进
 r2p status                        # 查看已安装情况
 ```
 
-### Commands
+### Lifecycle commands
 
 安装全部平台、单个平台，或逗号分隔的列表：
 
@@ -76,19 +76,6 @@ r2p status                        # 查看已安装情况
 r2p install
 r2p install --platform claude
 r2p install --platform claude,codex,gemini
-```
-
-通过 skill 调用的共享 `r2p-*` wrapper 推进一次运行：
-
-```bash
-r2p-start "Add rate limiting"
-# 或从需求文档启动（读取文件内容，不是路径）：
-r2p-start --file ./requirement.md
-r2p-continue
-r2p-status
-r2p-switch --work-id WF-YYYYMMDD-slug
-r2p-tier-lock --work-id WF-YYYYMMDD-slug --base light --confirm
-r2p-reopen --from WF-YYYYMMDD-slug --stage spec --reason "Fix upstream gap"
 ```
 
 按平台报告安装状态——已装版本、漂移（缺文件或版本不匹配）、或 manifest 无效。`status`
@@ -110,30 +97,61 @@ r2p uninstall --platform claude,codex,gemini
 > `r2p install` 直接覆盖已有安装——无需确认参数。覆盖前会先备份已存在的用户文件，
 > 而卸载绝不删除非 `r2p` 创建的文件。
 
-## Configuration
+### Workflow skills
+
+安装后，平台 skill 调用这些共享的 `r2p-*` wrapper——运行一次工作流的每一步各一个：
+
+| Skill | 作用 |
+|---|---|
+| `r2p-start` | 从需求启动一次新运行（文本，或用 `--file <path>` 读取文档内容）。 |
+| `r2p-continue` | 继续当前运行——推进到下一个停点（gate、checkpoint 或修复）。 |
+| `r2p-status` | 查看当前运行或全部运行，只读。 |
+| `r2p-switch` | 把活动运行指向另一个 `--work-id`。 |
+| `r2p-tier-lock` | 锁定活动运行的复杂度 tier（`--base light\|standard`）。 |
+| `r2p-reopen` | 从指定 `--stage` 重开一个已关闭的运行。 |
+| `r2p-gap-open` | 把 open run 的上游缺口路由回其 `--owner-stage`；下游 artifact 失效、需重新派生。 |
+| `r2p-gap-resolve` | owner 阶段重做并通过 `gate-quality` 后，关闭一个 `--route-id` 缺口路由。 |
 
 > [!TIP]
-> 把 `~/.req-to-plan/bin` 加入 `PATH`，即可在 shell 里直接运行 `r2p-*` 快捷命令：
+> 把 `~/.req-to-plan/bin` 加入 `PATH`，即可直接运行 `r2p-*` wrapper：
 >
 > ```bash
 > export PATH="$HOME/.req-to-plan/bin:$PATH"
 > ```
 
-每次运行的工作流 artifact 存放在工作目录下的 `.req-to-plan/<work-id>/`。
+### When to use which skill
 
-工作流的权威说明——背景、目标、架构与各阶段质量模型——见
-[`docs/req-to-plan-design.md`](docs/req-to-plan-design.md)。机器事实（exit code、状态、
-tier 表、命令与参数名）由 `tools/workflow_cli/` 下的代码拥有；确切命令语法以 `--help`
-为准。
+大多数运行只需 `r2p-start`，然后反复 `r2p-continue`。其余技能针对特定情形。
 
-## Troubleshooting
+**锁定 tier**——每个 run 一次，当 `r2p-continue` 停在 `tier_not_locked` 时：
 
-| 现象 | 处理 |
-|---|---|
-| `Error: Unknown platform(s)` | `--platform` 只接受 `claude`、`codex`、`gemini`（逗号分隔）。省略它即针对全部。 |
-| `ModuleNotFoundError: yaml` | 日常快捷命令需要 `pyyaml`：`python3 -m pip install --user "pyyaml>=6.0"`。 |
-| `r2p status` 报 `invalid` | 该平台 manifest 被截断或形状错误。重装：`r2p install --platform <name>`。 |
-| 找不到 `r2p-*` 快捷命令 | 把 `~/.req-to-plan/bin` 加入 `PATH`（见 [Configuration](#configuration)）。 |
+```bash
+r2p-tier-lock --work-id <id> --base standard --modifiers migration,safety --confirm
+```
+
+`--base standard` 抬高刚性下限；`migration`、`safety`、`cross_project` 这几个 modifier
+会在 DESIGN / SPEC / PLAN 检查点强制子 agent 审查。
+
+**重开已关闭的 run**——回到一个已在 PLAN 检查点关闭的运行，从更早的阶段重新开始
+（会派生一个带血缘的新 run）：
+
+```bash
+r2p-reopen --from <closed-id> --stage spec --reason "spec gap found"
+```
+
+**回路上游缺口**——在一个**开着的** run 上，当后面的阶段发现更早的阶段拥有一个错误或
+缺失的决策时。`gap-open` 把 run 退回 owner 阶段并把所有下游标记 stale；待你把 owner
+重做到通过 `gate-quality`，`gap-resolve` 关闭路由，让 owner 可被重新批准、下游重新派生：
+
+```bash
+r2p-gap-open --work-id <id> --owner-stage design --required-action "fixed-window burst flaw"
+# 然后把 owner 阶段重做到通过 gate-quality（r2p-continue 会引导这步）
+r2p-gap-resolve --work-id <id> --route-id R-1
+```
+
+> [!NOTE]
+> reopen 针对**已关闭**的 run；gap 路由针对**开着**的 run。`r2p-continue` 会用
+> `needs_repair` 和 `needs_gap_resolve` 停点带你走完这两种修复流程。
 
 ## License
 

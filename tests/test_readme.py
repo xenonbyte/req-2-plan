@@ -83,3 +83,26 @@ def test_mit_license_is_in_sync():
     assert "MIT License" in license_text
     pkg = json.loads((REPO / "package.json").read_text(encoding="utf-8"))
     assert pkg["license"] == "MIT"
+
+
+def test_every_workflow_skill_is_documented():
+    skills = (
+        "r2p-start",
+        "r2p-continue",
+        "r2p-status",
+        "r2p-switch",
+        "r2p-tier-lock",
+        "r2p-reopen",
+        "r2p-gap-open",
+        "r2p-gap-resolve",
+    )
+    en = EN.read_text(encoding="utf-8")
+    zh = ZH.read_text(encoding="utf-8")
+    for skill in skills:
+        assert skill in en, f"{skill!r} missing from README.md"
+        assert skill in zh, f"{skill!r} missing from README.zh-CN.md"
+
+
+def test_readme_does_not_reference_docs():
+    for text in (EN.read_text(encoding="utf-8"), ZH.read_text(encoding="utf-8")):
+        assert "docs/" not in text

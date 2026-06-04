@@ -25,7 +25,7 @@ so the workflow behaves identically on all three.
 - **One lifecycle CLI** — `r2p install`, `r2p uninstall`, `r2p status`, `r2p version`, `r2p help`, using only the Python standard library.
 - **Multi-platform from one source** — generates skills for `claude`, `codex`, and `gemini`.
 - **Owned-only, manifest-backed install** — uninstall removes only files `r2p` created; pre-existing user files are backed up and preserved.
-- **Compact agent shortcuts** — `r2p-start`, `r2p-continue`, `r2p-status`, `r2p-switch`, `r2p-reopen`, `r2p-tier-lock` drive the daily loop.
+- **Compact agent skills** — eight `r2p-*` wrappers drive the daily loop.
 
 ## Supported platforms
 
@@ -53,7 +53,7 @@ r2p help
 
 > [!NOTE]
 > The lifecycle commands need only the Python standard library, but the daily
-> `r2p-*` shortcuts depend on `pyyaml`. Install it from a checkout with
+> `r2p-*` skills depend on `pyyaml`. Install it from a checkout with
 > `python3 -m pip install --user -r requirements.txt`, or directly with
 > `python3 -m pip install --user "pyyaml>=6.0"`.
 
@@ -74,7 +74,7 @@ r2p-continue                      # advance it stage by stage
 r2p status                        # see what is installed
 ```
 
-### Commands
+### Lifecycle commands
 
 Install all platforms, one platform, or a comma-separated list:
 
@@ -82,19 +82,6 @@ Install all platforms, one platform, or a comma-separated list:
 r2p install
 r2p install --platform claude
 r2p install --platform claude,codex,gemini
-```
-
-Drive a run through the shared `r2p-*` wrappers the skills call:
-
-```bash
-r2p-start "Add rate limiting"
-# or start from a requirement document (reads the file contents, not the path):
-r2p-start --file ./requirement.md
-r2p-continue
-r2p-status
-r2p-switch --work-id WF-YYYYMMDD-slug
-r2p-tier-lock --work-id WF-YYYYMMDD-slug --base light --confirm
-r2p-reopen --from WF-YYYYMMDD-slug --stage spec --reason "Fix upstream gap"
 ```
 
 Report install status per platform — installed version, drift (missing files or
@@ -118,32 +105,67 @@ r2p uninstall --platform claude,codex,gemini
 > Pre-existing user files are backed up before any overwrite, and uninstall never
 > deletes a file `r2p` did not create.
 
-## Configuration
+### Workflow skills
+
+After install, the platform skills call these shared `r2p-*` wrappers — one per
+step of running a workflow:
+
+| Skill | What it does |
+|---|---|
+| `r2p-start` | Start a new run from a requirement (text, or `--file <path>` to read a document's contents). |
+| `r2p-continue` | Continue the active run — advance it to its next stop (gate, checkpoint, or repair). |
+| `r2p-status` | Inspect the current run, or all runs, read-only. |
+| `r2p-switch` | Point the active run at a different `--work-id`. |
+| `r2p-tier-lock` | Lock the active run's complexity tier (`--base light\|standard`). |
+| `r2p-reopen` | Reopen a closed run from a specific `--stage`. |
+| `r2p-gap-open` | Route an upstream gap on an open run back to its `--owner-stage`; downstream artifacts become stale and must be re-derived. |
+| `r2p-gap-resolve` | Close a gap `--route-id` after the owner stage is re-worked and passes `gate-quality`. |
 
 > [!TIP]
-> Add `~/.req-to-plan/bin` to your `PATH` to run the `r2p-*` shortcuts directly:
+> Add `~/.req-to-plan/bin` to your `PATH` to run the `r2p-*` wrappers directly:
 >
 > ```bash
 > export PATH="$HOME/.req-to-plan/bin:$PATH"
 > ```
 
-Workflow artifacts for each run live under `.req-to-plan/<work-id>/` in your
-working directory.
+### When to use which skill
 
-The authoritative description of the workflow — background, goals, architecture,
-and the per-stage quality model — is in
-[`docs/req-to-plan-design.md`](docs/req-to-plan-design.md). Machine facts (exit
-codes, statuses, tier tables, command and flag names) are owned by the code under
-`tools/workflow_cli/`; consult `--help` for exact command syntax.
+Most runs only need `r2p-start`, then repeated `r2p-continue`. The other skills
+cover specific situations.
 
-## Troubleshooting
+**Lock the tier** — once per run, when `r2p-continue` stops with `tier_not_locked`:
 
-| Symptom | Fix |
-|---|---|
-| `Error: Unknown platform(s)` | `--platform` accepts only `claude`, `codex`, `gemini` (comma-separated). Omit it to target all. |
-| `ModuleNotFoundError: yaml` | The daily shortcuts need `pyyaml`: `python3 -m pip install --user "pyyaml>=6.0"`. |
-| `r2p status` reports `invalid` | The platform manifest is truncated or wrong-shaped. Reinstall it: `r2p install --platform <name>`. |
-| `r2p-*` shortcuts not found | Add `~/.req-to-plan/bin` to `PATH` (see [Configuration](#configuration)). |
+```bash
+r2p-tier-lock --work-id <id> --base standard --modifiers migration,safety --confirm
+```
+
+`--base standard` raises the rigor floor; the `migration`, `safety`, and
+`cross_project` modifiers force a subagent review at the DESIGN / SPEC / PLAN
+checkpoints.
+
+**Reopen a closed run** — revisit a run that was closed at the PLAN checkpoint,
+restarting from an earlier stage (this seeds a new linked run):
+
+```bash
+r2p-reopen --from <closed-id> --stage spec --reason "spec gap found"
+```
+
+**Route an upstream gap** — on an *open* run, when a later stage finds that an
+earlier stage owns a wrong or missing decision. `gap-open` sends the run back to
+the owner stage and marks everything downstream stale; after you re-work the
+owner past `gate-quality`, `gap-resolve` closes the route so the owner can be
+re-approved and the downstream re-derived:
+
+```bash
+r2p-gap-open --work-id <id> --owner-stage design --required-action "fixed-window burst flaw"
+# then re-work the owner stage until it passes gate-quality (r2p-continue guides this)
+r2p-gap-resolve --work-id <id> --route-id R-1
+```
+
+> [!NOTE]
+> Reopen is for a *closed* run; gap routing is for an *open* one. `r2p-continue`
+> walks you through both repair flows with `needs_repair` and `needs_gap_resolve`
+> stops.
 
 ## License
 
