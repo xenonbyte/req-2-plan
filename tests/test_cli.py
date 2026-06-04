@@ -1908,13 +1908,14 @@ def test_gap_open_routes_back_and_invalidates_downstream(capsys):
         downstream = {aa.stage: aa.status for aa in rec.active_artifacts}
         assert downstream[Stage.SPEC] == "stale"
         assert downstream[Stage.PLAN] == "stale"
-        assert downstream[Stage.DESIGN] == "approved"
+        assert downstream[Stage.DESIGN] == "stale"
         assert {cp.stage for cp in rec.approved_checkpoints} == {
             Stage.REQUIREMENT_BRIEF,
             Stage.RISK_DISCOVERY,
-            Stage.DESIGN,
         }
-        assert len(rec.stale_artifacts) == 2
+        assert len(rec.stale_artifacts) == 3
+        design_path = Path(tmp) / ".req-to-plan" / work_id / STAGE_ARTIFACT_MAP[Stage.DESIGN]
+        assert "r2p_status: stale" in design_path.read_text(encoding="utf-8")
         assert "r2p_status: stale" in (Path(tmp) / ".req-to-plan" / work_id / STAGE_ARTIFACT_MAP[Stage.SPEC]).read_text(encoding="utf-8")
         assert "r2p_status: stale" in (Path(tmp) / ".req-to-plan" / work_id / STAGE_ARTIFACT_MAP[Stage.PLAN]).read_text(encoding="utf-8")
 
@@ -2000,6 +2001,20 @@ def test_gap_open_rejects_empty_required_action():
                 "--required-action", "   "], base_path=tmp, expect_exit=2)
 
 
+def test_gap_open_rejects_multiline_required_action_without_mutation():
+    with tempfile.TemporaryDirectory() as tmp:
+        work_id, _ = _seed_plan_approved_run(tmp)
+        run_md_path = Path(tmp) / ".req-to-plan" / work_id / "run.md"
+        run_md_before = run_md_path.read_text(encoding="utf-8")
+
+        invoke(["gap-open", "--work-id", work_id, "--owner-stage", "design",
+                "--required-action", "line one\nline two"], base_path=tmp, expect_exit=2)
+
+        assert run_md_path.read_text(encoding="utf-8") == run_md_before
+        rec = load_record(tmp, work_id)
+        assert rec.open_routes == []
+
+
 def test_gap_open_rejects_duplicate_open_route():
     with tempfile.TemporaryDirectory() as tmp:
         work_id, _ = _seed_plan_approved_run(tmp)
@@ -2017,6 +2032,23 @@ def test_gap_open_rejects_duplicate_open_route():
 
         invoke(["gap-open", "--work-id", work_id, "--owner-stage", "design",
                 "--required-action", "y"], base_path=tmp, expect_exit=6)
+
+
+def test_gap_open_rejects_nested_open_route_to_different_owner():
+    with tempfile.TemporaryDirectory() as tmp:
+        work_id, _ = _seed_plan_approved_run(tmp)
+        invoke(["gap-open", "--work-id", work_id, "--owner-stage", "design",
+                "--required-action", "fix design"], base_path=tmp, expect_exit=0)
+
+        invoke(["gap-open", "--work-id", work_id, "--owner-stage", "risk_discovery",
+                "--required-action", "fix risk"], base_path=tmp, expect_exit=6)
+
+        rec = load_record(tmp, work_id)
+        open_routes = [r for r in rec.open_routes if r.status == "open"]
+        assert len(open_routes) == 1
+        assert open_routes[0].route_id == "R-1"
+        assert open_routes[0].owner_stage == Stage.DESIGN
+        assert rec.current_stage == Stage.DESIGN
 
 
 def test_gap_open_rejects_closed_run():
@@ -2179,6 +2211,43 @@ def test_stage_advance_rejects_stale_downstream_after_route_resolved():
         invoke(["stage-advance", "--work-id", work_id], base_path=tmp, expect_exit=6)
 
 
+def test_stage_ready_rejects_stale_downstream_until_stage_update():
+    with tempfile.TemporaryDirectory() as tmp:
+        work_id, _ = _open_gap_to_design(tmp)
+
+        invoke(["stage-update", "--work-id", work_id, "--stage", "design",
+                "--content", "# design v2\n"], base_path=tmp, expect_exit=0)
+        invoke(["stage-ready", "--work-id", work_id, "--stage", "design"],
+               base_path=tmp, expect_exit=0)
+        invoke(["gate-quality", "--work-id", work_id, "--stage", "design"],
+               base_path=tmp, expect_exit=0)
+        invoke(["gap-resolve", "--work-id", work_id, "--route-id", "R-1"],
+               base_path=tmp, expect_exit=0)
+        invoke(["review-checkpoint", "--work-id", work_id, "--stage", "design"],
+               base_path=tmp, expect_exit=0)
+        invoke(["checkpoint-decide", "--work-id", work_id, "--stage", "design",
+                "--decision", "approved", "--confirm"], base_path=tmp, expect_exit=0)
+        invoke(["stage-advance", "--work-id", work_id], base_path=tmp, expect_exit=0)
+        invoke(["gate-entry", "--work-id", work_id, "--stage", "spec"],
+               base_path=tmp, expect_exit=0)
+
+        invoke(["stage-ready", "--work-id", work_id, "--stage", "spec"],
+               base_path=tmp, expect_exit=6)
+        rec = load_record(tmp, work_id)
+        aa_by_stage = {aa.stage: aa for aa in rec.active_artifacts}
+        assert aa_by_stage[Stage.SPEC].status == "stale"
+        assert aa_by_stage[Stage.SPEC].version == 1
+
+        invoke(["stage-update", "--work-id", work_id, "--stage", "spec",
+                "--content", "# spec v2\n"], base_path=tmp, expect_exit=0)
+        invoke(["stage-ready", "--work-id", work_id, "--stage", "spec"],
+               base_path=tmp, expect_exit=0)
+        rec = load_record(tmp, work_id)
+        aa_by_stage = {aa.stage: aa for aa in rec.active_artifacts}
+        assert aa_by_stage[Stage.SPEC].status == "ready"
+        assert aa_by_stage[Stage.SPEC].version == 2
+
+
 def test_gap_routing_full_cascade_back_to_plan():
     with tempfile.TemporaryDirectory() as tmp:
         work_id, _ = _seed_plan_approved_run(tmp)
@@ -2246,8 +2315,8 @@ def test_status_run_surfaces_routes_and_outstanding_stale(capsys, monkeypatch):
         payload = json.loads(out)
         ids = [r["route_id"] for r in payload["open_routes_detail"]]
         assert ids == ["R-1"]
-        assert set(payload["outstanding_stale"]) == {"spec", "plan"}
-        assert len(payload["stale_artifacts"]) == 2
+        assert set(payload["outstanding_stale"]) == {"design", "spec", "plan"}
+        assert len(payload["stale_artifacts"]) == 3
 
 
 def test_status_next_surfaces_gap_route_progress(capsys, monkeypatch):

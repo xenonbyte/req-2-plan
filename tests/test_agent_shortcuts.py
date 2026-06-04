@@ -602,6 +602,132 @@ class TestContinueDriver:
             ) in out
             assert "stage-produce" not in out
 
+    def test_continue_open_owner_route_asks_for_stage_update(self, capsys):
+        import tempfile
+        from pathlib import Path
+        from tests.test_cli import _seed_plan_approved_run
+        from tools.workflow_cli import agent_shortcuts as A
+        from tools.workflow_cli.cli import main as cli_main
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            work_id, _ = _seed_plan_approved_run(base)
+            A.write_active_pointer(base, work_id)
+
+            with pytest.raises(SystemExit):
+                cli_main([
+                    "--base-path", str(base),
+                    "gap-open",
+                    "--work-id", work_id,
+                    "--owner-stage", "design",
+                    "--required-action", "fixed-window burst flaw",
+                ])
+
+            with pytest.raises(SystemExit):
+                A.main(["continue"], base_path=base)
+
+            out = capsys.readouterr().out
+            content_file = base / ".req-to-plan" / work_id / "inputs" / "design-repair.md"
+            assert "needs_repair" in out
+            assert str(content_file) in out
+            assert (
+                f"stage-update --work-id {work_id} --stage design "
+                "--content-file"
+            ) in out
+            assert "stage-ready" not in out
+
+    def test_continue_repaired_owner_draft_asks_for_stage_ready(self, capsys):
+        import tempfile
+        from pathlib import Path
+        from tests.test_cli import _seed_plan_approved_run
+        from tools.workflow_cli import agent_shortcuts as A
+        from tools.workflow_cli.cli import main as cli_main
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            work_id, _ = _seed_plan_approved_run(base)
+            A.write_active_pointer(base, work_id)
+
+            for cmd in (
+                [
+                    "--base-path", str(base), "gap-open",
+                    "--work-id", work_id,
+                    "--owner-stage", "design",
+                    "--required-action", "fixed-window burst flaw",
+                ],
+                [
+                    "--base-path", str(base), "stage-update",
+                    "--work-id", work_id,
+                    "--stage", "design",
+                    "--content", "# design v2\n",
+                ],
+            ):
+                with pytest.raises(SystemExit) as exc:
+                    cli_main(cmd)
+                assert exc.value.code == 0
+
+            with pytest.raises(SystemExit):
+                A.main(["continue"], base_path=base)
+
+            out = capsys.readouterr().out
+            assert "needs_ready" in out
+            assert f"stage-ready --work-id {work_id} --stage design" in out
+            assert "stage-update" not in out
+
+    def test_continue_downstream_stale_stage_asks_for_stage_update(self, capsys):
+        import tempfile
+        from pathlib import Path
+        from tests.test_cli import _seed_plan_approved_run
+        from tools.workflow_cli import agent_shortcuts as A
+        from tools.workflow_cli.cli import main as cli_main
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            work_id, _ = _seed_plan_approved_run(base)
+            A.write_active_pointer(base, work_id)
+
+            for cmd in (
+                [
+                    "--base-path", str(base), "gap-open",
+                    "--work-id", work_id,
+                    "--owner-stage", "design",
+                    "--required-action", "fixed-window burst flaw",
+                ],
+                [
+                    "--base-path", str(base), "stage-update",
+                    "--work-id", work_id,
+                    "--stage", "design",
+                    "--content", "# design v2\n",
+                ],
+                ["--base-path", str(base), "stage-ready", "--work-id", work_id, "--stage", "design"],
+                ["--base-path", str(base), "gate-quality", "--work-id", work_id, "--stage", "design"],
+                ["--base-path", str(base), "gap-resolve", "--work-id", work_id, "--route-id", "R-1"],
+                ["--base-path", str(base), "review-checkpoint", "--work-id", work_id, "--stage", "design"],
+                [
+                    "--base-path", str(base), "checkpoint-decide",
+                    "--work-id", work_id,
+                    "--stage", "design",
+                    "--decision", "approved",
+                    "--confirm",
+                ],
+            ):
+                with pytest.raises(SystemExit) as exc:
+                    cli_main(cmd)
+                assert exc.value.code == 0
+
+            with pytest.raises(SystemExit):
+                A.main(["continue"], base_path=base)
+
+            out = capsys.readouterr().out
+            content_file = base / ".req-to-plan" / work_id / "inputs" / "spec-repair.md"
+            assert "needs_repair" in out
+            assert str(content_file) in out
+            assert (
+                f"stage-update --work-id {work_id} --stage spec "
+                "--content-file"
+            ) in out
+            assert "stage-produce" not in out
+
     def test_continue_surfaces_repair_after_failed_quality_gate(self, capsys):
         import tempfile
         from pathlib import Path

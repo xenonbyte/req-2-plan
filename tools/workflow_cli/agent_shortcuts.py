@@ -402,6 +402,10 @@ def _cmd_continue(ns: argparse.Namespace, base_path: Path) -> None:
                 body = read_artifact(run_path.parent, record.current_stage).strip()
             except FileNotFoundError:
                 body = ""
+            open_owner_route = any(
+                r.owner_stage == record.current_stage and r.status == "open"
+                for r in record.open_routes
+            )
             if aa is None or not body:
                 content_file = _prepare_input_file(run_path.parent, stage, "content")
                 content_cmd = _stage_content_command(
@@ -414,6 +418,20 @@ def _cmd_continue(ns: argparse.Namespace, base_path: Path) -> None:
                 print(f"stop: needs_content\nstage: {stage}\n"
                       f"content_file: {content_file}\n"
                       f"next: {content_cmd}\n")
+                sys.exit(0)
+            if aa.status == "stale":
+                content_file = _prepare_input_file(run_path.parent, stage, "repair", body)
+                update_cmd = _stage_content_command(
+                    base_path,
+                    work_id,
+                    stage,
+                    "stage-update",
+                    content_file,
+                )
+                repair_status = "upstream_gap_open" if open_owner_route else "stale_artifact"
+                print(f"stop: needs_repair\nstatus: {repair_status}\nstage: {stage}\n"
+                      f"content_file: {content_file}\n"
+                      f"next: {update_cmd}\n")
                 sys.exit(0)
             if aa.status != "ready":
                 ready_cmd = _workflow_cli_command(
@@ -466,6 +484,26 @@ def _cmd_continue(ns: argparse.Namespace, base_path: Path) -> None:
                       "next: repair upstream and rerun "
                       f"{retry_cmd}\n")
                 sys.exit(code)
+            record = manager.load()
+            stage = record.current_stage.value
+            aa = get_active_artifact(record, record.current_stage)
+            if aa is not None and aa.status == "stale":
+                try:
+                    body = read_artifact(run_path.parent, record.current_stage).strip()
+                except FileNotFoundError:
+                    body = ""
+                content_file = _prepare_input_file(run_path.parent, stage, "repair", body)
+                update_cmd = _stage_content_command(
+                    base_path,
+                    work_id,
+                    stage,
+                    "stage-update",
+                    content_file,
+                )
+                print(f"stop: needs_repair\nstatus: stale_artifact\nstage: {stage}\n"
+                      f"content_file: {content_file}\n"
+                      f"next: {update_cmd}\n")
+                sys.exit(0)
             content_file = _prepare_input_file(run_path.parent, stage, "content")
             produce_cmd = _stage_content_command(
                 base_path,

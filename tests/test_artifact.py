@@ -223,6 +223,24 @@ class TestArtifactManagerStageReady(unittest.TestCase):
             with self.assertRaises(FileNotFoundError):
                 manager.stage_ready(Stage.REQUIREMENT_BRIEF)
 
+    def test_stage_ready_rejects_stale_artifact_until_updated(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            run_dir = Path(tmpdir)
+            manager = ArtifactManager(run_dir)
+            manager.stage_produce(Stage.REQUIREMENT_BRIEF, "v1 content")
+            manager.mark_stale(Stage.REQUIREMENT_BRIEF, "upstream changed", "(pending)")
+
+            with self.assertRaises(ValueError):
+                manager.stage_ready(Stage.REQUIREMENT_BRIEF)
+
+            self.assertEqual(get_artifact_status(run_dir, Stage.REQUIREMENT_BRIEF), "stale")
+            self.assertEqual(get_artifact_version(run_dir, Stage.REQUIREMENT_BRIEF), 1)
+
+            manager.stage_update(Stage.REQUIREMENT_BRIEF, "v2 content")
+            manager.stage_ready(Stage.REQUIREMENT_BRIEF)
+            self.assertEqual(get_artifact_status(run_dir, Stage.REQUIREMENT_BRIEF), "ready")
+            self.assertEqual(get_artifact_version(run_dir, Stage.REQUIREMENT_BRIEF), 2)
+
 
 class TestArtifactManagerMarkStale(unittest.TestCase):
     def test_mark_stale_updates_status_to_stale(self):

@@ -197,6 +197,12 @@ class ArtifactManager:
 
     def stage_ready(self, stage: Stage) -> None:
         """Mark a stage artifact as ready (content unchanged)."""
+        status = get_artifact_status(self.run_dir, stage)
+        if status == "stale":
+            raise ValueError(
+                f"Artifact for stage {stage.value!r} is stale. "
+                "Use stage_update to create a new version before marking it ready."
+            )
         update_artifact_status(self.run_dir, stage, "ready")
 
     def mark_stale(self, stage: Stage, reason: str, replaced_by: str) -> None:

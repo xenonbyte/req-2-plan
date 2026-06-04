@@ -498,6 +498,11 @@ def _cmd_gap_open(args):
             format_error("--required-action must be non-empty", exit_code=EXIT_CLI_ERR),
             EXIT_CLI_ERR,
         )
+    if "\n" in args.required_action or "\r" in args.required_action:
+        print_and_exit(
+            format_error("--required-action must be a single line", exit_code=EXIT_CLI_ERR),
+            EXIT_CLI_ERR,
+        )
 
     cur = record.current_stage
     if owner not in STAGE_ORDER or cur not in STAGE_ORDER:
@@ -521,16 +526,21 @@ def _cmd_gap_open(args):
             ),
             EXIT_CONFLICT,
         )
-    if any(r.owner_stage == owner and r.status == "open" for r in record.open_routes):
+    open_route_ids = [r.route_id for r in record.open_routes if r.status == "open"]
+    if open_route_ids:
         print_and_exit(
-            format_error(f"An open route to {owner.value!r} already exists", exit_code=EXIT_CONFLICT),
+            format_error(
+                "Cannot gap-open while another route is open; resolve it before opening a new route",
+                details=open_route_ids,
+                exit_code=EXIT_CONFLICT,
+            ),
             EXIT_CONFLICT,
         )
 
     run_md_path = run_dir / "run.md"
     run_md_before = run_md_path.read_text(encoding="utf-8")
-    downstream = []
-    for d in STAGE_ORDER[STAGE_ORDER.index(owner) + 1: STAGE_ORDER.index(cur) + 1]:
+    affected = []
+    for d in STAGE_ORDER[STAGE_ORDER.index(owner): STAGE_ORDER.index(cur) + 1]:
         aa = get_active_artifact(record, d)
         if aa is None:
             continue
@@ -544,7 +554,9 @@ def _cmd_gap_open(args):
                 ),
                 EXIT_NOT_FOUND,
             )
-        downstream.append((d, aa, artifact_file, artifact_path, artifact_path.read_text(encoding="utf-8")))
+        affected.append(
+            (d, aa, artifact_file, artifact_path, artifact_path.read_text(encoding="utf-8"))
+        )
 
     route_id = f"R-{len(record.open_routes) + 1}"
     am = ArtifactManager(run_dir)
@@ -552,7 +564,7 @@ def _cmd_gap_open(args):
     staled = []
     try:
         add_open_route(record, route_id, from_stage=cur, owner_stage=owner, required_action=args.required_action)
-        for d, aa, artifact_file, _artifact_path, _artifact_before in downstream:
+        for d, aa, artifact_file, _artifact_path, _artifact_before in affected:
             record_stale_artifact(
                 record, artifact=artifact_file, reason=reason,
                 replaced_by="(pending re-derivation)", required_action=route_id,
@@ -573,7 +585,7 @@ def _cmd_gap_open(args):
         mgr.save(record)
     except Exception as e:
         run_md_path.write_text(run_md_before, encoding="utf-8")
-        for _d, _aa, _artifact_file, artifact_path, artifact_before in reversed(downstream):
+        for _d, _aa, _artifact_file, artifact_path, artifact_before in reversed(affected):
             artifact_path.write_text(artifact_before, encoding="utf-8")
         print_and_exit(
             format_error(
@@ -1214,6 +1226,11 @@ def _cmd_stage_ready(args):
                 exit_code=EXIT_NOT_FOUND,
             ),
             EXIT_NOT_FOUND,
+        )
+    except ValueError as e:
+        print_and_exit(
+            format_error(str(e), exit_code=EXIT_CONFLICT),
+            EXIT_CONFLICT,
         )
 
     # Update run record
