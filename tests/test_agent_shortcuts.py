@@ -14,6 +14,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from tools.workflow_cli.models import RunStatus
+from tools.workflow_cli.version import R2P_VERSION
 from tools.workflow_cli.agent_shortcuts import (
     generate_work_id,
     is_terminal,
@@ -46,7 +47,7 @@ def _make_run(tmp: Path, work_id: str, status: RunStatus = RunStatus.ACTIVE_STAG
     run_dir.mkdir(parents=True, exist_ok=True)
     run_md = run_dir / "run.md"
     run_md.write_text(
-        f"# Workflow Run: {work_id}\n\n## Status\n{status.value}\n\n## Current Stage\nraw_requirement\n\n## r2p Version\nv1\n",
+        f"# Workflow Run: {work_id}\n\n## Status\n{status.value}\n\n## Current Stage\nraw_requirement\n\n## r2p Version\n{R2P_VERSION}\n",
         encoding="utf-8",
     )
     return run_md
