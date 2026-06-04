@@ -1883,3 +1883,102 @@ class TestRunCloseCheckpointMatch:
             (run_dir / "07-plan.md").write_text(
                 "---\nr2p_version: 2\n---\nfoo", encoding="utf-8")
             invoke(["run-close", "--work-id", work_id], base_path=tmp, expect_exit=6)
+
+
+# ---------------------------------------------------------------------------
+# gap-open tests
+# ---------------------------------------------------------------------------
+
+
+def test_gap_open_routes_back_and_invalidates_downstream(capsys):
+    with tempfile.TemporaryDirectory() as tmp:
+        work_id, _ = _seed_plan_approved_run(tmp)
+        invoke(
+            ["gap-open", "--work-id", work_id, "--owner-stage", "design",
+             "--required-action", "fixed-window burst flaw"],
+            base_path=tmp, expect_exit=0,
+        )
+        rec = load_record(tmp, work_id)
+        assert rec.current_stage == Stage.DESIGN
+        assert rec.status == RunStatus.ACTIVE_STAGE_DRAFT
+        assert len(rec.open_routes) == 1
+        r = rec.open_routes[0]
+        assert (r.from_stage, r.owner_stage, r.status) == (Stage.PLAN, Stage.DESIGN, "open")
+        downstream = {aa.stage: aa.status for aa in rec.active_artifacts}
+        assert downstream[Stage.SPEC] == "stale"
+        assert downstream[Stage.PLAN] == "stale"
+        assert downstream[Stage.DESIGN] == "approved"
+        assert {cp.stage for cp in rec.approved_checkpoints} == {
+            Stage.REQUIREMENT_BRIEF,
+            Stage.RISK_DISCOVERY,
+            Stage.DESIGN,
+        }
+        assert len(rec.stale_artifacts) == 2
+        assert "r2p_status: stale" in (Path(tmp) / ".req-to-plan" / work_id / STAGE_ARTIFACT_MAP[Stage.SPEC]).read_text(encoding="utf-8")
+        assert "r2p_status: stale" in (Path(tmp) / ".req-to-plan" / work_id / STAGE_ARTIFACT_MAP[Stage.PLAN]).read_text(encoding="utf-8")
+
+
+def test_gap_open_missing_downstream_artifact_is_atomic():
+    with tempfile.TemporaryDirectory() as tmp:
+        work_id, run_dir = _seed_plan_approved_run(tmp)
+        spec_path = run_dir / STAGE_ARTIFACT_MAP[Stage.SPEC]
+        plan_path = run_dir / STAGE_ARTIFACT_MAP[Stage.PLAN]
+        spec_before = spec_path.read_text(encoding="utf-8")
+        plan_path.unlink()
+
+        invoke(["gap-open", "--work-id", work_id, "--owner-stage", "design",
+                "--required-action", "x"], base_path=tmp, expect_exit=7)
+
+        rec = load_record(tmp, work_id)
+        assert rec.current_stage == Stage.PLAN
+        assert rec.open_routes == []
+        assert {cp.stage for cp in rec.approved_checkpoints} == {
+            Stage.REQUIREMENT_BRIEF,
+            Stage.RISK_DISCOVERY,
+            Stage.DESIGN,
+            Stage.SPEC,
+            Stage.PLAN,
+        }
+        assert {aa.stage: aa.status for aa in rec.active_artifacts}[Stage.SPEC] == "approved"
+        assert {aa.stage: aa.status for aa in rec.active_artifacts}[Stage.PLAN] == "approved"
+        assert spec_path.read_text(encoding="utf-8") == spec_before
+
+
+def test_gap_open_rolls_back_mid_stale_write_failure(monkeypatch):
+    from tools.workflow_cli.artifact import ArtifactManager
+
+    with tempfile.TemporaryDirectory() as tmp:
+        work_id, run_dir = _seed_plan_approved_run(tmp)
+        run_md_path = run_dir / "run.md"
+        spec_path = run_dir / STAGE_ARTIFACT_MAP[Stage.SPEC]
+        plan_path = run_dir / STAGE_ARTIFACT_MAP[Stage.PLAN]
+        run_md_before = run_md_path.read_text(encoding="utf-8")
+        spec_before = spec_path.read_text(encoding="utf-8")
+        plan_before = plan_path.read_text(encoding="utf-8")
+
+        original_mark_stale = ArtifactManager.mark_stale
+
+        def fail_on_plan(self, stage, reason, replaced_by):
+            if stage == Stage.PLAN:
+                raise RuntimeError("forced mark_stale failure")
+            return original_mark_stale(self, stage, reason, replaced_by)
+
+        monkeypatch.setattr(ArtifactManager, "mark_stale", fail_on_plan)
+
+        invoke(["gap-open", "--work-id", work_id, "--owner-stage", "design",
+                "--required-action", "x"], base_path=tmp, expect_exit=6)
+
+        rec = load_record(tmp, work_id)
+        assert rec.current_stage == Stage.PLAN
+        assert rec.open_routes == []
+        assert rec.stale_artifacts == []
+        assert {cp.stage for cp in rec.approved_checkpoints} == {
+            Stage.REQUIREMENT_BRIEF,
+            Stage.RISK_DISCOVERY,
+            Stage.DESIGN,
+            Stage.SPEC,
+            Stage.PLAN,
+        }
+        assert run_md_path.read_text(encoding="utf-8") == run_md_before
+        assert spec_path.read_text(encoding="utf-8") == spec_before
+        assert plan_path.read_text(encoding="utf-8") == plan_before

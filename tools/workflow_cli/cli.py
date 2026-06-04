@@ -19,7 +19,9 @@ from tools.workflow_cli.models import (
     TierModifier,
     WorkId,
     STAGE_ARTIFACT_MAP,
+    STAGE_ORDER,
     is_command_allowed,
+    is_transition_allowed,
 )
 from tools.workflow_cli.state import (
     RunStateManager,
@@ -29,6 +31,9 @@ from tools.workflow_cli.state import (
     update_resume_context,
     get_active_artifact,
     add_checkpoint,
+    add_open_route,
+    close_route,
+    record_stale_artifact,
 )
 from tools.workflow_cli.artifact import (
     ArtifactManager,
@@ -391,7 +396,6 @@ def _cmd_run_reopen(args):
     new_run_dir.mkdir(parents=True, exist_ok=False)
 
     # Copy artifacts up to (not including) target_stage
-    from tools.workflow_cli.models import STAGE_ORDER
     import shutil
     for stage in STAGE_ORDER:
         if stage == target_stage:
@@ -428,6 +432,113 @@ def _cmd_run_reopen(args):
                 "run_dir": str(new_run_dir),
             },
             message=f"Run reopened as {new_work_id}",
+        ),
+        EXIT_OK,
+    )
+
+
+def _cmd_gap_open(args):
+    record, mgr, run_dir = _load_run(args.work_id, args.base_path)
+    owner = _parse_stage(args.owner_stage)
+
+    if record.status == RunStatus.CLOSED_AT_PLAN_CHECKPOINT:
+        print_and_exit(
+            format_error("Cannot gap-open a closed run; use run-reopen", exit_code=EXIT_CONFLICT),
+            EXIT_CONFLICT,
+        )
+    if not args.required_action or not args.required_action.strip():
+        print_and_exit(
+            format_error("--required-action must be non-empty", exit_code=EXIT_CLI_ERR),
+            EXIT_CLI_ERR,
+        )
+
+    cur = record.current_stage
+    if owner not in STAGE_ORDER or cur not in STAGE_ORDER:
+        print_and_exit(
+            format_error(f"Stage {owner.value!r} not in stage order", exit_code=EXIT_CONFLICT),
+            EXIT_CONFLICT,
+        )
+    if STAGE_ORDER.index(owner) >= STAGE_ORDER.index(cur):
+        print_and_exit(
+            format_error(
+                f"owner-stage {owner.value!r} must be strictly upstream of current stage {cur.value!r}",
+                exit_code=EXIT_CONFLICT,
+            ),
+            EXIT_CONFLICT,
+        )
+    if not is_transition_allowed(record.status, RunStatus.UPSTREAM_GAP_ROUTING):
+        print_and_exit(
+            format_error(
+                f"Cannot route a gap from status {record.status.value!r}; resolve the current step first",
+                exit_code=EXIT_CONFLICT,
+            ),
+            EXIT_CONFLICT,
+        )
+    if any(r.owner_stage == owner and r.status == "open" for r in record.open_routes):
+        print_and_exit(
+            format_error(f"An open route to {owner.value!r} already exists", exit_code=EXIT_CONFLICT),
+            EXIT_CONFLICT,
+        )
+
+    run_md_path = run_dir / "run.md"
+    run_md_before = run_md_path.read_text(encoding="utf-8")
+    downstream = []
+    for d in STAGE_ORDER[STAGE_ORDER.index(owner) + 1: STAGE_ORDER.index(cur) + 1]:
+        aa = get_active_artifact(record, d)
+        if aa is None:
+            continue
+        artifact_file = STAGE_ARTIFACT_MAP[d]
+        artifact_path = run_dir / artifact_file
+        if not artifact_path.exists():
+            print_and_exit(
+                format_error(
+                    f"Cannot gap-open: downstream artifact file missing for {d.value!r}: {artifact_file}",
+                    exit_code=EXIT_NOT_FOUND,
+                ),
+                EXIT_NOT_FOUND,
+            )
+        downstream.append((d, aa, artifact_file, artifact_path, artifact_path.read_text(encoding="utf-8")))
+
+    route_id = f"R-{len(record.open_routes) + 1}"
+    am = ArtifactManager(run_dir)
+    reason = f"upstream gap at {owner.value}"
+    staled = []
+    try:
+        add_open_route(record, route_id, from_stage=cur, owner_stage=owner, required_action=args.required_action)
+        for d, aa, artifact_file, _artifact_path, _artifact_before in downstream:
+            record_stale_artifact(
+                record, artifact=artifact_file, reason=reason,
+                replaced_by="(pending re-derivation)", required_action=route_id,
+            )
+            am.mark_stale(d, reason, "(pending re-derivation)")
+            upsert_active_artifact(record, d, artifact_file, aa.version, "stale")
+            record.approved_checkpoints = [cp for cp in record.approved_checkpoints if cp.stage != d]
+            staled.append(d.value)
+
+        record.current_stage = owner
+        record = update_run_status(record, RunStatus.UPSTREAM_GAP_ROUTING)
+        record = update_run_status(record, RunStatus.ACTIVE_STAGE_DRAFT)
+        update_resume_context(
+            record, last_operation=f"gap_open_{route_id}",
+            next_operation="stage_update", active_item=owner.value,
+            reason=f"repair owner for {route_id}",
+        )
+        mgr.save(record)
+    except Exception as e:
+        run_md_path.write_text(run_md_before, encoding="utf-8")
+        for _d, _aa, _artifact_file, artifact_path, artifact_before in reversed(downstream):
+            artifact_path.write_text(artifact_before, encoding="utf-8")
+        print_and_exit(
+            format_error(
+                f"Cannot gap-open: failed to mark downstream stale atomically ({e})",
+                exit_code=EXIT_CONFLICT,
+            ),
+            EXIT_CONFLICT,
+        )
+    print_and_exit(
+        format_success(
+            {"route_id": route_id, "owner_stage": owner.value, "from_stage": cur.value, "staled_stages": staled},
+            message=f"Gap routed to {owner.value}; repair it, then gap-resolve --route-id {route_id}",
         ),
         EXIT_OK,
     )
@@ -1500,6 +1611,16 @@ def _register_checkpoint_commands(subparsers):
     p.set_defaults(func=_cmd_stage_advance)
 
 
+def _register_route_commands(subparsers):
+    # gap-open
+    p = subparsers.add_parser("gap-open", help="Route an upstream gap back to an owner stage")
+    p.add_argument("--work-id", required=True)
+    p.add_argument("--owner-stage", required=True)
+    p.add_argument("--required-action", required=True)
+    p.add_argument("--confirm", action="store_true")
+    p.set_defaults(func=_cmd_gap_open)
+
+
 # ---------------------------------------------------------------------------
 # main
 # ---------------------------------------------------------------------------
@@ -1519,6 +1640,7 @@ def main(args=None):
 
     subparsers = parser.add_subparsers(dest="command", required=True)
     _register_run_commands(subparsers)
+    _register_route_commands(subparsers)
     _register_tier_commands(subparsers)
     _register_gate_commands(subparsers)
     _register_status_commands(subparsers)
