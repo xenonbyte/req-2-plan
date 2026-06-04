@@ -1060,7 +1060,8 @@ class TestInstallCli:
         )
         svc.install("codex")
 
-        with __import__("unittest.mock", fromlist=["patch"]).patch(
+        from unittest.mock import patch
+        with patch(
             "tools.workflow_cli.install_cli._make_service", return_value=svc
         ):
             install_main(["uninstall"])
