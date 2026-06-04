@@ -511,6 +511,25 @@ fi
 """
 
 
+@pytest.mark.parametrize(
+    ("platform", "template_suffixes"),
+    [
+        ("claude", ("commands/r2p-gap-open.md", "commands/r2p-gap-resolve.md")),
+        ("codex", ("skills/r2p-gap-open/SKILL.md", "skills/r2p-gap-resolve/SKILL.md")),
+        ("gemini", ("commands/r2p-gap-open.toml", "commands/r2p-gap-resolve.toml")),
+    ],
+)
+def test_install_writes_gap_shortcut_templates(tmp_path, platform, template_suffixes):
+    svc, manifest_root, ph_root = make_service(tmp_path)
+    result = svc.install(platform)
+    installed_paths = [Path(p) for p in result.get("installed_paths", [])]
+    installed_names = {p.name for p in installed_paths}
+    assert {"r2p-gap-open", "r2p-gap-resolve"} <= installed_names
+    normalized = {p.as_posix() for p in installed_paths}
+    for suffix in template_suffixes:
+        assert any(path.endswith(suffix) for path in normalized)
+
+
 class TestStaleWrapperCleanup:
     def test_upgrade_removes_stale_shared_wrapper_from_all_manifests(self, tmp_path):
         svc, manifest_root, ph_root = make_service(tmp_path)
