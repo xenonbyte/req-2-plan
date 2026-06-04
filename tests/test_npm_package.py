@@ -18,7 +18,7 @@ def test_package_json_exposes_r2p_bin():
 
     data = json.loads(package_json.read_text(encoding="utf-8"))
 
-    assert data["name"] == "req-2-plan"
+    assert data["name"] == "@xenonbyte/req-2-plan"
     assert data["version"] == R2P_VERSION
     assert data["bin"]["r2p"] == "bin/r2p.js"
 
