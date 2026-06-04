@@ -53,7 +53,7 @@
 - Always pass `base_path=Path(tmp)` to CLI/shortcuts — never use real `.req-to-plan/`.
 - Test runner: `.venv/bin/python -m pytest` (never bare `pytest` or `python -m pytest`).
 - New features: write tests first (red → green → commit).
-- Baseline: 602 tests passing. All must stay green.
+- All tests must stay green. Run the full suite; the exact count is intentionally not pinned here.
 
 ## Key Invariants
 
