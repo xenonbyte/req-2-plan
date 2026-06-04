@@ -14,7 +14,11 @@ from tools.workflow_cli.models import (
     CheckpointRecord,
     OpenRoute,
     RunStatus,
+    STAGE_ARTIFACT_MAP,
     Stage,
+    TierBase,
+    TierEstimate,
+    WorkId,
 )
 from tools.workflow_cli.state import RunStateManager
 
@@ -64,6 +68,56 @@ def requirement_checkpoint() -> CheckpointRecord:
         approved_at="2026-05-27T00:00:00+00:00",
         downstream_authorization="next_stage",
     )
+
+
+def _seed_plan_approved_run(base_path, work_id="WF-20260604-gap"):
+    """A run at PLAN with the full upstream chain active+approved on disk."""
+    from tools.workflow_cli.state import create_run_record, upsert_active_artifact
+    from tools.workflow_cli.artifact import write_artifact
+
+    record = create_run_record(WorkId(work_id))
+    record.current_stage = Stage.PLAN
+    record.status = RunStatus.CHECKPOINT_APPROVED
+    record.tier_locked = TierEstimate(base=TierBase.LIGHT)
+    run_dir = Path(base_path) / ".req-to-plan" / work_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    for stage in (
+        Stage.REQUIREMENT_BRIEF,
+        Stage.RISK_DISCOVERY,
+        Stage.DESIGN,
+        Stage.SPEC,
+        Stage.PLAN,
+    ):
+        artifact_file = STAGE_ARTIFACT_MAP[stage]
+        write_artifact(run_dir, stage, f"# {stage.value} body\n", version=1, status="approved")
+        upsert_active_artifact(record, stage, artifact_file, 1, "approved")
+        record.approved_checkpoints.append(
+            CheckpointRecord(
+                stage=stage,
+                artifact=artifact_file,
+                version=1,
+                approved_at="2026-06-04T00:00:00+00:00",
+                downstream_authorization="next_stage",
+            )
+        )
+    RunStateManager(run_dir).save(record)
+    return work_id, run_dir
+
+
+def test_seed_plan_approved_run_roundtrips():
+    with tempfile.TemporaryDirectory() as tmp:
+        work_id, _ = _seed_plan_approved_run(tmp)
+        rec = load_record(tmp, work_id)
+        assert rec.current_stage == Stage.PLAN
+        assert rec.tier_locked.base == TierBase.LIGHT
+        assert {cp.stage for cp in rec.approved_checkpoints} == {
+            Stage.REQUIREMENT_BRIEF,
+            Stage.RISK_DISCOVERY,
+            Stage.DESIGN,
+            Stage.SPEC,
+            Stage.PLAN,
+        }
+        assert all(aa.status == "approved" for aa in rec.active_artifacts)
 
 
 # ---------------------------------------------------------------------------
