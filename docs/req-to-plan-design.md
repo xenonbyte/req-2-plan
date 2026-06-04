@@ -259,17 +259,14 @@ falsifier 字段天然抗套话：`收益：提升性能` 可以随便写；`失
 阶段；拥有阶段修复并重新通过其 Quality Gate + Checkpoint；受影响的下游导入项应失效并重新
 派生（若 ID 无法干净 remap 则整篇重建）后再重新过门。
 
-**当前实现边界**：代码模型已经包含上游缺口路由、开放路由和失效 artifact 的状态/记录结构
-（如 `RunStatus.UPSTREAM_GAP_ROUTING`、`OpenRoute`、`StaleArtifact` 及相关 state helper），
-但当前公开 CLI 与 `r2p-*` agent shortcut 尚未暴露完整的 gap route / reimport /
-artifact mark stale 操作面。因此，上述自动化级联目前是设计意图和状态模型边界，不是完整可执行
-的 operator workflow。当前已暴露的恢复路径是：已在 PLAN 检查点关闭的 run 可通过 reopen 流程
-从拥有该决策的阶段重开；缺口若仍属于当前 checkpoint/review 阶段，则通过
-checkpoint changes_requested、stage update、Quality Gate 与 Checkpoint 的常规修复路径推进。
-若 run 尚未关闭但已经离开拥有该决策的上游阶段，公开 CLI 目前没有回到该 owner stage 的
-operator workflow；要闭合这种场景，需要实现 gap route / reimport / artifact mark stale
-操作面，或定义非关闭 run 的 reopen 路径。**具体命令语法、状态名与合法转移集合一律以代码和
-`--help` 为准。**
+**当前实现边界**：上游缺口路由的状态模型（`RunStatus.UPSTREAM_GAP_ROUTING`、`OpenRoute`、
+`StaleArtifact` 及相关 state helper）现已通过 operator 操作面暴露。未关闭的 run 用 `gap-open`
+把缺口路由回 owner 阶段——下游 artifact 被标记失效、其已批准 checkpoint 失效、run 退回 owner
+的重做态；owner 重做并通过 `gate-quality` 后用 `gap-resolve` 闭合路由，再经常规
+review/approve/advance 重新派生下游。二者也暴露为 `r2p-gap-open` / `r2p-gap-resolve` shortcut。
+已在 PLAN 检查点关闭的 run 仍用 `run-reopen` 重开。路由与失效进度在 `status-run`
+（`open_routes_detail` / `stale_artifacts` / `outstanding_stale`）与 `status-next` 可见。
+**具体命令语法、状态名与合法转移集合一律以代码和 `--help` 为准。**
 
 ---
 
