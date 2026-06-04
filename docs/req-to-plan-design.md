@@ -65,7 +65,8 @@ specify→plan→tasks；AWS Kiro 的 requirements→design→tasks）中加固�
 - **双向可追溯**——每个下游条目都导入一个稳定的上游 ID 并必须闭合它
   （闭合标记或路由；具体闭合取值以代码为准），从而需求可追到任务、也可反追。
 - **变更影响路由**——下游阶段发现上游缺了某个决策时，往回路由给拥有它的阶段而不是
-  自己猜（上游缺口路由；具体状态名以代码 `RunStatus` 为准），并伴随失效标记（`stale`）级联。
+  自己猜（上游缺口路由；具体状态名以代码 `RunStatus` 为准），并伴随失效标记（`stale`）级联
+  （这是设计原则；当前 CLI 操作面的实现边界见 §6）。
 - **Agent/CLI 分离**——CLI 管状态、校验结构；Agent 生成语义内容。CLI 从不写 artifact
   正文。
 
@@ -232,15 +233,16 @@ falsifier 字段天然抗套话：`收益：提升性能` 可以随便写；`失
 - 被引用的上游 ID 必须带显式闭合标记；
 - artifact 内定义的 ID 不能重复；
 - SPEC 必须包含非空、非占位的外部文档检查清单，或显式说明没有外部依赖；
-- 达到代码定义任务锚点要求的 PLAN 必须包含任务锚点；启用 TDD 骨架要求的任务必须提供非空、
-  可识别语言的 skeleton 代码块；
+- 达到代码定义任务锚点要求的 PLAN 必须包含任务锚点；启用 TDD 骨架要求的任务必须提供带非空
+  信息标记且正文非空的 `Skeleton` 代码块；
 - 命中代码定义高风险 modifier 的 DESIGN / SPEC / PLAN，在检查点批准前必须存在版本匹配的
-  只读 subagent review 文件。
+  subagent review 文件；文件是否确由只读 reviewer 生成、内容是否有效，仍由 agent / 主控语义审查确认。
 
 当前尚未由 CLI 机械证明、但仍是检查点批准前的强制语义要求：
 
 - falsifier / pre-mortem / 通过与违反示例是否真实有效；
 - 多视角审查是否覆盖 §5.2 的视角，以及审查发现是否按 severity 闭合；
+- subagent review 文件是否来自隔离只读审查，以及是否覆盖对应阶段的必要视角；
 - `DEFERRED`、`N/A`、`OUT-OF-SCOPE` 等闭合是否合理，而不是绕过追溯；
 - PLAN 是否真正执行器中立、没有隐藏设计选择；
 - 下游重新派生是否完整反映了上游修复。
@@ -253,12 +255,21 @@ falsifier 字段天然抗套话：`收益：提升性能` 可以随便写；`失
 
 ## 6. 变更传播
 
-下游阶段绝不悄悄修补已批准的上游 artifact：它将缺口标记并路由给拥有该决策的阶段（上游
-缺口路由）；拥有阶段修复并重新通过其 Quality Gate + Checkpoint；下游导入项被标记失效
-（`stale`）；下游随后被重新派生（若 ID 无法干净 remap 则整篇重建）并重新过门。一个已在
-PLAN 检查点关闭的 run，应通过 CLI/agent 模板提供的 reopen 流程从拥有该决策的阶段重开，
-并触发同样的下游级联——它不是单阶段编辑。**具体命令语法、状态名与合法转移集合一律以
-代码和 `--help` 为准。**
+下游阶段绝不悄悄修补已批准的上游 artifact：发现上游缺口时，应把缺口交还给拥有该决策的
+阶段；拥有阶段修复并重新通过其 Quality Gate + Checkpoint；受影响的下游导入项应失效并重新
+派生（若 ID 无法干净 remap 则整篇重建）后再重新过门。
+
+**当前实现边界**：代码模型已经包含上游缺口路由、开放路由和失效 artifact 的状态/记录结构
+（如 `RunStatus.UPSTREAM_GAP_ROUTING`、`OpenRoute`、`StaleArtifact` 及相关 state helper），
+但当前公开 CLI 与 `r2p-*` agent shortcut 尚未暴露完整的 gap route / reimport /
+artifact mark stale 操作面。因此，上述自动化级联目前是设计意图和状态模型边界，不是完整可执行
+的 operator workflow。当前已暴露的恢复路径是：已在 PLAN 检查点关闭的 run 可通过 reopen 流程
+从拥有该决策的阶段重开；缺口若仍属于当前 checkpoint/review 阶段，则通过
+checkpoint changes_requested、stage update、Quality Gate 与 Checkpoint 的常规修复路径推进。
+若 run 尚未关闭但已经离开拥有该决策的上游阶段，公开 CLI 目前没有回到该 owner stage 的
+operator workflow；要闭合这种场景，需要实现 gap route / reimport / artifact mark stale
+操作面，或定义非关闭 run 的 reopen 路径。**具体命令语法、状态名与合法转移集合一律以代码和
+`--help` 为准。**
 
 ---
 
