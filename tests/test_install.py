@@ -181,43 +181,48 @@ class TestInstallService:
         with pytest.raises(ValueError, match="Unknown platform"):
             svc.install("nonexistent-platform")
 
-    def test_install_already_installed_raises_without_confirm(self, tmp_path):
-        svc, _, _ = make_service(tmp_path)
-        svc.install("claude")
-        with pytest.raises(FileExistsError):
-            svc.install("claude")
-
-    def test_install_already_installed_succeeds_with_confirm(self, tmp_path):
+    def test_reinstall_overwrites_without_confirm(self, tmp_path):
         svc, manifest_root, _ = make_service(tmp_path)
         svc.install("claude")
-        # Should not raise
-        svc.install("claude", confirm=True)
+        # Reinstall must just succeed (overwrite); no confirm flag needed.
+        svc.install("claude")
         manifest_path = manifest_root / "install" / "claude.yaml"
         assert manifest_path.exists()
 
-    def test_confirm_reinstall_preserves_original_backup_state(self, tmp_path):
+    def test_reinstall_preserves_original_backup_state(self, tmp_path):
         svc, manifest_root, ph_root = make_service(tmp_path)
         skill_dest = ph_root / "claude" / "skills" / "r2p" / "SKILL.md"
         skill_dest.parent.mkdir(parents=True, exist_ok=True)
         skill_dest.write_text("original content")
 
         svc.install("claude")
-        svc.install("claude", confirm=True)
+        svc.install("claude")
         svc.uninstall("claude")
 
         assert skill_dest.exists()
         assert skill_dest.read_text() == "original content"
 
-    def test_confirm_reinstall_uninstall_does_not_leave_managed_files(self, tmp_path):
+    def test_reinstall_uninstall_does_not_leave_managed_files(self, tmp_path):
         svc, manifest_root, ph_root = make_service(tmp_path)
         svc.install("claude")
         skill_dest = ph_root / "claude" / "skills" / "r2p" / "SKILL.md"
         assert skill_dest.exists()
 
-        svc.install("claude", confirm=True)
+        svc.install("claude")
         svc.uninstall("claude")
 
         assert not skill_dest.exists()
+
+    def test_reinstall_preserves_unmanaged_bin_files(self, tmp_path):
+        svc, manifest_root, _ = make_service(tmp_path)
+        svc.install("claude")
+        unmanaged = manifest_root / "bin" / "r2p-local-helper"
+        unmanaged.write_text("user helper\n", encoding="utf-8")
+
+        svc.install("claude")
+
+        assert unmanaged.exists()
+        assert unmanaged.read_text(encoding="utf-8") == "user helper\n"
 
     def test_install_copies_bin_scripts(self, tmp_path):
         svc, manifest_root, _ = make_service(tmp_path)
@@ -328,78 +333,84 @@ class TestInstallService:
         assert script.exists(), "shared bin scripts should remain for codex install"
 
     # -----------------------------------------------------------------------
-    # installed
+    # status
     # -----------------------------------------------------------------------
 
-    def test_installed_returns_empty_when_none(self, tmp_path):
+    def test_status_returns_empty_when_none(self, tmp_path):
         svc, _, _ = make_service(tmp_path)
-        result = svc.installed()
-        assert result == []
+        assert svc.status() == []
 
-    def test_installed_returns_platform_info(self, tmp_path):
+    def test_status_returns_platform_info(self, tmp_path):
         svc, _, _ = make_service(tmp_path)
         svc.install("claude")
-        result = svc.installed()
+        result = svc.status()
         assert len(result) == 1
         assert result[0]["platform"] == "claude"
         assert result[0]["r2p_version"] == R2P_VERSION
         assert result[0]["schema_version"] == SCHEMA_VERSION
+        assert result[0]["status"] == "ok"
+        assert result[0]["issues"] == []
 
-    def test_installed_returns_multiple_platforms(self, tmp_path):
+    def test_status_returns_multiple_platforms(self, tmp_path):
         svc, _, _ = make_service(tmp_path)
         svc.install("claude")
         svc.install("codex")
-        result = svc.installed()
-        platforms = {r["platform"] for r in result}
+        platforms = {r["platform"] for r in svc.status()}
         assert "claude" in platforms
         assert "codex" in platforms
 
-    # -----------------------------------------------------------------------
-    # doctor
-    # -----------------------------------------------------------------------
-
-    def test_doctor_returns_ok_when_clean(self, tmp_path):
-        svc, _, _ = make_service(tmp_path)
-        svc.install("claude")
-        reports = svc.doctor()
-        assert len(reports) == 1
-        assert reports[0]["platform"] == "claude"
-        assert reports[0]["status"] == "ok"
-        assert reports[0]["issues"] == []
-
-    def test_doctor_reports_missing_file(self, tmp_path):
+    def test_status_reports_missing_file_as_drift(self, tmp_path):
         svc, manifest_root, ph_root = make_service(tmp_path)
         svc.install("claude")
-        # Manually remove a file to simulate drift
         skill = ph_root / "claude" / "skills" / "r2p" / "SKILL.md"
         skill.unlink()
 
-        reports = svc.doctor()
-        assert len(reports) == 1
-        assert reports[0]["status"] == "drift"
-        issues = reports[0]["issues"]
-        assert any("missing_file" in issue for issue in issues)
+        result = svc.status()
+        assert len(result) == 1
+        assert result[0]["status"] == "drift"
+        assert any("missing_file" in issue for issue in result[0]["issues"])
 
-    def test_doctor_reports_version_mismatch(self, tmp_path):
+    def test_status_reports_version_mismatch_as_drift(self, tmp_path):
         svc, manifest_root, _ = make_service(tmp_path)
         svc.install("claude")
 
-        # Tamper with manifest to simulate version drift
         manifest_path = manifest_root / "install" / "claude.yaml"
         data = yaml.safe_load(manifest_path.read_text())
         data["r2p_version"] = "v0-old"
         manifest_path.write_text(yaml.dump(data, default_flow_style=False, sort_keys=True))
 
-        reports = svc.doctor()
-        assert len(reports) == 1
-        assert reports[0]["status"] == "drift"
-        issues = reports[0]["issues"]
-        assert any("version_mismatch" in issue for issue in issues)
+        result = svc.status()
+        assert len(result) == 1
+        assert result[0]["status"] == "drift"
+        assert any("version_mismatch" in issue for issue in result[0]["issues"])
 
-    def test_doctor_returns_empty_when_nothing_installed(self, tmp_path):
+    def test_status_reports_invalid_on_malformed_manifest(self, tmp_path):
+        svc, manifest_root, _ = make_service(tmp_path)
+        svc.install("claude")
+
+        # A partial/truncated write can still parse but be wrong-shaped.
+        manifest_path = manifest_root / "install" / "claude.yaml"
+        manifest_path.write_text('{"platform": "claude"}')
+
+        result = svc.status()
+        assert len(result) == 1
+        assert result[0]["status"] == "invalid"
+        assert result[0]["issues"]
+
+    def test_status_reports_invalid_on_unparseable_manifest(self, tmp_path):
+        svc, manifest_root, _ = make_service(tmp_path)
+        svc.install("claude")
+
+        manifest_path = manifest_root / "install" / "claude.yaml"
+        manifest_path.write_text(": : not valid : :\n\tbad")
+
+        result = svc.status()
+        assert len(result) == 1
+        assert result[0]["status"] == "invalid"
+
+    def test_status_returns_empty_when_nothing_installed(self, tmp_path):
         svc, _, _ = make_service(tmp_path)
-        reports = svc.doctor()
-        assert reports == []
+        assert svc.status() == []
 
     # -----------------------------------------------------------------------
     # codex and gemini platforms
@@ -541,7 +552,7 @@ class TestStaleWrapperCleanup:
         seed_stale_wrapper_in_manifests(manifest_root, stale, platforms=("claude", "codex"))
 
         # Reinstall should deterministically remove the stale wrapper and manifest refs.
-        svc.install("claude", confirm=True)
+        svc.install("claude")
         assert not stale.exists(), "stale r2p-adapt wrapper must be removed on upgrade"
         assert_no_manifest_references(manifest_root, stale)
 
@@ -670,7 +681,7 @@ class TestStaleWrapperCleanup:
         unmanaged.write_text("#!/usr/bin/env bash\n", encoding="utf-8")
         seed_stale_wrapper_in_manifests(manifest_root, stale, platforms=("claude", "codex"))
 
-        svc.install("claude", confirm=True)
+        svc.install("claude")
         assert not stale.exists(), "managed stale wrapper should be removed"
         assert unmanaged.exists(), "unmanaged r2p-* files in bin must be preserved"
         assert_no_manifest_references(manifest_root, stale)

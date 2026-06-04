@@ -36,7 +36,7 @@
 | `tools/workflow_cli/output.py` | Exit code constants, format_success/error/gate_result, is_json_mode |
 | `tools/workflow_cli/cli.py` | argparse router: run/tier/gate/status/stage command groups |
 | `tools/workflow_cli/agent_shortcuts.py` | r2p-* shortcut surface: start/continue/status/switch/reopen |
-| `tools/workflow_cli/install.py` | InstallService: install/uninstall/installed/doctor |
+| `tools/workflow_cli/install.py` | InstallService: install/uninstall/status |
 | `tools/workflow_cli/install_cli.py` | r2p lifecycle binary (delegates to InstallService) |
 | `tools/workflow_cli/agent_templates/` | Install templates for claude/codex/gemini |
 | `.claude/skills/req-to-plan.md` | Dev-view skill for contributors (this project) |

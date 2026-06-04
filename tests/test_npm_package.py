@@ -45,7 +45,7 @@ def test_npm_bin_can_call_lifecycle_cli_version():
     assert result.stdout.strip() == R2P_VERSION
 
 
-def test_lifecycle_cli_doctor_does_not_require_site_packages(tmp_path: Path):
+def test_lifecycle_cli_status_does_not_require_site_packages(tmp_path: Path):
     env = os.environ.copy()
     env["HOME"] = str(tmp_path)
     env["PYTHONPATH"] = str(REPO_ROOT)
@@ -56,7 +56,7 @@ def test_lifecycle_cli_doctor_does_not_require_site_packages(tmp_path: Path):
             "-S",
             "-m",
             "tools.workflow_cli.install_cli",
-            "doctor",
+            "status",
         ],
         cwd=REPO_ROOT,
         env=env,
@@ -66,4 +66,4 @@ def test_lifecycle_cli_doctor_does_not_require_site_packages(tmp_path: Path):
     )
 
     assert result.returncode == 0, result.stderr
-    assert result.stdout.strip() == "doctor: no platforms installed"
+    assert result.stdout.strip() == "status: no platforms installed"
