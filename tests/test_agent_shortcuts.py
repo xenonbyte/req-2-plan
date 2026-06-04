@@ -227,6 +227,18 @@ class TestCmdSwitch:
             base = Path(tmp)
             _invoke(["switch", "--work-id", "WF-20260527-nonexistent"], base, expect_exit=7)
 
+    def test_rejects_path_traversal_work_id_before_writing_pointer(self, capsys):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            outside = base / "outside"
+            _make_run(outside, "WF-20260527-outside")
+            (base / ".req-to-plan").mkdir()
+
+            _invoke(["switch", "--work-id", "../outside/.req-to-plan/WF-20260527-outside"], base, expect_exit=2)
+
+            assert read_active_pointer(base) is None
+            assert "invalid_work_id" in capsys.readouterr().out
+
 
 # ---------------------------------------------------------------------------
 # TestCmdStart
@@ -370,6 +382,24 @@ class TestCmdContinue:
             _invoke(["continue"], base, expect_exit=0)
             out = capsys.readouterr().out
             assert "tier_not_locked" in out
+
+    def test_rejects_invalid_pointer_work_id_before_loading_run(self, capsys):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            outside = base / "outside"
+            _make_run(outside, "WF-20260527-outside")
+            pointer_path = base / ".req-to-plan" / ".workflow-active"
+            pointer_path.parent.mkdir(parents=True)
+            pointer_path.write_text(
+                "selected_work_id: ../outside/.req-to-plan/WF-20260527-outside\n",
+                encoding="utf-8",
+            )
+
+            _invoke(["continue"], base, expect_exit=2)
+
+            out = capsys.readouterr().out
+            assert "invalid_work_id" in out
+            assert "tier_not_locked" not in out
 
 
 # ---------------------------------------------------------------------------

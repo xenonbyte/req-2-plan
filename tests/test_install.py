@@ -291,6 +291,273 @@ class TestInstallService:
         assert skill_dest.exists(), "restored file should exist"
         assert skill_dest.read_text() == "original content", "content should be restored"
 
+    def test_uninstall_rejects_manifest_installed_path_outside_managed_roots(self, tmp_path):
+        svc, manifest_root, _ = make_service(tmp_path)
+        svc.install("claude")
+        victim = tmp_path / "victim.txt"
+        victim.write_text("do not delete", encoding="utf-8")
+
+        from tools.workflow_cli.install import _dump_manifest, _load_manifest
+
+        manifest_path = manifest_root / "install" / "claude.yaml"
+        manifest = _load_manifest(manifest_path)
+        manifest["installed_paths"].append(str(victim))
+        manifest_path.write_text(_dump_manifest(manifest), encoding="utf-8")
+
+        with pytest.raises(ValueError, match="unsafe_manifest"):
+            svc.uninstall("claude")
+
+        assert victim.exists()
+        assert victim.read_text(encoding="utf-8") == "do not delete"
+
+    def test_uninstall_rejects_manifest_target_matching_symlinked_managed_path(self, tmp_path):
+        svc, manifest_root, _ = make_service(tmp_path)
+        svc.install("claude")
+        managed_target = manifest_root / "bin" / "r2p-start"
+        managed_target.unlink()
+        victim = tmp_path / "victim.txt"
+        victim.write_text("do not delete", encoding="utf-8")
+        managed_target.symlink_to(victim)
+
+        from tools.workflow_cli.install import _dump_manifest, _load_manifest
+
+        manifest_path = manifest_root / "install" / "claude.yaml"
+        manifest = _load_manifest(manifest_path)
+        manifest["installed_paths"] = [
+            path for path in manifest["installed_paths"] if path != str(managed_target)
+        ]
+        manifest["installed_paths"].append(str(victim))
+        manifest_path.write_text(_dump_manifest(manifest), encoding="utf-8")
+
+        with pytest.raises(ValueError, match="unsafe_manifest"):
+            svc.uninstall("claude")
+
+        assert victim.exists()
+        assert victim.read_text(encoding="utf-8") == "do not delete"
+
+    def test_uninstall_rejects_manifest_backup_source_outside_backup_dir(self, tmp_path):
+        svc, manifest_root, _ = make_service(tmp_path)
+        svc.install("claude")
+        malicious_backup = tmp_path / "outside.bak"
+        malicious_backup.write_text("malicious restore", encoding="utf-8")
+
+        from tools.workflow_cli.install import _dump_manifest, _load_manifest
+
+        manifest_path = manifest_root / "install" / "claude.yaml"
+        manifest = _load_manifest(manifest_path)
+        target = manifest["installed_paths"][0]
+        manifest.setdefault("backups", []).append(
+            {"target": target, "backup": str(malicious_backup)}
+        )
+        manifest_path.write_text(_dump_manifest(manifest), encoding="utf-8")
+
+        with pytest.raises(ValueError, match="unsafe_manifest"):
+            svc.uninstall("claude")
+
+        assert malicious_backup.exists()
+
+    def test_uninstall_rejects_symlinked_backup_directory(self, tmp_path):
+        svc, manifest_root, _ = make_service(tmp_path)
+        svc.install("claude")
+        backup_root = manifest_root / "install" / "backups"
+        backup_root.mkdir(parents=True, exist_ok=True)
+        backup_dir = backup_root / "claude"
+        if backup_dir.exists():
+            backup_dir.rmdir()
+        outside_backups = tmp_path / "outside-backups"
+        outside_backups.mkdir()
+        backup_dir.symlink_to(outside_backups, target_is_directory=True)
+        malicious_backup = backup_dir / "outside.bak"
+        malicious_backup.write_text("malicious restore", encoding="utf-8")
+
+        from tools.workflow_cli.install import _dump_manifest, _load_manifest
+
+        manifest_path = manifest_root / "install" / "claude.yaml"
+        manifest = _load_manifest(manifest_path)
+        target = manifest["installed_paths"][0]
+        manifest.setdefault("backups", []).append(
+            {"target": target, "backup": str(malicious_backup)}
+        )
+        manifest_path.write_text(_dump_manifest(manifest), encoding="utf-8")
+
+        with pytest.raises(ValueError, match="unsafe_manifest"):
+            svc.uninstall("claude")
+
+        assert (outside_backups / "outside.bak").exists()
+
+    def test_uninstall_rejects_backup_path_with_symlink_then_parent_ref(self, tmp_path):
+        svc, manifest_root, _ = make_service(tmp_path)
+        svc.install("claude")
+        backup_dir = manifest_root / "install" / "backups" / "claude"
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        outside_parent = tmp_path / "outside-parent"
+        outside_child = outside_parent / "child"
+        outside_child.mkdir(parents=True)
+        symlink = backup_dir / "link"
+        symlink.symlink_to(outside_child, target_is_directory=True)
+        victim = outside_parent / "victim.bak"
+        victim.write_text("malicious restore", encoding="utf-8")
+        malicious_backup = backup_dir / "link" / ".." / "victim.bak"
+
+        from tools.workflow_cli.install import _dump_manifest, _load_manifest
+
+        manifest_path = manifest_root / "install" / "claude.yaml"
+        manifest = _load_manifest(manifest_path)
+        target = manifest["installed_paths"][0]
+        manifest.setdefault("backups", []).append(
+            {"target": target, "backup": str(malicious_backup)}
+        )
+        manifest_path.write_text(_dump_manifest(manifest), encoding="utf-8")
+
+        with pytest.raises(ValueError, match="unsafe_manifest"):
+            svc.uninstall("claude")
+
+        assert victim.exists()
+        assert victim.read_text(encoding="utf-8") == "malicious restore"
+
+    def test_validate_backup_path_rejects_symlinked_manifest_root(self, tmp_path):
+        actual_manifest_root = tmp_path / "actual-manifest"
+        actual_manifest_root.mkdir()
+        manifest_root = tmp_path / "manifest-link"
+        manifest_root.symlink_to(actual_manifest_root, target_is_directory=True)
+        ph_root = tmp_path / "platforms"
+        svc = InstallService(
+            repo_root=REPO_ROOT,
+            manifest_root=manifest_root,
+            platform_homes={
+                "claude": ph_root / "claude",
+                "codex": ph_root / "codex",
+                "gemini": ph_root / "gemini",
+            },
+        )
+        backup_dir = manifest_root / "install" / "backups" / "claude"
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        backup = backup_dir / "r2p-start.bak"
+        backup.write_text("malicious restore", encoding="utf-8")
+
+        with pytest.raises(ValueError, match="unsafe_manifest"):
+            svc._validate_backup_path("claude", str(backup), field="backups[0].backup")
+
+        assert backup.exists()
+
+    def test_uninstall_tolerates_symlinked_platform_home(self, tmp_path):
+        # A user may symlink ~/.claude via a dotfile manager (stow/chezmoi).
+        # The managed install/uninstall must still work through that symlink —
+        # the platform home is an operator-trusted root, not an injected symlink.
+        real_home = tmp_path / "real-claude"
+        real_home.mkdir()
+        link_home = tmp_path / "link-claude"
+        link_home.symlink_to(real_home, target_is_directory=True)
+        ph_root = tmp_path / "platforms"
+        svc = InstallService(
+            repo_root=REPO_ROOT,
+            manifest_root=tmp_path / "manifest",
+            platform_homes={
+                "claude": link_home,
+                "codex": ph_root / "codex",
+                "gemini": ph_root / "gemini",
+            },
+        )
+        svc.install("claude")
+        skill = real_home / "skills" / "r2p" / "SKILL.md"
+        assert skill.exists()
+
+        result = svc.uninstall("claude")
+
+        assert not skill.exists()
+        assert any("SKILL.md" in p for p in result["removed"])
+
+    def test_uninstall_still_rejects_symlink_below_platform_home(self, tmp_path):
+        # Trusting the platform home itself must not extend to symlinks the
+        # attacker injects *inside* it: an intermediate managed dir swapped for
+        # a symlink would let a managed target escape, so it stays rejected.
+        svc, manifest_root, ph_root = make_service(tmp_path)
+        svc.install("claude")
+        real_skills = ph_root / "claude" / "skills"
+        escaped = tmp_path / "escaped-skills"
+        shutil.move(str(real_skills), str(escaped))
+        real_skills.symlink_to(escaped, target_is_directory=True)
+
+        with pytest.raises(ValueError, match="unsafe_manifest"):
+            svc.uninstall("claude")
+
+    def test_uninstall_rejects_manifest_backup_target_outside_managed_roots(self, tmp_path):
+        svc, manifest_root, _ = make_service(tmp_path)
+        svc.install("claude")
+        victim = tmp_path / "victim.txt"
+        victim.write_text("do not overwrite", encoding="utf-8")
+        backup_dir = manifest_root / "install" / "backups" / "claude"
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        backup = backup_dir / "victim.bak"
+        backup.write_text("malicious restore", encoding="utf-8")
+
+        from tools.workflow_cli.install import _dump_manifest, _load_manifest
+
+        manifest_path = manifest_root / "install" / "claude.yaml"
+        manifest = _load_manifest(manifest_path)
+        manifest.setdefault("backups", []).append(
+            {"target": str(victim), "backup": str(backup)}
+        )
+        manifest_path.write_text(_dump_manifest(manifest), encoding="utf-8")
+
+        with pytest.raises(ValueError, match="unsafe_manifest"):
+            svc.uninstall("claude")
+
+        assert victim.read_text(encoding="utf-8") == "do not overwrite"
+
+    @pytest.mark.parametrize(
+        ("platform", "obsolete_parts"),
+        [
+            ("claude", ("commands", "r2p-adapt.md")),
+            ("codex", ("skills", "r2p-adapt", "SKILL.md")),
+            ("gemini", ("commands", "r2p-adapt.toml")),
+        ],
+    )
+    def test_uninstall_removes_known_obsolete_platform_adapt_targets(
+        self, tmp_path, platform, obsolete_parts
+    ):
+        svc, manifest_root, ph_root = make_service(tmp_path)
+        svc.install(platform)
+        obsolete_target = (ph_root / platform).joinpath(*obsolete_parts)
+        obsolete_target.parent.mkdir(parents=True, exist_ok=True)
+        obsolete_target.write_text("old adapt command", encoding="utf-8")
+
+        from tools.workflow_cli.install import _dump_manifest, _load_manifest
+
+        manifest_path = manifest_root / "install" / f"{platform}.yaml"
+        manifest = _load_manifest(manifest_path)
+        manifest["installed_paths"].append(str(obsolete_target))
+        manifest_path.write_text(_dump_manifest(manifest), encoding="utf-8")
+
+        result = svc.uninstall(platform)
+
+        assert str(obsolete_target) in result["removed"]
+        assert not obsolete_target.exists()
+
+    def test_install_preserves_other_manifest_referenced_unmanaged_bin_r2p_file(self, tmp_path):
+        svc, manifest_root, _ = make_service(tmp_path)
+        svc.install("claude")
+        unmanaged = manifest_root / "bin" / "r2p-local"
+        unmanaged.write_text("user helper\n", encoding="utf-8")
+
+        from tools.workflow_cli.install import _dump_manifest
+
+        manifest_path = manifest_root / "install" / "codex.yaml"
+        manifest = {
+            "backups": [],
+            "installed_at": "2026-06-04T00:00:00+00:00",
+            "installed_paths": [str(unmanaged)],
+            "platform": "codex",
+            "r2p_version": R2P_VERSION,
+            "schema_version": SCHEMA_VERSION,
+        }
+        manifest_path.write_text(_dump_manifest(manifest), encoding="utf-8")
+
+        svc.install("gemini")
+
+        assert unmanaged.exists()
+        assert unmanaged.read_text(encoding="utf-8") == "user helper\n"
+
     def test_uninstall_fails_when_no_manifest(self, tmp_path):
         svc, _, _ = make_service(tmp_path)
         with pytest.raises(FileNotFoundError):

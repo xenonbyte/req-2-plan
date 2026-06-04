@@ -5,6 +5,7 @@ Supports: claude, codex, gemini
 """
 from __future__ import annotations
 
+import os
 import json
 import hashlib
 import shutil
@@ -28,6 +29,14 @@ DEFAULT_PLATFORM_HOMES = {
     "claude": Path.home() / ".claude",
     "codex": Path.home() / ".codex",
     "gemini": Path.home() / ".gemini",
+}
+
+KNOWN_OBSOLETE_SHARED_WRAPPERS = frozenset({"r2p-adapt"})
+
+KNOWN_OBSOLETE_PLATFORM_TARGETS = {
+    "claude": (("commands", "r2p-adapt.md"),),
+    "codex": (("skills", "r2p-adapt", "SKILL.md"),),
+    "gemini": (("commands", "r2p-adapt.toml"),),
 }
 
 
@@ -185,6 +194,7 @@ class InstallService:
             )
 
         manifest = _load_manifest(manifest_path)
+        self._validate_manifest_for_uninstall(platform, manifest)
         removed: list[str] = []
         restored: list[str] = []
         restored_targets: set[str] = set()
@@ -345,17 +355,176 @@ class InstallService:
                 return True
         return False
 
+    def _validate_manifest_for_uninstall(self, platform: str, manifest: dict) -> None:
+        shape_issues = _manifest_shape_issues(manifest, platform)
+        if shape_issues:
+            raise ValueError(f"unsafe_manifest: {', '.join(shape_issues)}")
+
+        backups = manifest.get("backups", [])
+        if not isinstance(backups, list):
+            raise ValueError("unsafe_manifest: backups_not_a_list")
+
+        expected_targets = {
+            self._normalize_without_resolving_symlinks(path)
+            for path in self._expected_managed_targets(platform)
+        }
+
+        for path_str in manifest.get("installed_paths", []):
+            self._validate_manifest_target(
+                path_str,
+                expected_targets,
+                field="installed_paths",
+            )
+
+        for index, backup in enumerate(backups):
+            if not isinstance(backup, dict):
+                raise ValueError(f"unsafe_manifest: backups[{index}]_not_a_mapping")
+            target = backup.get("target")
+            backup_path = backup.get("backup")
+            self._validate_manifest_target(
+                target,
+                expected_targets,
+                field=f"backups[{index}].target",
+            )
+            self._validate_backup_path(
+                platform,
+                backup_path,
+                field=f"backups[{index}].backup",
+            )
+
+    def _validate_manifest_target(
+        self,
+        raw_path: Any,
+        expected_targets: set[Path],
+        *,
+        field: str,
+    ) -> Path:
+        if not isinstance(raw_path, str):
+            raise ValueError(f"unsafe_manifest: {field}_not_a_string")
+
+        path = Path(raw_path)
+        if not path.is_absolute():
+            raise ValueError(f"unsafe_manifest: {field}_not_absolute")
+        if ".." in path.parts:
+            raise ValueError(f"unsafe_manifest: {field}_parent_ref")
+        if path.is_symlink():
+            raise ValueError(f"unsafe_manifest: {field}_is_symlink")
+
+        normalized = self._normalize_without_resolving_symlinks(path)
+        if normalized not in expected_targets:
+            raise ValueError(f"unsafe_manifest: {field}_outside_managed_targets")
+        self._reject_symlinked_ancestors(normalized, field=field)
+        return path
+
+    def _validate_backup_path(
+        self,
+        platform: str,
+        raw_path: Any,
+        *,
+        field: str,
+    ) -> Path:
+        if not isinstance(raw_path, str):
+            raise ValueError(f"unsafe_manifest: {field}_not_a_string")
+
+        path = Path(raw_path)
+        if not path.is_absolute():
+            raise ValueError(f"unsafe_manifest: {field}_not_absolute")
+        if ".." in path.parts:
+            raise ValueError(f"unsafe_manifest: {field}_parent_ref")
+        if path.is_symlink():
+            raise ValueError(f"unsafe_manifest: {field}_is_symlink")
+
+        backup_dir = self._normalize_without_resolving_symlinks(
+            self.manifest_root / "install" / "backups" / platform
+        )
+        normalized = self._normalize_without_resolving_symlinks(path)
+        if normalized == backup_dir or not normalized.is_relative_to(backup_dir):
+            raise ValueError(f"unsafe_manifest: {field}_outside_backup_dir")
+        self._reject_symlinked_ancestors(normalized, field=field)
+        return path
+
+    def _normalize_without_resolving_symlinks(self, path: Path) -> Path:
+        return Path(os.path.abspath(path))
+
+    def _managed_scan_boundary(self, normalized_path: Path) -> Path:
+        """Return the trusted ancestor *below* which a symlink is rejected.
+
+        Platform homes (``~/.claude`` …) and the manifest root are operator-
+        configured trusted roots. A user may legitimately symlink a platform
+        home (stow/chezmoi), so symlinks are only rejected *inside* it — the
+        home itself is trusted. The manifest root keeps the stricter boundary
+        (its own parent) so a symlinked manifest root is still rejected,
+        matching the install/backup ownership model.
+        """
+        best_home: Path | None = None
+        for home in self.platform_homes.values():
+            home_norm = self._normalize_without_resolving_symlinks(home)
+            if normalized_path == home_norm or normalized_path.is_relative_to(home_norm):
+                if best_home is None or len(home_norm.parts) > len(best_home.parts):
+                    best_home = home_norm
+        if best_home is not None:
+            return best_home
+        return self._normalize_without_resolving_symlinks(self.manifest_root).parent
+
+    def _reject_symlinked_ancestors(self, normalized_path: Path, *, field: str) -> None:
+        """Reject any symlink among the path's ancestors below its trusted root.
+
+        Only ancestors strictly under the trusted boundary are checked, so a
+        user-symlinked platform home is tolerated while an attacker-injected
+        symlink swapped in for a managed intermediate directory is not.
+        """
+        boundary = self._managed_scan_boundary(normalized_path)
+        try:
+            rel = normalized_path.parent.relative_to(boundary)
+        except ValueError:
+            raise ValueError(f"unsafe_manifest: {field}_outside_managed_root")
+        current = boundary
+        for part in rel.parts:
+            current = current / part
+            if current.is_symlink():
+                raise ValueError(f"unsafe_manifest: {field}_symlinked_ancestor")
+
+    def _expected_managed_targets(self, platform: str) -> set[Path]:
+        if platform not in SUPPORTED_PLATFORMS:
+            raise ValueError(f"unsafe_manifest: unsupported_platform {platform!r}")
+
+        bin_dir = self.manifest_root / "bin"
+        targets = {
+            bin_dir / src.name
+            for src in sorted(self.repo_root.glob("tools/r2p-*"))
+            if src.is_file()
+        }
+        targets.update(bin_dir / name for name in KNOWN_OBSOLETE_SHARED_WRAPPERS)
+
+        template_dir = (
+            self.repo_root / "tools" / "workflow_cli" / "agent_templates" / platform
+        )
+        platform_home = self.platform_homes[platform]
+        for parts in KNOWN_OBSOLETE_PLATFORM_TARGETS.get(platform, ()):
+            targets.add(platform_home.joinpath(*parts))
+
+        if platform == "claude":
+            targets.add(platform_home / "skills" / "r2p" / "SKILL.md")
+            for src in sorted((template_dir / "commands").glob("r2p-*.md")):
+                targets.add(platform_home / "commands" / src.name)
+        elif platform == "codex":
+            for src in sorted((template_dir / "skills").glob("r2p-*/SKILL.md")):
+                targets.add(platform_home / "skills" / src.parent.name / "SKILL.md")
+        elif platform == "gemini":
+            for src in sorted((template_dir / "commands").glob("r2p-*.toml")):
+                targets.add(platform_home / "commands" / src.name)
+
+        return targets
+
     def _cleanup_obsolete_managed_wrappers(
         self, preserve_paths: set[str] | None = None
     ) -> None:
         """Remove managed shared bin/r2p-* wrappers that are no longer part of the
         current template set, across every installed platform manifest.
 
-        Obsolete candidates are discovered only from manifest references (so
-        unmanaged files in bin/ are never touched): every ``installed_paths``
-        entry and every ``backups[*].target`` under ``install/``. A reference is
-        obsolete when it points inside ``bin/``, its filename starts with ``r2p-``,
-        and that filename is not in the current ``tools/r2p-*`` wrapper set.
+        Obsolete candidates are discovered only from valid manifest references
+        to known obsolete shared wrappers. A manifest entry for an arbitrary
+        ``bin/r2p-*`` path is not proof that this installer owns that file.
         """
         preserve_paths = preserve_paths or set()
         current_wrappers = {
@@ -372,15 +541,41 @@ class InstallService:
             manifest = self._load_manifest_for_cleanup(mpath)
             if manifest is None:
                 continue
-            refs = list(manifest.get("installed_paths", []))
-            refs += [str(bk.get("target")) for bk in manifest.get("backups", [])]
+            platform = mpath.stem
+            if platform not in SUPPORTED_PLATFORMS:
+                continue
+            if _manifest_shape_issues(manifest, platform):
+                continue
+            expected_targets = {
+                self._normalize_without_resolving_symlinks(path)
+                for path in self._expected_managed_targets(platform)
+            }
+            installed_refs = manifest.get("installed_paths", [])
+            refs = list(installed_refs) if isinstance(installed_refs, list) else []
+            backups = manifest.get("backups", [])
+            if isinstance(backups, list):
+                refs += [
+                    bk.get("target")
+                    for bk in backups
+                    if isinstance(bk, dict)
+                ]
             for ref in refs:
+                if not isinstance(ref, str):
+                    continue
                 p = Path(ref)
                 if (
                     p.parent == bin_dir
-                    and p.name.startswith("r2p-")
+                    and p.name in KNOWN_OBSOLETE_SHARED_WRAPPERS
                     and p.name not in current_wrappers
                 ):
+                    try:
+                        self._validate_manifest_target(
+                            ref,
+                            expected_targets,
+                            field="obsolete_wrapper",
+                        )
+                    except ValueError:
+                        continue
                     obsolete.add(str(p))
 
         if not obsolete:
@@ -416,12 +611,34 @@ class InstallService:
             manifest = self._load_manifest_for_cleanup(mpath)
             if manifest is None:
                 continue
+            platform = mpath.stem
+            if platform not in SUPPORTED_PLATFORMS:
+                continue
+            expected_targets = {
+                self._normalize_without_resolving_symlinks(path)
+                for path in self._expected_managed_targets(platform)
+            }
             installed_at = str(manifest.get("installed_at", ""))
             for index, bk in enumerate(manifest.get("backups", [])):
+                if not isinstance(bk, dict):
+                    continue
                 if str(bk.get("target")) != path_str:
                     continue
                 backup = bk.get("backup")
                 if not backup:
+                    continue
+                try:
+                    self._validate_manifest_target(
+                        bk.get("target"),
+                        expected_targets,
+                        field="backups.target",
+                    )
+                    self._validate_backup_path(
+                        platform,
+                        backup,
+                        field="backups.backup",
+                    )
+                except ValueError:
                     continue
                 backup_path = Path(backup)
                 if not backup_path.is_file():

@@ -463,6 +463,28 @@ class TestStatusRun:
                 main(["--base-path", str(tmp), "status-run", "--work-id", "WF-20260527-nothere"])
             assert exc.value.code != 0
 
+    def test_rejects_path_traversal_work_id_before_loading(self, capsys):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            outside = base / "outside"
+            outside.mkdir()
+            (outside / "run.md").write_text(
+                "# Workflow Run: WF-20260527-outside\n\n"
+                "## Status\nactive_stage_draft\n\n"
+                "## Current Stage\nraw_requirement\n\n"
+                "## r2p Version\nv1\n",
+                encoding="utf-8",
+            )
+
+            with pytest.raises(SystemExit) as exc:
+                main([
+                    "--base-path", str(base),
+                    "status-run", "--work-id", "../outside",
+                ])
+
+            assert exc.value.code == 2
+            assert "WF-20260527-outside" not in capsys.readouterr().out
+
 
 # ---------------------------------------------------------------------------
 # status-next
@@ -628,6 +650,24 @@ class TestRunReopen:
 
             assert (Path(tmp) / ".req-to-plan" / f"{source}-r1").exists()
             assert (Path(tmp) / ".req-to-plan" / f"{source}-r2").exists()
+
+    def test_rejects_closed_as_target_stage(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source = "WF-20260527-test"
+            invoke(["run-start", "--work-id", source, "--requirement", "foo"], base_path=tmp)
+            record = load_record(tmp, source)
+            record.status = RunStatus.CLOSED_AT_PLAN_CHECKPOINT
+            record.current_stage = Stage.CLOSED
+            record.approved_checkpoints = [plan_checkpoint()]
+            save_record(tmp, record)
+
+            invoke(
+                ["run-reopen", "--from", source, "--stage", "closed", "--reason", "fix gap"],
+                base_path=tmp,
+                expect_exit=2,
+            )
+
+            assert not (Path(tmp) / ".req-to-plan" / f"{source}-r1").exists()
 
 
 # ---------------------------------------------------------------------------

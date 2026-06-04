@@ -65,7 +65,8 @@ from tools.workflow_cli.tier import estimate_tier, scan_keywords
 
 def _get_run_dir(work_id: str, base_path: Path | None = None) -> Path:
     root = base_path or Path.cwd()
-    return root / ".req-to-plan" / work_id
+    valid_work_id = _validate_work_id(str(work_id))
+    return root / ".req-to-plan" / str(valid_work_id)
 
 
 def _load_run(work_id: str, base_path: Path | None = None):
@@ -99,6 +100,21 @@ def _parse_stage(raw: str) -> Stage:
             format_error(f"Unknown stage {raw!r}. Valid: {valid}", exit_code=EXIT_CLI_ERR),
             EXIT_CLI_ERR,
         )
+
+
+def _parse_reopen_stage(raw: str) -> Stage:
+    """Parse a stage that can be used as the active target of a reopened run."""
+    stage = _parse_stage(raw)
+    if stage not in STAGE_ORDER:
+        valid = [s.value for s in STAGE_ORDER]
+        print_and_exit(
+            format_error(
+                f"Stage {raw!r} cannot be reopened into. Valid: {valid}",
+                exit_code=EXIT_CLI_ERR,
+            ),
+            EXIT_CLI_ERR,
+        )
+    return stage
 
 
 def _parse_tier_base(raw: str) -> TierBase:
@@ -336,8 +352,8 @@ def _cmd_run_close(args):
 
 
 def _cmd_run_reopen(args):
-    source_id = args.from_id
-    target_stage = _parse_stage(args.stage)
+    source_id = str(_validate_work_id(args.from_id))
+    target_stage = _parse_reopen_stage(args.stage)
 
     # Load source run
     source_dir = _get_run_dir(source_id, args.base_path)

@@ -14,7 +14,7 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-from tools.workflow_cli.models import RunStatus
+from tools.workflow_cli.models import RunStatus, WorkId
 from tools.workflow_cli.output import EXIT_CONFLICT
 
 ACTIVE_POINTER_FILE = ".workflow-active"
@@ -42,6 +42,7 @@ def read_active_pointer(base_path: Path) -> dict | None:
 
 
 def write_active_pointer(base_path: Path, work_id: str, reason: str = "workflow_start") -> None:
+    work_id = _validate_work_id(work_id)
     path = _pointer_path(base_path)
     path.parent.mkdir(parents=True, exist_ok=True)
     run_rel = f".req-to-plan/{work_id}/run.md"
@@ -53,6 +54,18 @@ def write_active_pointer(base_path: Path, work_id: str, reason: str = "workflow_
         f"reason: {reason}\n"
     )
     path.write_text(content, encoding="utf-8")
+
+
+def _validate_work_id(raw: str) -> str:
+    try:
+        return str(WorkId(raw))
+    except ValueError as exc:
+        print(
+            "blocked: invalid_work_id\n"
+            f"work_id: {raw}\n"
+            f"reason: {exc}\n"
+        )
+        sys.exit(2)
 
 
 # ---------------------------------------------------------------------------
@@ -395,7 +408,7 @@ def _cmd_continue(ns: argparse.Namespace, base_path: Path) -> None:
     if not pointer:
         print("no_selected_run: true\nnext: r2p-status --all\n")
         sys.exit(1)
-    work_id = pointer["selected_work_id"]
+    work_id = _validate_work_id(pointer["selected_work_id"])
     run_path = base_path / ".req-to-plan" / work_id / "run.md"
     if not run_path.exists():
         print(f"blocked: source_run_not_found\nwork_id: {work_id}\n")
@@ -600,13 +613,13 @@ def _cmd_status(ns: argparse.Namespace, base_path: Path) -> None:
         print("no_selected_run: true\nnext: r2p-status --all\n")
         sys.exit(0)
 
-    work_id = pointer["selected_work_id"]
+    work_id = _validate_work_id(pointer["selected_work_id"])
     exit_code = _run_cli(["status-run", "--work-id", work_id], base_path)
     sys.exit(exit_code)
 
 
 def _cmd_switch(ns: argparse.Namespace, base_path: Path) -> None:
-    work_id = ns.work_id
+    work_id = _validate_work_id(ns.work_id)
     run_path = base_path / ".req-to-plan" / work_id / "run.md"
     if not run_path.exists():
         print(f"blocked: source_run_not_found\nwork_id: {work_id}\n")
@@ -617,10 +630,11 @@ def _cmd_switch(ns: argparse.Namespace, base_path: Path) -> None:
 
 
 def _cmd_reopen(ns: argparse.Namespace, base_path: Path) -> None:
+    from_id = _validate_work_id(ns.from_id)
     exit_code = _run_cli(
         [
             "run-reopen",
-            "--from", ns.from_id,
+            "--from", from_id,
             "--stage", ns.stage,
             "--reason", ns.reason,
         ],
@@ -630,9 +644,10 @@ def _cmd_reopen(ns: argparse.Namespace, base_path: Path) -> None:
 
 
 def _cmd_gap_open(ns: argparse.Namespace, base_path: Path) -> None:
+    work_id = _validate_work_id(ns.work_id)
     args = [
         "gap-open",
-        "--work-id", ns.work_id,
+        "--work-id", work_id,
         "--owner-stage", ns.owner_stage,
         "--required-action", ns.required_action,
     ]
@@ -642,16 +657,18 @@ def _cmd_gap_open(ns: argparse.Namespace, base_path: Path) -> None:
 
 
 def _cmd_gap_resolve(ns: argparse.Namespace, base_path: Path) -> None:
-    args = ["gap-resolve", "--work-id", ns.work_id, "--route-id", ns.route_id]
+    work_id = _validate_work_id(ns.work_id)
+    args = ["gap-resolve", "--work-id", work_id, "--route-id", ns.route_id]
     if ns.confirm:
         args.append("--confirm")
     sys.exit(_run_cli(args, base_path))
 
 
 def _cmd_tier_lock(ns: argparse.Namespace, base_path: Path) -> None:
-    run_path = base_path / ".req-to-plan" / ns.work_id / "run.md"
+    work_id = _validate_work_id(ns.work_id)
+    run_path = base_path / ".req-to-plan" / work_id / "run.md"
     if not run_path.exists():
-        print(f"blocked: source_run_not_found\nwork_id: {ns.work_id}\n")
+        print(f"blocked: source_run_not_found\nwork_id: {work_id}\n")
         sys.exit(7)
 
     from tools.workflow_cli.state import RunStateManager
@@ -659,7 +676,7 @@ def _cmd_tier_lock(ns: argparse.Namespace, base_path: Path) -> None:
     if record.status != RunStatus.ACTIVE_STAGE_DRAFT:
         print(
             "blocked: tier_lock_not_allowed\n"
-            f"work_id: {ns.work_id}\n"
+            f"work_id: {work_id}\n"
             f"status: {record.status.value}\n"
             "must_be: active_stage_draft\n"
         )
@@ -667,7 +684,7 @@ def _cmd_tier_lock(ns: argparse.Namespace, base_path: Path) -> None:
 
     args = [
         "tier-lock",
-        "--work-id", ns.work_id,
+        "--work-id", work_id,
         "--base", ns.base,
     ]
     if ns.modifiers:
