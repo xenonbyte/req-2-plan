@@ -674,6 +674,87 @@ class TestContinueDriver:
             assert f"stage-ready --work-id {work_id} --stage design" in out
             assert "stage-update" not in out
 
+    def test_continue_owner_gate_passed_asks_for_gap_resolve(self, capsys):
+        import tempfile
+        from pathlib import Path
+        from tests.test_cli import _seed_plan_approved_run
+        from tools.workflow_cli import agent_shortcuts as A
+        from tools.workflow_cli.cli import main as cli_main
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            work_id, _ = _seed_plan_approved_run(base)
+            A.write_active_pointer(base, work_id)
+
+            for cmd in (
+                [
+                    "--base-path", str(base), "gap-open",
+                    "--work-id", work_id,
+                    "--owner-stage", "design",
+                    "--required-action", "fixed-window burst flaw",
+                ],
+                [
+                    "--base-path", str(base), "stage-update",
+                    "--work-id", work_id,
+                    "--stage", "design",
+                    "--content", "# design v2\n",
+                ],
+                ["--base-path", str(base), "stage-ready", "--work-id", work_id, "--stage", "design"],
+                ["--base-path", str(base), "gate-quality", "--work-id", work_id, "--stage", "design"],
+            ):
+                with pytest.raises(SystemExit) as exc:
+                    cli_main(cmd)
+                assert exc.value.code == 0
+
+            with pytest.raises(SystemExit):
+                A.main(["continue"], base_path=base)
+
+            out = capsys.readouterr().out
+            assert "needs_gap_resolve" in out
+            assert f"gap-resolve --work-id {work_id} --route-id R-1" in out
+            assert "checkpoint-decide" not in out
+
+    def test_continue_owner_checkpoint_review_asks_for_gap_resolve(self, capsys):
+        import tempfile
+        from pathlib import Path
+        from tests.test_cli import _seed_plan_approved_run
+        from tools.workflow_cli import agent_shortcuts as A
+        from tools.workflow_cli.cli import main as cli_main
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            work_id, _ = _seed_plan_approved_run(base)
+            A.write_active_pointer(base, work_id)
+
+            for cmd in (
+                [
+                    "--base-path", str(base), "gap-open",
+                    "--work-id", work_id,
+                    "--owner-stage", "design",
+                    "--required-action", "fixed-window burst flaw",
+                ],
+                [
+                    "--base-path", str(base), "stage-update",
+                    "--work-id", work_id,
+                    "--stage", "design",
+                    "--content", "# design v2\n",
+                ],
+                ["--base-path", str(base), "stage-ready", "--work-id", work_id, "--stage", "design"],
+                ["--base-path", str(base), "gate-quality", "--work-id", work_id, "--stage", "design"],
+                ["--base-path", str(base), "review-checkpoint", "--work-id", work_id, "--stage", "design"],
+            ):
+                with pytest.raises(SystemExit) as exc:
+                    cli_main(cmd)
+                assert exc.value.code == 0
+
+            with pytest.raises(SystemExit):
+                A.main(["continue"], base_path=base)
+
+            out = capsys.readouterr().out
+            assert "needs_gap_resolve" in out
+            assert f"gap-resolve --work-id {work_id} --route-id R-1" in out
+            assert "checkpoint-decide" not in out
+
     def test_continue_downstream_stale_stage_asks_for_stage_update(self, capsys):
         import tempfile
         from pathlib import Path

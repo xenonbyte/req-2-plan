@@ -292,6 +292,30 @@ def _emit_checkpoint_stop(
     )
 
 
+def _open_owner_route(record):
+    return next(
+        (
+            route
+            for route in record.open_routes
+            if route.status == "open" and route.owner_stage == record.current_stage
+        ),
+        None,
+    )
+
+
+def _emit_gap_resolve_stop(base_path: Path, work_id: str, stage: str, route_id: str) -> None:
+    resolve_cmd = _workflow_cli_command(
+        base_path,
+        ["gap-resolve", "--work-id", work_id, "--route-id", route_id],
+    )
+    print(
+        "stop: needs_gap_resolve\n"
+        f"stage: {stage}\n"
+        f"route_id: {route_id}\n"
+        f"next: {resolve_cmd}\n"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Subcommand handlers
 # ---------------------------------------------------------------------------
@@ -402,10 +426,7 @@ def _cmd_continue(ns: argparse.Namespace, base_path: Path) -> None:
                 body = read_artifact(run_path.parent, record.current_stage).strip()
             except FileNotFoundError:
                 body = ""
-            open_owner_route = any(
-                r.owner_stage == record.current_stage and r.status == "open"
-                for r in record.open_routes
-            )
+            open_owner_route = _open_owner_route(record)
             if aa is None or not body:
                 content_file = _prepare_input_file(run_path.parent, stage, "content")
                 content_cmd = _stage_content_command(
@@ -428,7 +449,7 @@ def _cmd_continue(ns: argparse.Namespace, base_path: Path) -> None:
                     "stage-update",
                     content_file,
                 )
-                repair_status = "upstream_gap_open" if open_owner_route else "stale_artifact"
+                repair_status = "upstream_gap_open" if open_owner_route is not None else "stale_artifact"
                 print(f"stop: needs_repair\nstatus: {repair_status}\nstage: {stage}\n"
                       f"content_file: {content_file}\n"
                       f"next: {update_cmd}\n")
@@ -452,13 +473,26 @@ def _cmd_continue(ns: argparse.Namespace, base_path: Path) -> None:
             continue
 
         if s == RunStatus.READY_FOR_CHECKPOINT_REVIEW:
+            route = _open_owner_route(record)
+            if route is not None:
+                _emit_gap_resolve_stop(base_path, work_id, stage, route.route_id)
+                sys.exit(0)
             code = _run_cli(["review-checkpoint", "--work-id", work_id, "--stage", stage], base_path)
             if code != 0:
                 sys.exit(code)
-            _emit_checkpoint_stop(base_path, work_id, stage, manager.load(), run_path.parent)
+            record = manager.load()
+            route = _open_owner_route(record)
+            if route is not None:
+                _emit_gap_resolve_stop(base_path, work_id, stage, route.route_id)
+                sys.exit(0)
+            _emit_checkpoint_stop(base_path, work_id, stage, record, run_path.parent)
             sys.exit(0)
 
         if s == RunStatus.CHECKPOINT_REVIEW:
+            route = _open_owner_route(record)
+            if route is not None:
+                _emit_gap_resolve_stop(base_path, work_id, stage, route.route_id)
+                sys.exit(0)
             _emit_checkpoint_stop(base_path, work_id, stage, record, run_path.parent)
             sys.exit(0)
 
