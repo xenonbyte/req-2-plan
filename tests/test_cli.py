@@ -1982,3 +1982,72 @@ def test_gap_open_rolls_back_mid_stale_write_failure(monkeypatch):
         assert run_md_path.read_text(encoding="utf-8") == run_md_before
         assert spec_path.read_text(encoding="utf-8") == spec_before
         assert plan_path.read_text(encoding="utf-8") == plan_before
+
+
+def test_gap_open_rejects_owner_not_upstream():
+    with tempfile.TemporaryDirectory() as tmp:
+        work_id, _ = _seed_plan_approved_run(tmp)
+        # plan is current; routing to plan (==current) is not strictly upstream
+        invoke(["gap-open", "--work-id", work_id, "--owner-stage", "plan",
+                "--required-action", "x"], base_path=tmp, expect_exit=6)
+
+
+def test_gap_open_rejects_empty_required_action():
+    with tempfile.TemporaryDirectory() as tmp:
+        work_id, _ = _seed_plan_approved_run(tmp)
+        invoke(["gap-open", "--work-id", work_id, "--owner-stage", "design",
+                "--required-action", "   "], base_path=tmp, expect_exit=2)
+
+
+def test_gap_open_rejects_duplicate_open_route():
+    with tempfile.TemporaryDirectory() as tmp:
+        work_id, _ = _seed_plan_approved_run(tmp)
+        rec = load_record(tmp, work_id)
+        rec.open_routes.append(
+            OpenRoute(
+                route_id="R-existing",
+                from_stage=Stage.PLAN,
+                owner_stage=Stage.DESIGN,
+                required_action="already open",
+                status="open",
+            )
+        )
+        save_record(tmp, rec)
+
+        invoke(["gap-open", "--work-id", work_id, "--owner-stage", "design",
+                "--required-action", "y"], base_path=tmp, expect_exit=6)
+
+
+def test_gap_open_rejects_closed_run():
+    with tempfile.TemporaryDirectory() as tmp:
+        work_id, _ = _seed_plan_approved_run(tmp)
+        rec = load_record(tmp, work_id)
+        rec.status = RunStatus.CLOSED_AT_PLAN_CHECKPOINT
+        save_record(tmp, rec)
+
+        invoke(["gap-open", "--work-id", work_id, "--owner-stage", "design",
+                "--required-action", "x"], base_path=tmp, expect_exit=6)
+
+
+def test_gap_open_rejects_unrouteable_current_status():
+    with tempfile.TemporaryDirectory() as tmp:
+        work_id, _ = _seed_plan_approved_run(tmp)
+        rec = load_record(tmp, work_id)
+        rec.status = RunStatus.NEXT_STAGE
+        save_record(tmp, rec)
+
+        invoke(["gap-open", "--work-id", work_id, "--owner-stage", "design",
+                "--required-action", "x"], base_path=tmp, expect_exit=6)
+
+
+def test_gap_open_rejects_invalid_owner_stage():
+    with tempfile.TemporaryDirectory() as tmp:
+        work_id, _ = _seed_plan_approved_run(tmp)
+        invoke(["gap-open", "--work-id", work_id, "--owner-stage", "not-a-stage",
+                "--required-action", "x"], base_path=tmp, expect_exit=2)
+
+
+def test_gap_open_rejects_missing_run():
+    with tempfile.TemporaryDirectory() as tmp:
+        invoke(["gap-open", "--work-id", "WF-20260604-none", "--owner-stage", "design",
+                "--required-action", "x"], base_path=tmp, expect_exit=7)
