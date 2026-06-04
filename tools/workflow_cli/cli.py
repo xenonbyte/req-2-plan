@@ -471,6 +471,7 @@ def _cmd_gap_resolve(args):
     update_resume_context(
         record, last_operation=f"gap_resolve_{args.route_id}",
         next_operation=next_operation, active_item=owner.value,
+        reason=f"owner repaired for {args.route_id}; resume checkpoint approval",
     )
     mgr.save(record)
     print_and_exit(

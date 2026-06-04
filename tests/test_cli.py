@@ -2277,3 +2277,4 @@ def test_status_next_surfaces_gap_route_progress(capsys, monkeypatch):
         assert payload["next_allowed_operation"] == "checkpoint_review"
         assert payload["active_item"] == "design"
         assert "R-1" in payload["resume_reason"]
+        assert "repaired" in payload["resume_reason"]
