@@ -2176,3 +2176,55 @@ def test_stage_advance_rejects_stale_downstream_after_route_resolved():
         rec.status = RunStatus.CHECKPOINT_APPROVED
         save_record(tmp, rec)
         invoke(["stage-advance", "--work-id", work_id], base_path=tmp, expect_exit=6)
+
+
+def test_gap_routing_full_cascade_back_to_plan():
+    with tempfile.TemporaryDirectory() as tmp:
+        work_id, _ = _seed_plan_approved_run(tmp)
+
+        def rework_content(stage_value):
+            if stage_value == "spec":
+                return "# spec v2\n\n## External Documentation Checked\n\nN/A — no external dependencies\n"
+            return f"# {stage_value} v2\n"
+
+        def rework_and_approve(stage_value):
+            invoke(["stage-update", "--work-id", work_id, "--stage", stage_value,
+                    "--content", rework_content(stage_value)], base_path=tmp, expect_exit=0)
+            invoke(["stage-ready", "--work-id", work_id, "--stage", stage_value],
+                   base_path=tmp, expect_exit=0)
+            invoke(["gate-quality", "--work-id", work_id, "--stage", stage_value],
+                   base_path=tmp, expect_exit=0)
+            invoke(["review-checkpoint", "--work-id", work_id, "--stage", stage_value],
+                   base_path=tmp, expect_exit=0)
+            invoke(["checkpoint-decide", "--work-id", work_id, "--stage", stage_value,
+                    "--decision", "approved", "--confirm"], base_path=tmp, expect_exit=0)
+
+        # 1. open gap to design, 2. re-work design, 3. resolve, 4. approve design
+        invoke(["gap-open", "--work-id", work_id, "--owner-stage", "design",
+                "--required-action", "fix"], base_path=tmp, expect_exit=0)
+        invoke(["stage-update", "--work-id", work_id, "--stage", "design",
+                "--content", "# design v2\n"], base_path=tmp, expect_exit=0)
+        invoke(["stage-ready", "--work-id", work_id, "--stage", "design"],
+               base_path=tmp, expect_exit=0)
+        invoke(["gate-quality", "--work-id", work_id, "--stage", "design"],
+               base_path=tmp, expect_exit=0)
+        # gap-resolve must come before review-checkpoint (route must be closed before approval)
+        invoke(["gap-resolve", "--work-id", work_id, "--route-id", "R-1"],
+               base_path=tmp, expect_exit=0)
+        invoke(["review-checkpoint", "--work-id", work_id, "--stage", "design"],
+               base_path=tmp, expect_exit=0)
+        invoke(["checkpoint-decide", "--work-id", work_id, "--stage", "design",
+                "--decision", "approved", "--confirm"], base_path=tmp, expect_exit=0)
+
+        # 5. advance to spec and re-derive; 6. advance to plan and re-derive
+        invoke(["stage-advance", "--work-id", work_id], base_path=tmp, expect_exit=0)
+        invoke(["gate-entry", "--work-id", work_id, "--stage", "spec"], base_path=tmp, expect_exit=0)
+        rework_and_approve("spec")
+        invoke(["stage-advance", "--work-id", work_id], base_path=tmp, expect_exit=0)
+        invoke(["gate-entry", "--work-id", work_id, "--stage", "plan"], base_path=tmp, expect_exit=0)
+        rework_and_approve("plan")
+
+        rec = load_record(tmp, work_id)
+        assert rec.current_stage == Stage.PLAN
+        outstanding = [aa.stage.value for aa in rec.active_artifacts if aa.status == "stale"]
+        assert outstanding == []
