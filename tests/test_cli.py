@@ -3,6 +3,7 @@ Tests for tools/workflow_cli/cli.py — CLI command router.
 """
 from __future__ import annotations
 
+import json
 import tempfile
 import os
 from pathlib import Path
@@ -2228,3 +2229,51 @@ def test_gap_routing_full_cascade_back_to_plan():
         assert rec.current_stage == Stage.PLAN
         outstanding = [aa.stage.value for aa in rec.active_artifacts if aa.status == "stale"]
         assert outstanding == []
+
+
+# ---------------------------------------------------------------------------
+# status-run / status-next gap-route enrichment tests
+# ---------------------------------------------------------------------------
+
+
+def test_status_run_surfaces_routes_and_outstanding_stale(capsys, monkeypatch):
+    with tempfile.TemporaryDirectory() as tmp:
+        work_id, _ = _open_gap_to_design(tmp)
+        monkeypatch.setenv("R2P_JSON", "1")
+        capsys.readouterr()  # flush output from setup commands
+        invoke(["status-run", "--work-id", work_id], base_path=tmp, expect_exit=0)
+        out = capsys.readouterr().out
+        payload = json.loads(out)
+        ids = [r["route_id"] for r in payload["open_routes_detail"]]
+        assert ids == ["R-1"]
+        assert set(payload["outstanding_stale"]) == {"spec", "plan"}
+        assert len(payload["stale_artifacts"]) == 2
+
+
+def test_status_next_surfaces_gap_route_progress(capsys, monkeypatch):
+    with tempfile.TemporaryDirectory() as tmp:
+        work_id, _ = _open_gap_to_design(tmp)
+        monkeypatch.setenv("R2P_JSON", "1")
+
+        capsys.readouterr()
+        invoke(["status-next", "--work-id", work_id], base_path=tmp, expect_exit=0)
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["next_allowed_operation"] == "stage_update"
+        assert payload["active_item"] == "design"
+        assert "R-1" in payload["resume_reason"]
+
+        invoke(["stage-update", "--work-id", work_id, "--stage", "design",
+                "--content", "# design v2\n"], base_path=tmp, expect_exit=0)
+        invoke(["stage-ready", "--work-id", work_id, "--stage", "design"],
+               base_path=tmp, expect_exit=0)
+        invoke(["gate-quality", "--work-id", work_id, "--stage", "design"],
+               base_path=tmp, expect_exit=0)
+        invoke(["gap-resolve", "--work-id", work_id, "--route-id", "R-1"],
+               base_path=tmp, expect_exit=0)
+
+        capsys.readouterr()
+        invoke(["status-next", "--work-id", work_id], base_path=tmp, expect_exit=0)
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["next_allowed_operation"] == "checkpoint_review"
+        assert payload["active_item"] == "design"
+        assert "R-1" in payload["resume_reason"]

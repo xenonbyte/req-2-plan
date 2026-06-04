@@ -920,8 +920,28 @@ def _cmd_gate_quality(args):
 def _cmd_status_run(args):
     record, mgr, run_dir = _load_run(args.work_id, args.base_path)
 
-    # Summarise open routes
-    open_routes = [r.route_id for r in record.open_routes if r.status == "open"]
+    open_route_ids = [r.route_id for r in record.open_routes if r.status == "open"]
+    open_routes_detail = [
+        {
+            "route_id": r.route_id,
+            "from_stage": r.from_stage.value,
+            "owner_stage": r.owner_stage.value,
+            "required_action": r.required_action,
+            "status": r.status,
+        }
+        for r in record.open_routes
+        if r.status == "open"
+    ]
+    stale_artifacts = [
+        {
+            "artifact": s.artifact,
+            "reason": s.reason,
+            "replaced_by": s.replaced_by,
+            "required_action": s.required_action,
+        }
+        for s in record.stale_artifacts
+    ]
+    outstanding_stale = [aa.stage.value for aa in record.active_artifacts if aa.status == "stale"]
 
     print_and_exit(
         format_success(
@@ -932,7 +952,10 @@ def _cmd_status_run(args):
                 "tier_locked": (
                     record.tier_locked.base.value if record.tier_locked else "unlocked"
                 ),
-                "open_routes": open_routes,
+                "open_routes": open_route_ids,
+                "open_routes_detail": open_routes_detail,
+                "stale_artifacts": stale_artifacts,
+                "outstanding_stale": outstanding_stale,
                 "approved_checkpoints": [cp.stage.value for cp in record.approved_checkpoints],
             },
             message="Run status",
@@ -951,6 +974,7 @@ def _cmd_status_next(args):
                 "next_allowed_operation": rc.next_allowed_operation,
                 "active_item": rc.active_item,
                 "last_completed_operation": rc.last_completed_operation,
+                "resume_reason": rc.resume_reason,
             },
             message="Next operation",
         ),
