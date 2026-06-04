@@ -3,7 +3,9 @@ Tests for tools/workflow_cli/agent_shortcuts.py
 """
 from __future__ import annotations
 
+import os
 import shlex
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -20,6 +22,8 @@ from tools.workflow_cli.agent_shortcuts import (
     write_active_pointer,
     main,
 )
+from tools.workflow_cli.cli import main as cli_main
+from tools.workflow_cli.state import RunStateManager
 
 
 def _expected_workflow_cli_prefix(base: Path) -> str:
@@ -851,3 +855,95 @@ class TestContinueDriver:
             out = capsys.readouterr().out
             assert "needs_subagent_review" not in out
             assert "needs_human_approval" in out
+
+
+# ---------------------------------------------------------------------------
+# TestGapShortcuts
+# ---------------------------------------------------------------------------
+
+
+def _seed_via_cli(tmp):
+    from tests.test_cli import _seed_plan_approved_run
+    return _seed_plan_approved_run(tmp)
+
+
+def test_r2p_gap_open_delegates():
+    with tempfile.TemporaryDirectory() as tmp:
+        work_id, _ = _seed_via_cli(tmp)
+        with pytest.raises(SystemExit) as exc:
+            main(
+                ["gap-open", "--work-id", work_id, "--owner-stage", "design",
+                 "--required-action", "fix"],
+                base_path=Path(tmp),
+            )
+        assert exc.value.code == 0
+        rec = RunStateManager(Path(tmp) / ".req-to-plan" / work_id).load()
+        assert any(r.status == "open" and r.owner_stage.value == "design" for r in rec.open_routes)
+
+
+def test_r2p_gap_resolve_delegates():
+    with tempfile.TemporaryDirectory() as tmp:
+        work_id, _ = _seed_via_cli(tmp)
+        with pytest.raises(SystemExit) as exc:
+            main(
+                ["gap-open", "--work-id", work_id, "--owner-stage", "design",
+                 "--required-action", "fix"],
+                base_path=Path(tmp),
+            )
+        assert exc.value.code == 0
+        for cmd in (
+            ["--base-path", tmp, "stage-update", "--work-id", work_id, "--stage", "design", "--content", "# design v2\n"],
+            ["--base-path", tmp, "stage-ready", "--work-id", work_id, "--stage", "design"],
+            ["--base-path", tmp, "gate-quality", "--work-id", work_id, "--stage", "design"],
+        ):
+            with pytest.raises(SystemExit) as exc:
+                cli_main(cmd)
+            assert exc.value.code == 0
+        with pytest.raises(SystemExit) as exc:
+            main(["gap-resolve", "--work-id", work_id, "--route-id", "R-1"], base_path=Path(tmp))
+        assert exc.value.code == 0
+        rec = RunStateManager(Path(tmp) / ".req-to-plan" / work_id).load()
+        assert rec.open_routes[0].status == "repaired"
+
+
+def test_r2p_gap_open_wrapper_executes():
+    wrapper = Path(__file__).resolve().parents[1] / "tools" / "r2p-gap-open"
+    assert wrapper.exists() and os.access(wrapper, os.X_OK)
+    with tempfile.TemporaryDirectory() as tmp:
+        work_id, _ = _seed_via_cli(tmp)
+        result = subprocess.run(
+            [str(wrapper), "--work-id", work_id, "--owner-stage", "design", "--required-action", "fix"],
+            cwd=tmp, text=True, capture_output=True,
+        )
+        assert result.returncode == 0, result.stderr or result.stdout
+        rec = RunStateManager(Path(tmp) / ".req-to-plan" / work_id).load()
+        assert any(r.status == "open" and r.owner_stage.value == "design" for r in rec.open_routes)
+
+
+def test_r2p_gap_resolve_wrapper_executes():
+    gap_open = Path(__file__).resolve().parents[1] / "tools" / "r2p-gap-open"
+    gap_resolve = Path(__file__).resolve().parents[1] / "tools" / "r2p-gap-resolve"
+    assert gap_open.exists() and os.access(gap_open, os.X_OK)
+    assert gap_resolve.exists() and os.access(gap_resolve, os.X_OK)
+    with tempfile.TemporaryDirectory() as tmp:
+        work_id, _ = _seed_via_cli(tmp)
+        r = subprocess.run(
+            [str(gap_open), "--work-id", work_id, "--owner-stage", "design", "--required-action", "fix"],
+            cwd=tmp, text=True, capture_output=True,
+        )
+        assert r.returncode == 0, r.stderr or r.stdout
+        for cmd in (
+            ["--base-path", tmp, "stage-update", "--work-id", work_id, "--stage", "design", "--content", "# design v2\n"],
+            ["--base-path", tmp, "stage-ready", "--work-id", work_id, "--stage", "design"],
+            ["--base-path", tmp, "gate-quality", "--work-id", work_id, "--stage", "design"],
+        ):
+            with pytest.raises(SystemExit) as exc:
+                cli_main(cmd)
+            assert exc.value.code == 0
+        r = subprocess.run(
+            [str(gap_resolve), "--work-id", work_id, "--route-id", "R-1"],
+            cwd=tmp, text=True, capture_output=True,
+        )
+        assert r.returncode == 0, r.stderr or r.stdout
+        rec = RunStateManager(Path(tmp) / ".req-to-plan" / work_id).load()
+        assert rec.open_routes[0].status == "repaired"

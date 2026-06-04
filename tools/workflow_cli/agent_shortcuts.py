@@ -557,6 +557,25 @@ def _cmd_reopen(ns: argparse.Namespace, base_path: Path) -> None:
     sys.exit(exit_code)
 
 
+def _cmd_gap_open(ns: argparse.Namespace, base_path: Path) -> None:
+    args = [
+        "gap-open",
+        "--work-id", ns.work_id,
+        "--owner-stage", ns.owner_stage,
+        "--required-action", ns.required_action,
+    ]
+    if ns.confirm:
+        args.append("--confirm")
+    sys.exit(_run_cli(args, base_path))
+
+
+def _cmd_gap_resolve(ns: argparse.Namespace, base_path: Path) -> None:
+    args = ["gap-resolve", "--work-id", ns.work_id, "--route-id", ns.route_id]
+    if ns.confirm:
+        args.append("--confirm")
+    sys.exit(_run_cli(args, base_path))
+
+
 def _cmd_tier_lock(ns: argparse.Namespace, base_path: Path) -> None:
     run_path = base_path / ".req-to-plan" / ns.work_id / "run.md"
     if not run_path.exists():
@@ -627,6 +646,17 @@ def _build_parser() -> argparse.ArgumentParser:
     p_tier_lock.add_argument("--override-floor", action="store_true")
     p_tier_lock.add_argument("--confirm", action="store_true")
 
+    p_gap_open = sub.add_parser("gap-open")
+    p_gap_open.add_argument("--work-id", dest="work_id", required=True)
+    p_gap_open.add_argument("--owner-stage", dest="owner_stage", required=True)
+    p_gap_open.add_argument("--required-action", dest="required_action", required=True)
+    p_gap_open.add_argument("--confirm", action="store_true")
+
+    p_gap_resolve = sub.add_parser("gap-resolve")
+    p_gap_resolve.add_argument("--work-id", dest="work_id", required=True)
+    p_gap_resolve.add_argument("--route-id", dest="route_id", required=True)
+    p_gap_resolve.add_argument("--confirm", action="store_true")
+
     return parser
 
 
@@ -648,6 +678,8 @@ def main(args: list[str] | None = None, base_path: Path | None = None) -> None:
         "switch": _cmd_switch,
         "reopen": _cmd_reopen,
         "tier-lock": _cmd_tier_lock,
+        "gap-open": _cmd_gap_open,
+        "gap-resolve": _cmd_gap_resolve,
     }
     handlers[ns.subcommand](ns, bp)
     sys.exit(0)
