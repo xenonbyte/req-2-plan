@@ -102,6 +102,8 @@ def _cmd_uninstall(args):
         try:
             result = service.uninstall(platform)
         except FileNotFoundError as exc:
+            if args.platform is None:
+                continue
             print(f"Error: {exc}")
             sys.exit(1)
         print(

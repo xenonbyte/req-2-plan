@@ -1044,6 +1044,31 @@ class TestInstallCli:
         assert not (tmp_path / "manifest" / "install" / "codex.yaml").exists()
         assert not (tmp_path / "manifest" / "install" / "gemini.yaml").exists()
 
+    def test_uninstall_without_platform_removes_only_installed_platforms(self, capsys, tmp_path):
+        from tools.workflow_cli.install_cli import main as install_main
+        from tools.workflow_cli.install import InstallService
+
+        repo_root = Path(__file__).parent.parent
+        svc = InstallService(
+            repo_root=repo_root,
+            manifest_root=tmp_path / "manifest",
+            platform_homes={
+                "claude": tmp_path / "claude",
+                "codex": tmp_path / "codex",
+                "gemini": tmp_path / "gemini",
+            },
+        )
+        svc.install("codex")
+
+        with __import__("unittest.mock", fromlist=["patch"]).patch(
+            "tools.workflow_cli.install_cli._make_service", return_value=svc
+        ):
+            install_main(["uninstall"])
+
+        out = capsys.readouterr().out
+        assert "platform='codex'" in out
+        assert not (tmp_path / "manifest" / "install" / "codex.yaml").exists()
+
     def test_version(self, capsys):
         from tools.workflow_cli.install_cli import main as install_main
         from tools.workflow_cli.version import R2P_VERSION

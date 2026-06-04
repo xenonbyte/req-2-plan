@@ -210,15 +210,9 @@ class InstallService:
                 p.unlink()
                 removed.append(path_str)
 
-        # Reference-count bin dir: on final platform uninstall, drop managed bin
-        # contents before restoring backups so user-owned bin files can be copied
-        # back after cleanup.
-        if not other_platforms_installed:
-            if bin_dir.exists():
-                shutil.rmtree(str(bin_dir))
-
         # Restore user backups (reverse order). Managed wrapper backups are
         # generated r2p files from another platform install, not user originals.
+        discarded_managed_backup_targets: set[str] = set()
         for bk in reversed(manifest.get("backups", [])):
             backup_path = Path(bk["backup"])
             target_path = Path(bk["target"])
@@ -228,11 +222,29 @@ class InstallService:
                     shutil.copy2(str(backup_path), str(target_path))
                     restored.append(str(target_path))
                     restored_targets.add(str(target_path))
+                else:
+                    discarded_managed_backup_targets.add(str(target_path))
                 backup_path.unlink(missing_ok=True)
+
+        if not other_platforms_installed:
+            for path_str in discarded_managed_backup_targets - restored_targets:
+                p = Path(path_str)
+                if p.is_relative_to(bin_dir) and p.exists():
+                    p.unlink()
+                    removed.append(path_str)
 
         # Clean obsolete managed shared wrappers while this manifest can still
         # prove ownership of stale shared bin paths.
         self._cleanup_obsolete_managed_wrappers(preserve_paths=restored_targets)
+
+        # Reference-count bin dir: on final platform uninstall, remove the
+        # directory only when managed path cleanup left it empty. Files not
+        # recorded in the manifest are user-owned and must survive uninstall.
+        if not other_platforms_installed and bin_dir.exists():
+            try:
+                bin_dir.rmdir()
+            except OSError:
+                pass
 
         # Clean up empty backup directory for this platform
         backup_dir = self.manifest_root / "install" / "backups" / platform

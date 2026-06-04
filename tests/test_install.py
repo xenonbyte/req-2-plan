@@ -213,6 +213,17 @@ class TestInstallService:
 
         assert not skill_dest.exists()
 
+    def test_reinstall_preserves_unmanaged_bin_files(self, tmp_path):
+        svc, manifest_root, _ = make_service(tmp_path)
+        svc.install("claude")
+        unmanaged = manifest_root / "bin" / "r2p-local-helper"
+        unmanaged.write_text("user helper\n", encoding="utf-8")
+
+        svc.install("claude")
+
+        assert unmanaged.exists()
+        assert unmanaged.read_text(encoding="utf-8") == "user helper\n"
+
     def test_install_copies_bin_scripts(self, tmp_path):
         svc, manifest_root, _ = make_service(tmp_path)
         svc.install("claude")
