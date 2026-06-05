@@ -68,11 +68,18 @@ existed beforehand.
 ### Quick start
 
 ```bash
-r2p install                       # install all platforms (default)
-r2p-start "Add rate limiting"     # start a workflow run
-r2p-continue                      # advance it stage by stage
-r2p status                        # see what is installed
+r2p install                                   # install all platforms (default)
+r2p-start "Add rate limiting" --repo-path .   # start a run grounded in this repo's facts
+r2p-continue                                  # advance it stage by stage
+r2p status                                    # see what is installed
 ```
+
+Pass `--repo-path .` whenever the requirement targets the current project (use the
+target repo's path for cross-repo work); it generates the Project Context Pack that
+grounds tier estimation and PLAN file-reference checks. If a standard-tier PLAN gate
+later reports a missing or unusable Context Pack, build it mid-run with
+`python3 -m tools.workflow_cli context-build --work-id <id> --repo-path <dir>`
+(there is no standalone `context-build` executable).
 
 ### Lifecycle commands
 

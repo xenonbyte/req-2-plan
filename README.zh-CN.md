@@ -62,11 +62,17 @@ r2p help
 ### Quick start
 
 ```bash
-r2p install                       # 安装全部平台（默认）
-r2p-start "Add rate limiting"     # 启动一次工作流
-r2p-continue                      # 逐阶段推进
-r2p status                        # 查看已安装情况
+r2p install                                   # 安装全部平台（默认）
+r2p-start "Add rate limiting" --repo-path .   # 启动一次以当前仓库事实为锚点的工作流
+r2p-continue                                  # 逐阶段推进
+r2p status                                    # 查看已安装情况
 ```
+
+需求针对当前项目时必传 `--repo-path .`（跨仓库需求传目标仓库路径）；它生成的
+Project Context Pack 是 tier 估算与 PLAN 文件引用校验的真值锚点。若 standard tier
+的 PLAN gate 提示 Context Pack 缺失/不可用，可中途补建：
+`python3 -m tools.workflow_cli context-build --work-id <id> --repo-path <dir>`
+（不存在独立的 `context-build` 可执行文件）。
 
 ### Lifecycle commands
 

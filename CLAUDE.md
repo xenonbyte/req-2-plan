@@ -32,6 +32,13 @@
 | `tools/workflow_cli/artifact.py` | ArtifactManager (produce/update/ready/mark_stale), YAML frontmatter |
 | `tools/workflow_cli/tier.py` | scan_keywords (L1), compute_floor, estimate_tier (L1-L4) |
 | `tools/workflow_cli/tier_keywords.yaml` | Keyword bank: 5 modifiers × zh+en entries |
+| `tools/workflow_cli/repo_baseline.py` | Repo baseline scan: LOC, languages, monorepo/submodule signals |
+| `tools/workflow_cli/context_pack.py` | Project Context Pack v1: deps, test commands, entrypoints, config files, source dirs |
+| `tools/workflow_cli/link_expander.py` | Local relative-link expansion for requirement intake |
+| `tools/workflow_cli/stage_schema.py` | STAGE_SCHEMA required headings per stage × tier; PLAN_TASK_FIELDS |
+| `tools/workflow_cli/stage_templates.py` | Render STAGE_SCHEMA into per-stage/tier seed templates |
+| `tools/workflow_cli/markdown.py` | Fence-aware Markdown helpers: unfenced lines, read-only strip, heading blocks |
+| `tools/workflow_cli/trace.py` | Derived trace model: SPEC consumption, scope/risk closure, scope-out violations |
 | `tools/workflow_cli/gates.py` | check_entry_gate, check_quality_gate, check_forced_subagent_review |
 | `tools/workflow_cli/output.py` | Exit code constants, format_success/error/gate_result, is_json_mode |
 | `tools/workflow_cli/cli.py` | argparse router: run/tier/gate/status/stage command groups |
@@ -68,6 +75,8 @@
 
 - `docs/req-to-plan-design.md` — the authoritative entry doc: background, goals,
   architecture, and the per-stage quality model (enforced gate criteria).
+  Note: `docs/` is local-only (gitignored) except `docs/requirements/`, which is
+  whitelisted and versioned as the authoritative PLAN inputs.
 
 Machine facts (exit codes, statuses, `ALLOWED_TRANSITIONS`, tier tables, command
 and flag names) are owned by code under `tools/workflow_cli/`, not by prose docs.

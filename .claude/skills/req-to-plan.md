@@ -12,21 +12,29 @@ This skill is for contributors working on the req-to-plan implementation itself 
 ```
 tools/workflow_cli/
 ├── models.py          # Core types: RunStatus, Stage, TierBase, TierModifier, TierEstimate,
-│                      # EvidenceBlock, WorkId, STAGE_ORDER, ALLOWED_TRANSITIONS
+│                      # EvidenceBlock, WorkId, STAGE_ORDER, STAGE_ARTIFACT_MAP, ALLOWED_TRANSITIONS
 ├── state.py           # RunStateManager (run.md read/write), state transition validation
 ├── artifact.py        # ArtifactManager (produce/update/ready/mark_stale), YAML frontmatter
 ├── tier.py            # scan_keywords (L1), compute_floor, estimate_tier (L1-L4)
 ├── tier_keywords.yaml # Keyword bank: 5 modifiers × zh+en entries
+├── repo_baseline.py   # Repo baseline scan: LOC, languages, monorepo/submodule signals
+├── context_pack.py    # Project Context Pack v1: deps, test commands, entrypoints, config, source dirs
+├── link_expander.py   # Local relative-link expansion for requirement intake
+├── stage_schema.py    # STAGE_SCHEMA required headings per stage × tier; PLAN_TASK_FIELDS
+├── stage_templates.py # Render STAGE_SCHEMA into per-stage/tier seed templates
+├── markdown.py        # Fence-aware Markdown helpers: unfenced lines, read-only strip, heading blocks
+├── trace.py           # Derived trace model: SPEC consumption, scope/risk closure, scope-out violations
 ├── gates.py           # check_entry_gate, check_quality_gate, check_forced_subagent_review
 ├── output.py          # Exit codes, format_success/error/gate_result, is_json_mode
-├── cli.py             # argparse router: run/tier/gate/status/stage command groups
-├── agent_shortcuts.py # r2p-* shortcut surface: start/continue/status/switch/reopen
-├── install_cli.py     # r2p lifecycle binary stub (full impl: Task 14)
-├── version.py         # R2P_VERSION = "v1"
+├── cli.py             # argparse router: run/tier/gate/status/stage/context command groups
+├── agent_shortcuts.py # r2p-* shortcut surface: start/continue/status/switch/reopen/gap
+├── install.py         # InstallService: install/uninstall/status, manifest safety
+├── install_cli.py     # r2p lifecycle binary (delegates to InstallService)
+├── version.py         # R2P_VERSION single source — do not hardcode its value in docs
 └── agent_templates/   # Install templates (rendered by r2p install)
     ├── claude/        # SKILL.md + commands/r2p-*.md
-    ├── codex/         # AGENTS.md
-    └── gemini/        # commands/r2p-*.toml
+    ├── codex/         # skills/r2p-*/SKILL.md (per-command)
+    └── gemini/        # commands/r2p-*.toml (per-command)
 ```
 
 Layer rule: Agent handles semantics and content generation; CLI handles state, structured validation, and file I/O.
