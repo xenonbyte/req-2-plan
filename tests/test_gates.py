@@ -918,6 +918,7 @@ class TestPlanCodeBlockGate(unittest.TestCase):
         )
 
     def _check_plan(self, tmp: str, tier, plan: str):
+        import json
         from pathlib import Path
         from tools.workflow_cli.models import STAGE_ARTIFACT_MAP
         run_dir = Path(tmp)
@@ -925,6 +926,8 @@ class TestPlanCodeBlockGate(unittest.TestCase):
             "## SPEC-AUTH-001 auth\n", encoding="utf-8"
         )
         (run_dir / STAGE_ARTIFACT_MAP[self.Stage.PLAN]).write_text(plan, encoding="utf-8")
+        (run_dir / "02-project-context.json").write_text(
+            json.dumps({"repo_root": str(run_dir)}), encoding="utf-8")
         return self.check(run_dir, self.Stage.PLAN, tier, [], plan)
 
     def test_standard_plan_without_code_block_fails(self):
@@ -1005,7 +1008,7 @@ class TestPlanCodeBlockGate(unittest.TestCase):
             "## Tasks\n\n"
             "### PLAN-TASK-001: do thing\n"
             "Spec References: SPEC-AUTH-001\n"
-            "Change Type: modify\n"
+            "Change Type: create\n"
             "TDD Applicable: no\n"
             "Files: docs/generated.md\n"
             "Skeleton:\n"
@@ -1915,6 +1918,184 @@ class TestPlanTaskFields(unittest.TestCase):
             r = self.check(run_dir, self.Stage.PLAN, self.tier, [], plan)
         self.assertFalse(r.passed)
         self.assertTrue(any("new.py" in i and "missing path" in i for i in r.issues))
+
+
+class TestPlanContextPackGate(unittest.TestCase):
+    """R11: standard-tier PLAN requires a usable Context Pack truth anchor."""
+
+    _VALID_PLAN = (
+        "## Tasks\n\n"
+        "### PLAN-TASK-001 wire limiter\n"
+        "Spec References: SPEC-AUTH-001\n"
+        "Change Type: modify\n"
+        "TDD Applicable: no\n"
+        "Files: n/a\n"
+        "Skeleton: inspect current middleware\n"
+        "Steps:\n"
+        "- [ ] update implementation\n"
+        "Verification: pytest\n"
+    )
+
+    def setUp(self):
+        from tools.workflow_cli.gates import check_quality_gate
+        from tools.workflow_cli.models import Stage, TierBase, TierEstimate
+        self.check = check_quality_gate
+        self.Stage = Stage
+        self.TierBase = TierBase
+        self.standard = TierEstimate(base=TierBase.STANDARD, modifiers=frozenset())
+        self.light = TierEstimate(base=TierBase.LIGHT, modifiers=frozenset())
+
+    def _run_dir_with_spec(self, tmp):
+        import json
+        from pathlib import Path
+        from tools.workflow_cli.models import STAGE_ARTIFACT_MAP
+        run_dir = Path(tmp) / "run"
+        run_dir.mkdir()
+        (run_dir / STAGE_ARTIFACT_MAP[self.Stage.SPEC]).write_text(
+            "## SPEC-AUTH-001 login\n", encoding="utf-8")
+        (run_dir / STAGE_ARTIFACT_MAP[self.Stage.PLAN]).write_text(
+            self._VALID_PLAN, encoding="utf-8")
+        return run_dir
+
+    def _assert_pack_issue(self, r):
+        self.assertFalse(r.passed)
+        self.assertTrue(
+            any("python3 -m tools.workflow_cli context-build" in i for i in r.issues),
+            f"expected context-build remediation in issues, got: {r.issues}")
+
+    def test_standard_plan_without_pack_fails_with_remediation(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = self._run_dir_with_spec(tmp)
+            r = self.check(run_dir, self.Stage.PLAN, self.standard, [], self._VALID_PLAN)
+        self._assert_pack_issue(r)
+
+    def test_standard_plan_with_corrupt_pack_json_fails(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = self._run_dir_with_spec(tmp)
+            (run_dir / "02-project-context.json").write_text("{not json", encoding="utf-8")
+            r = self.check(run_dir, self.Stage.PLAN, self.standard, [], self._VALID_PLAN)
+        self._assert_pack_issue(r)
+
+    def test_standard_plan_with_pack_missing_repo_root_fails(self):
+        import json, tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = self._run_dir_with_spec(tmp)
+            (run_dir / "02-project-context.json").write_text(
+                json.dumps({"languages": {}}), encoding="utf-8")
+            r = self.check(run_dir, self.Stage.PLAN, self.standard, [], self._VALID_PLAN)
+        self._assert_pack_issue(r)
+
+    def test_standard_plan_with_pack_array_shape_fails(self):
+        import json, tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = self._run_dir_with_spec(tmp)
+            (run_dir / "02-project-context.json").write_text(
+                json.dumps([{"repo_root": str(run_dir)}]), encoding="utf-8")
+            r = self.check(run_dir, self.Stage.PLAN, self.standard, [], self._VALID_PLAN)
+        self._assert_pack_issue(r)
+
+    def test_standard_plan_with_pack_scalar_shape_fails(self):
+        import json, tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = self._run_dir_with_spec(tmp)
+            (run_dir / "02-project-context.json").write_text(
+                json.dumps("not an object"), encoding="utf-8")
+            r = self.check(run_dir, self.Stage.PLAN, self.standard, [], self._VALID_PLAN)
+        self._assert_pack_issue(r)
+
+    def test_standard_plan_with_nonexistent_repo_root_fails(self):
+        import json, tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = self._run_dir_with_spec(tmp)
+            (run_dir / "02-project-context.json").write_text(
+                json.dumps({"repo_root": str(Path(tmp) / "gone")}), encoding="utf-8")
+            r = self.check(run_dir, self.Stage.PLAN, self.standard, [], self._VALID_PLAN)
+        self._assert_pack_issue(r)
+
+    def test_standard_plan_with_file_repo_root_fails(self):
+        import json, tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = self._run_dir_with_spec(tmp)
+            not_a_dir = Path(tmp) / "afile"
+            not_a_dir.write_text("x", encoding="utf-8")
+            (run_dir / "02-project-context.json").write_text(
+                json.dumps({"repo_root": str(not_a_dir)}), encoding="utf-8")
+            r = self.check(run_dir, self.Stage.PLAN, self.standard, [], self._VALID_PLAN)
+        self._assert_pack_issue(r)
+
+    def test_standard_plan_with_usable_pack_passes(self):
+        import json, tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = self._run_dir_with_spec(tmp)
+            repo = Path(tmp) / "repo"
+            repo.mkdir()
+            (run_dir / "02-project-context.json").write_text(
+                json.dumps({"repo_root": str(repo)}), encoding="utf-8")
+            r = self.check(run_dir, self.Stage.PLAN, self.standard, [], self._VALID_PLAN)
+        self.assertTrue(r.passed, f"unexpected issues: {r.issues}")
+
+    def test_no_file_sentinel_is_case_insensitive_and_per_entry(self):
+        """Bullet 'N/A' entries are ignored; real paths in the same list are still validated."""
+        import json, tempfile
+        from pathlib import Path
+        from tools.workflow_cli.models import STAGE_ARTIFACT_MAP
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = self._run_dir_with_spec(tmp)
+            repo = Path(tmp) / "repo"
+            repo.mkdir()
+            (run_dir / "02-project-context.json").write_text(
+                json.dumps({"repo_root": str(repo)}), encoding="utf-8")
+            plan = (
+                "## Tasks\n\n"
+                "### PLAN-TASK-001 wire limiter\n"
+                "Spec References: SPEC-AUTH-001\n"
+                "Change Type: modify\n"
+                "TDD Applicable: no\n"
+                "Files:\n"
+                "- N/A\n"
+                "- src/ghost.py\n"
+                "Skeleton: inspect current middleware\n"
+                "Steps:\n"
+                "- [ ] update implementation\n"
+                "Verification: pytest\n"
+            )
+            (run_dir / STAGE_ARTIFACT_MAP[self.Stage.PLAN]).write_text(plan, encoding="utf-8")
+            r = self.check(run_dir, self.Stage.PLAN, self.standard, [], plan)
+        self.assertTrue(any("ghost.py" in i for i in r.issues),
+                        f"real path in mixed list must still be validated: {r.issues}")
+        self.assertFalse(any("N/A" in i or "'n/a'" in i for i in r.issues),
+                         f"sentinel entries must not be reported: {r.issues}")
+
+    def test_light_plan_without_pack_passes(self):
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as tmp:
+            content = "## Tasks\n- [ ] do the small thing\n"
+            r = self.check(Path(tmp), self.Stage.PLAN, self.light, [], content)
+        self.assertTrue(r.passed, f"unexpected issues: {r.issues}")
+
+    def test_standard_plan_under_nondefault_base_includes_base_path_remediation(self):
+        import tempfile
+        from pathlib import Path
+        from tools.workflow_cli.models import STAGE_ARTIFACT_MAP
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp) / "base"
+            run_dir = base / ".req-to-plan" / "work-123"
+            run_dir.mkdir(parents=True)
+            (run_dir / STAGE_ARTIFACT_MAP[self.Stage.SPEC]).write_text(
+                "## SPEC-AUTH-001 login\n", encoding="utf-8")
+            (run_dir / STAGE_ARTIFACT_MAP[self.Stage.PLAN]).write_text(
+                self._VALID_PLAN, encoding="utf-8")
+            r = self.check(run_dir, self.Stage.PLAN, self.standard, [], self._VALID_PLAN)
+        self._assert_pack_issue(r)
+        self.assertTrue(
+            any("--base-path" in i and str(base) in i for i in r.issues),
+            f"expected non-default base-path remediation in issues, got: {r.issues}")
 
 
 if __name__ == "__main__":

@@ -764,7 +764,8 @@ class TestStandardTierArtifactStructure:
 
     def _setup_run_through_design(self, invoke_fn, tmp, work_id):
         """Start a standard-tier run and drive it through design (four upstream stages)."""
-        invoke_fn(["run-start", "--work-id", work_id, "--requirement", "Add rate limiting to the API gateway"], base_path=tmp)
+        invoke_fn(["run-start", "--work-id", work_id, "--requirement", "Add rate limiting to the API gateway",
+                   "--repo-path", str(tmp)], base_path=tmp)
         invoke_fn(["tier-lock", "--work-id", work_id, "--base", "standard", "--confirm"], base_path=tmp)
 
         upstream_stages = [

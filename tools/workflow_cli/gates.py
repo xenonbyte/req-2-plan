@@ -342,6 +342,13 @@ def _plan_task_path_part(raw_path: str) -> str:
     return _strip_markdown_path_wrappers(value.split("::")[0])
 
 
+_NO_FILE_SENTINELS = frozenset({"n/a"})
+
+
+def _is_no_file_sentinel(path_part: str) -> bool:
+    return path_part.strip().lower() in _NO_FILE_SENTINELS
+
+
 def _plan_task_file_paths(files_field: str) -> list[str]:
     paths: list[str] = []
     lines = [line for line, _, _ in unfenced_markdown_lines(files_field)]
@@ -352,7 +359,7 @@ def _plan_task_file_paths(files_field: str) -> list[str]:
     if first:
         raw_path = first[2:].strip() if first.startswith(("- ", "* ")) else first
         path_part = _plan_task_path_part(raw_path)
-        if path_part:
+        if path_part and not _is_no_file_sentinel(path_part):
             paths.append(path_part)
 
     for line in lines[1:]:
@@ -360,25 +367,69 @@ def _plan_task_file_paths(files_field: str) -> list[str]:
         if not stripped.startswith(("- ", "* ")):
             continue
         path_part = _plan_task_path_part(stripped[2:])
-        if path_part:
+        if path_part and not _is_no_file_sentinel(path_part):
             paths.append(path_part)
     return paths
+
+
+def _context_pack_repo_root(run_dir: Path) -> Path | None:
+    """Usable Context Pack repo_root, or None when the pack is missing,
+    unreadable, invalid JSON, lacks repo_root, or does not point at an existing directory."""
+    import json
+    pack_json = run_dir / "02-project-context.json"
+    if not pack_json.exists():
+        return None
+    try:
+        decoded = json.loads(pack_json.read_text(encoding="utf-8"))
+    except (ValueError, OSError):
+        return None
+    if not isinstance(decoded, dict):
+        return None
+    raw = decoded.get("repo_root", "")
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    repo_root = Path(raw)
+    if not repo_root.is_dir():
+        return None
+    return repo_root.resolve()
+
+
+def _context_pack_remediation_command(run_dir: Path) -> str:
+    import shlex
+    command = f"python3 -m tools.workflow_cli context-build --work-id {run_dir.name}"
+    if run_dir.parent.name == ".req-to-plan":
+        base_dir = run_dir.parent.parent
+        try:
+            if base_dir.resolve() != Path.cwd().resolve():
+                command += f" --base-path {shlex.quote(str(base_dir))}"
+        except (OSError, RuntimeError):
+            # cwd deleted (OSError) or symlink-loop resolve (RuntimeError)
+            command += " --base-path <base-dir>"
+    return command + " --repo-path <repo-dir>"
+
+
+def _check_plan_context_pack(run_dir: Path) -> list[str]:
+    """R11: standard-tier PLAN must anchor file facts to a usable Context Pack.
+
+    Every no-usable-truth-anchor path blocks loudly; the remediation command
+    is literally executable (run_dir.name is the work-id, see cli._get_run_dir).
+    """
+    if _context_pack_repo_root(run_dir) is not None:
+        return []
+    return [
+        "Standard-tier PLAN requires a usable Project Context Pack: "
+        "02-project-context.json is missing, unreadable, invalid, or its "
+        "repo_root is unavailable. Build it with: "
+        f"{_context_pack_remediation_command(run_dir)}"
+    ]
 
 
 def _check_plan_file_refs(run_dir: Path, content: str) -> list[str]:
     """Hard-check Files paths against the Context Pack repo_root. create-type tasks
     are exempt; the part after '::' (a symbol) is advisory and not checked (no AST pack yet)."""
-    import json
-    pack_json = run_dir / "02-project-context.json"
-    if not pack_json.exists():
-        return []  # no ground truth -> advisory only
-    try:
-        repo_root = Path(json.loads(pack_json.read_text(encoding="utf-8")).get("repo_root", ""))
-    except (ValueError, OSError):
-        return []
-    if not repo_root or not repo_root.exists():
-        return []
-    repo_root = repo_root.resolve()
+    repo_root = _context_pack_repo_root(run_dir)
+    if repo_root is None:
+        return []  # no usable ground truth; standard tier blocks via _check_plan_context_pack
     issues: list[str] = []
     for body in _iter_plan_task_bodies(content):
         skip_missing_path = _normalized_change_type(_task_change_type(body)) == "create"
@@ -737,6 +788,8 @@ def check_quality_gate(
         # Check 5 (PLAN, standard tier): TDD-applicable tasks must carry a code block.
         from tools.workflow_cli.models import TierBase
         if stage == Stage.PLAN and tier.base == TierBase.STANDARD:
+            # R11: a usable Context Pack is the truth anchor for file-ref checks.
+            issues.extend(_check_plan_context_pack(run_dir))
             if not _plan_task_starts(gate_content):
                 issues.append(
                     "PLAN is missing '### PLAN-TASK-*' sections; standard tier requires "
