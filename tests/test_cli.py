@@ -2432,7 +2432,7 @@ def test_gap_routing_full_cascade_back_to_plan():
             if stage_value == "plan":
                 return (
                     "# plan v2\n\n## Tasks\n\n"
-                    "### PLAN-TASK-001 do thing\nSpec References: SPEC-CORE-001\nTDD Applicable: no\n"
+                    "### PLAN-TASK-001 do thing\nSpec References: SPEC-CORE-001\nTDD Applicable: no\nVerification: pytest\n"
                 )
             return f"# {stage_value} v2\n"
 

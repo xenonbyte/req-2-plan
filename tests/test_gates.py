@@ -734,6 +734,7 @@ class TestPlanCodeBlockGate(unittest.TestCase):
             "# PLAN\n\n"
             "## Tasks\n\n"
             "### PLAN-TASK-001: do thing\n"
+            "Spec References: n/a\n"
             "TDD Applicable: yes\n"
             f"Skeleton:\n{skeleton}\n"
             "Steps:\n- [ ] red\n- [ ] green\n"
@@ -834,6 +835,7 @@ class TestPlanCodeBlockGate(unittest.TestCase):
             "# PLAN\n\n"
             "## Tasks\n\n"
             "### PLAN-TASK-001: do thing\n"
+            "Spec References: n/a\n"
             "TDD Applicable: no\n"
             "Skeleton:\n"
             "(prose only)\n"
@@ -1233,6 +1235,40 @@ class TestScopeFreeze(unittest.TestCase):
             r = self.check(Path(tmp), self.Stage.REQUIREMENT_BRIEF, self.tier, [], content)
         self.assertFalse(r.passed)
         self.assertTrue(any("assumption" in i.lower() or "open question" in i.lower() for i in r.issues))
+
+
+class TestPlanTaskFields(unittest.TestCase):
+    def setUp(self):
+        from tools.workflow_cli.gates import check_quality_gate
+        from tools.workflow_cli.models import Stage, TierBase, TierEstimate
+        self.check = check_quality_gate
+        self.Stage = Stage
+        self.tier = TierEstimate(base=TierBase.STANDARD, modifiers=frozenset())
+
+    def _gate(self, plan_body):
+        import tempfile
+        from pathlib import Path
+        from tools.workflow_cli.models import STAGE_ARTIFACT_MAP
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            (run_dir / STAGE_ARTIFACT_MAP[self.Stage.SPEC]).write_text(
+                "## SPEC-AUTH-001 login\n", encoding="utf-8")
+            (run_dir / STAGE_ARTIFACT_MAP[self.Stage.PLAN]).write_text(plan_body, encoding="utf-8")
+            return self.check(run_dir, self.Stage.PLAN, self.tier, [], plan_body)
+
+    def test_task_missing_verification_fails(self):
+        plan = ("## Tasks\n\n### PLAN-TASK-001 do it\n"
+                "Spec References: SPEC-AUTH-001\n")
+        r = self._gate(plan)
+        self.assertFalse(r.passed)
+        self.assertTrue(any("Verification" in i for i in r.issues))
+
+    def test_noncontiguous_numbering_fails(self):
+        plan = ("## Tasks\n\n### PLAN-TASK-001 a\nSpec References: SPEC-AUTH-001\nVerification: pytest\n"
+                "\n### PLAN-TASK-003 c\nSpec References: SPEC-AUTH-001\nVerification: pytest\n")
+        r = self._gate(plan)
+        self.assertFalse(r.passed)
+        self.assertTrue(any("contiguous" in i.lower() or "numbering" in i.lower() for i in r.issues))
 
 
 if __name__ == "__main__":

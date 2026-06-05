@@ -314,6 +314,34 @@ def _plan_task_field_value(task_body: str, field: str) -> str:
     return match.group(1).strip()
 
 
+def _iter_plan_task_bodies(content: str):
+    starts = _plan_task_starts(content)
+    for i, s in enumerate(starts):
+        e = starts[i + 1] if i + 1 < len(starts) else len(content)
+        yield content[s:e]
+
+
+def _check_plan_task_fields(content: str) -> list[str]:
+    issues: list[str] = []
+    numbers: list[int] = []
+    for body in _iter_plan_task_bodies(content):
+        m = re.match(r"###\s+PLAN-TASK-(\d+)", body.lstrip())
+        num = int(m.group(1)) if m else None
+        if num is not None:
+            numbers.append(num)
+        label = f"PLAN-TASK-{num if num is not None else '?'}"
+        if not _plan_task_field_value(body, "Spec References").strip():
+            issues.append(f"{label} is missing a non-empty 'Spec References:' field.")
+        if not _plan_task_field_value(body, "Verification").strip():
+            issues.append(f"{label} is missing a non-empty 'Verification:' field.")
+    if numbers:
+        if len(set(numbers)) != len(numbers):
+            issues.append("PLAN-TASK numbers must be unique.")
+        if sorted(numbers) != list(range(1, len(numbers) + 1)):
+            issues.append("PLAN-TASK numbers must be contiguous starting at 1.")
+    return issues
+
+
 def _has_complete_code_fence(content: str) -> bool:
     fence_char = ""
     fence_len = 0
@@ -554,6 +582,8 @@ def check_quality_gate(
             issues.extend(check_trace_closure(run_dir))
             for sid in scope_out_violations(run_dir):
                 issues.append(f"PLAN references out-of-scope item {sid}; scope overflow (R8).")
+            # R5.1: required fields + contiguous numbering
+            issues.extend(_check_plan_task_fields(artifact_content))
 
         # Check 6 (SPEC): the External Documentation Checked section must be present and non-empty.
         if stage == Stage.SPEC:
