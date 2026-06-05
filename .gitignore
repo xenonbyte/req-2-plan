@@ -18,3 +18,4 @@ venv/
 .pytest_cache
 docs/*
 !docs/requirements/
+!docs/plans/
