@@ -458,10 +458,10 @@ def _check_plan_task_skeleton_placeholders(content: str) -> list[str]:
     issues: list[str] = []
     for body in _iter_plan_task_bodies(content):
         skeleton = _plan_task_field_body(body, "Skeleton")
-        if skeleton.strip() and _FILL_IN_PLACEHOLDER_RE.search(skeleton):
+        if skeleton.strip() and any(pattern.search(skeleton) for pattern in _PLACEHOLDER_PATTERNS):
             issues.append(
                 f"{_plan_task_label(body)} Skeleton contains an unresolved template "
-                "placeholder; replace '<!-- fill in -->' before passing the gate."
+                "placeholder; replace placeholder text before passing the gate."
             )
     return issues
 

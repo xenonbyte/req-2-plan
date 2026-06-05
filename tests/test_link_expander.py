@@ -140,6 +140,17 @@ class TestExpandLinksLocalFiles(unittest.TestCase):
             self.assertIn("sensitive", results[0].error.lower())
             self.assertNotIn("SECRET", results[0].error)
 
+    def test_sensitive_local_directory_is_not_previewed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "credentials" / "context.md"
+            path.parent.mkdir()
+            path.write_text("PASSWORD=SECRET", encoding="utf-8")
+            results = expand_links("See credentials/context.md", base_path=Path(tmp))
+            self.assertEqual(results[0].status, LinkStatus.LOCAL_FOUND)
+            self.assertEqual(results[0].content_preview, "")
+            self.assertIn("sensitive", results[0].error.lower())
+            self.assertNotIn("SECRET", results[0].error)
+
     def test_local_file_missing(self):
         results = expand_links("See ./nonexistent.md", base_path=Path("/tmp"))
         self.assertEqual(len(results), 1)

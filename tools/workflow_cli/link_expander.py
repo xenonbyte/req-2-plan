@@ -67,7 +67,7 @@ def _local_preview_block_reason(path_str: str, candidate: Path, base: Path | Non
     parts = [part for part in relative.parts if part not in ("", ".", "..")]
     if any(part.startswith(".") for part in parts):
         return "Local preview skipped for hidden path."
-    if _SENSITIVE_LOCAL_NAME_RE.search(candidate.name):
+    if any(_SENSITIVE_LOCAL_NAME_RE.search(part) for part in parts):
         return "Local preview skipped for sensitive-looking path."
     if candidate.suffix.lower() not in _PREVIEWABLE_LOCAL_EXTENSIONS:
         return "Local preview skipped for unsupported local document extension."

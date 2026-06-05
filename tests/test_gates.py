@@ -1477,6 +1477,33 @@ class TestPlanTaskFields(unittest.TestCase):
         self.assertFalse(r.passed)
         self.assertTrue(any("PLAN-TASK-001" in i and "Skeleton" in i and "placeholder" in i for i in r.issues))
 
+    def test_skeleton_common_placeholders_inside_fenced_code_fail(self):
+        for placeholder in ("# TODO later", "TBD", "FIXME"):
+            with self.subTest(placeholder=placeholder):
+                plan = (
+                    "## Tasks\n\n"
+                    "### PLAN-TASK-001 a\n"
+                    "Spec References: SPEC-AUTH-001\n"
+                    "Change Type: create\n"
+                    "TDD Applicable: yes\n"
+                    "Files: src/new.py\n"
+                    "Skeleton:\n"
+                    "```python\n"
+                    f"{placeholder}\n"
+                    "```\n"
+                    "Steps:\n"
+                    "- [ ] add implementation\n"
+                    "Verification: pytest\n"
+                )
+                r = self._gate(plan)
+                self.assertFalse(r.passed)
+                self.assertTrue(
+                    any(
+                        "PLAN-TASK-001" in i and "Skeleton" in i and "placeholder" in i
+                        for i in r.issues
+                    )
+                )
+
     def test_spec_reference_must_be_defined_in_spec_artifact(self):
         import tempfile
         from pathlib import Path
