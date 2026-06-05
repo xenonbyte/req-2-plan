@@ -28,7 +28,6 @@ def test_package_json_files_include_runtime_sources():
 
     assert "bin/" in data["files"]
     assert "tools/workflow_cli/**/*.py" in data["files"]
-    assert "docs/*.md" in data["files"]
     assert "requirements.txt" in data["files"]
 
 

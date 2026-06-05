@@ -7,7 +7,6 @@
   },
   "files": [
     "bin/",
-    "docs/*.md",
     "tools/r2p",
     "tools/r2p-*",
     "tools/workflow_cli/**/*.py",
