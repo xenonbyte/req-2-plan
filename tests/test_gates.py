@@ -175,8 +175,19 @@ class TestQualityGate(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             run_dir = Path(tmpdir)
             tier = self._locked_tier()
+            content = (
+                "# Design\n\n"
+                "## Design Summary\ncontent\n\n"
+                "## Current Code Evidence\ncontent\n\n"
+                "## Requirements Coverage\ncontent\n\n"
+                "## Options Considered\ncontent\n\n"
+                "## Chosen Design\ncontent\n\n"
+                "## Rollback\ncontent\n\n"
+                "## Observability\ncontent\n\n"
+                "## SPEC Handoff\ncontent\n"
+            )
             result = self.check_quality_gate(
-                run_dir, self.Stage.DESIGN, tier, [], "# Design\n\nSome valid content here."
+                run_dir, self.Stage.DESIGN, tier, [], content
             )
         self.assertTrue(result.passed)
         self.assertEqual(result.exit_code, 0)
@@ -222,8 +233,16 @@ class TestQualityGate(unittest.TestCase):
             run_dir = Path(tmpdir)
             tier = self._locked_tier()
             content = (
-                "## Design\n\n"
-                "REQ-ACC-001 [ADDRESSED]: scope handled via new auth flow.\n"
+                "# Design\n\n"
+                "## Design Summary\ncontent\n\n"
+                "## Current Code Evidence\ncontent\n\n"
+                "## Requirements Coverage\n"
+                "REQ-ACC-001 [ADDRESSED]: scope handled via new auth flow.\n\n"
+                "## Options Considered\ncontent\n\n"
+                "## Chosen Design\ncontent\n\n"
+                "## Rollback\ncontent\n\n"
+                "## Observability\ncontent\n\n"
+                "## SPEC Handoff\ncontent\n"
             )
             result = self.check_quality_gate(
                 run_dir, self.Stage.DESIGN, tier, [], content
@@ -236,7 +255,18 @@ class TestQualityGate(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             run_dir = Path(tmpdir)
             tier = self._locked_tier()
-            content = "RISK-SEC-002 [DEFERRED]: will address post-MVP.\n"
+            content = (
+                "# Design\n\n"
+                "## Design Summary\ncontent\n\n"
+                "## Current Code Evidence\n"
+                "RISK-SEC-002 [DEFERRED]: will address post-MVP.\n\n"
+                "## Requirements Coverage\ncontent\n\n"
+                "## Options Considered\ncontent\n\n"
+                "## Chosen Design\ncontent\n\n"
+                "## Rollback\ncontent\n\n"
+                "## Observability\ncontent\n\n"
+                "## SPEC Handoff\ncontent\n"
+            )
             result = self.check_quality_gate(
                 run_dir, self.Stage.DESIGN, tier, [], content
             )
@@ -247,7 +277,18 @@ class TestQualityGate(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             run_dir = Path(tmpdir)
             tier = self._locked_tier()
-            content = "DES-UI-003 [OUT-OF-SCOPE]: not relevant to this stage.\n"
+            content = (
+                "# Design\n\n"
+                "## Design Summary\ncontent\n\n"
+                "## Current Code Evidence\n"
+                "DES-UI-003 [OUT-OF-SCOPE]: not relevant to this stage.\n\n"
+                "## Requirements Coverage\ncontent\n\n"
+                "## Options Considered\ncontent\n\n"
+                "## Chosen Design\ncontent\n\n"
+                "## Rollback\ncontent\n\n"
+                "## Observability\ncontent\n\n"
+                "## SPEC Handoff\ncontent\n"
+            )
             result = self.check_quality_gate(
                 run_dir, self.Stage.DESIGN, tier, [], content
             )
@@ -258,7 +299,18 @@ class TestQualityGate(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             run_dir = Path(tmpdir)
             tier = self._locked_tier()
-            content = "SPEC-INT-004 [N/A]: doesn't apply here.\n"
+            content = (
+                "# Design\n\n"
+                "## Design Summary\ncontent\n\n"
+                "## Current Code Evidence\n"
+                "SPEC-INT-004 [N/A]: doesn't apply here.\n\n"
+                "## Requirements Coverage\ncontent\n\n"
+                "## Options Considered\ncontent\n\n"
+                "## Chosen Design\ncontent\n\n"
+                "## Rollback\ncontent\n\n"
+                "## Observability\ncontent\n\n"
+                "## SPEC Handoff\ncontent\n"
+            )
             result = self.check_quality_gate(
                 run_dir, self.Stage.DESIGN, tier, [], content
             )
@@ -269,7 +321,18 @@ class TestQualityGate(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             run_dir = Path(tmpdir)
             tier = self._locked_tier()
-            content = "REQ-FUN-005 [CLOSED]: closed in prior stage.\n"
+            content = (
+                "# Design\n\n"
+                "## Design Summary\ncontent\n\n"
+                "## Current Code Evidence\n"
+                "REQ-FUN-005 [CLOSED]: closed in prior stage.\n\n"
+                "## Requirements Coverage\ncontent\n\n"
+                "## Options Considered\ncontent\n\n"
+                "## Chosen Design\ncontent\n\n"
+                "## Rollback\ncontent\n\n"
+                "## Observability\ncontent\n\n"
+                "## SPEC Handoff\ncontent\n"
+            )
             result = self.check_quality_gate(
                 run_dir, self.Stage.DESIGN, tier, [], content
             )
@@ -299,10 +362,16 @@ class TestQualityGate(unittest.TestCase):
             run_dir = Path(tmpdir)
             tier = self._locked_tier()
             content = (
+                "# SPEC\n\n"
+                "## Behavior Contracts\n"
                 "## REQ-ACC-001 First\nContent A.\n\n"
                 "## REQ-ACC-002 Second\nContent B.\n\n"
+                "## API / Data / Config Contracts\ncontent\n\n"
                 "## External Documentation Checked\n\n"
-                "N/A — no external dependencies\n"
+                "N/A — no external dependencies\n\n"
+                "## Test Matrix\ncontent\n\n"
+                "## Non-goals\ncontent\n\n"
+                "## PLAN Handoff\ncontent\n"
             )
             result = self.check_quality_gate(
                 run_dir, self.Stage.SPEC, tier, [], content
@@ -459,6 +528,36 @@ class TestForcedSubagentReview(unittest.TestCase):
         self.assertEqual(result.exit_code, 0)
 
 
+class TestStageSchemaGate(unittest.TestCase):
+    def setUp(self):
+        from tools.workflow_cli.gates import check_quality_gate
+        from tools.workflow_cli.models import Stage, TierBase, TierEstimate
+        self.check_quality_gate = check_quality_gate
+        self.Stage = Stage
+        self.tier = TierEstimate(base=TierBase.STANDARD, modifiers=frozenset())
+
+    def test_brief_missing_out_of_scope_section_fails(self):
+        import tempfile
+        from pathlib import Path
+        content = "# Requirement Brief\n\n## Goal\nDo X\n\n## In-Scope\nthing\n\n## Acceptance Criteria\npasses\n"
+        with tempfile.TemporaryDirectory() as tmp:
+            result = self.check_quality_gate(Path(tmp), self.Stage.REQUIREMENT_BRIEF, self.tier, [], content)
+        self.assertFalse(result.passed)
+        self.assertTrue(any("Out-of-Scope" in i for i in result.issues))
+
+    def test_brief_with_all_sections_passes_schema(self):
+        import tempfile
+        from pathlib import Path
+        from tools.workflow_cli.stage_schema import required_headings
+        from tools.workflow_cli.models import TierBase
+        body = "# Requirement Brief\n\n" + "\n".join(
+            f"{h}\nreal content here\n" for h in required_headings(self.Stage.REQUIREMENT_BRIEF, TierBase.STANDARD)
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            result = self.check_quality_gate(Path(tmp), self.Stage.REQUIREMENT_BRIEF, self.tier, [], body)
+        self.assertFalse(any("Missing required section" in i for i in result.issues))
+
+
 def test_forced_review_version_aware(tmp_path):
     from tools.workflow_cli.gates import check_forced_subagent_review
     from tools.workflow_cli.models import Stage, TierBase, TierEstimate, TierModifier
@@ -506,6 +605,7 @@ class TestPlanCodeBlockGate(unittest.TestCase):
         )
         return (
             "# PLAN\n\n"
+            "## Tasks\n\n"
             "### PLAN-TASK-001: do thing\n"
             "TDD Applicable: yes\n"
             f"Skeleton:\n{skeleton}\n"
@@ -605,6 +705,7 @@ class TestPlanCodeBlockGate(unittest.TestCase):
         from pathlib import Path
         plan = (
             "# PLAN\n\n"
+            "## Tasks\n\n"
             "### PLAN-TASK-001: do thing\n"
             "TDD Applicable: no\n"
             "Skeleton:\n"
@@ -776,10 +877,16 @@ class TestSpecExternalDocsGate(unittest.TestCase):
         from pathlib import Path
         with tempfile.TemporaryDirectory() as tmp:
             body = (
-                "# SPEC\n\n## External Documentation Checked\n\n"
+                "# SPEC\n\n"
+                "## Behavior Contracts\ncontent\n\n"
+                "## API / Data / Config Contracts\ncontent\n\n"
+                "## External Documentation Checked\n\n"
                 "| dependency | version | check date | conclusion |\n"
                 "| --- | --- | --- | --- |\n"
-                "| pytest | 8.x | 2026-05-31 | Context7 checked |\n"
+                "| pytest | 8.x | 2026-05-31 | Context7 checked |\n\n"
+                "## Test Matrix\ncontent\n\n"
+                "## Non-goals\ncontent\n\n"
+                "## PLAN Handoff\ncontent\n"
             )
             r = self.check(Path(tmp), self.Stage.SPEC, self.tier, [], body)
             self.assertTrue(r.passed)
@@ -817,8 +924,14 @@ class TestSpecExternalDocsGate(unittest.TestCase):
         from pathlib import Path
         with tempfile.TemporaryDirectory() as tmp:
             body = (
-                "# SPEC\n\n## External Documentation Checked\n\n"
-                "N/A — no external dependencies\n"
+                "# SPEC\n\n"
+                "## Behavior Contracts\ncontent\n\n"
+                "## API / Data / Config Contracts\ncontent\n\n"
+                "## External Documentation Checked\n\n"
+                "N/A — no external dependencies\n\n"
+                "## Test Matrix\ncontent\n\n"
+                "## Non-goals\ncontent\n\n"
+                "## PLAN Handoff\ncontent\n"
             )
             r = self.check(Path(tmp), self.Stage.SPEC, self.tier, [], body)
             self.assertTrue(r.passed)

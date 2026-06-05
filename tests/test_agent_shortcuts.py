@@ -26,6 +26,11 @@ from tools.workflow_cli.agent_shortcuts import (
 from tools.workflow_cli.cli import main as cli_main
 from tools.workflow_cli.state import RunStateManager
 
+# Schema-valid DESIGN LIGHT content (required for gate-quality to pass at LIGHT tier).
+_DESIGN_LIGHT_CONTENT = (
+    "# design v2\n\n## Design Summary\ncontent\n## Chosen Design\ncontent\n## SPEC Handoff\ncontent\n"
+)
+
 
 def _expected_workflow_cli_prefix(base: Path) -> str:
     from tools.workflow_cli import agent_shortcuts as A
@@ -690,7 +695,7 @@ class TestContinueDriver:
                     "--base-path", str(base), "stage-update",
                     "--work-id", work_id,
                     "--stage", "design",
-                    "--content", "# design v2\n",
+                    "--content", _DESIGN_LIGHT_CONTENT,
                 ],
             ):
                 with pytest.raises(SystemExit) as exc:
@@ -728,7 +733,7 @@ class TestContinueDriver:
                     "--base-path", str(base), "stage-update",
                     "--work-id", work_id,
                     "--stage", "design",
-                    "--content", "# design v2\n",
+                    "--content", _DESIGN_LIGHT_CONTENT,
                 ],
                 ["--base-path", str(base), "stage-ready", "--work-id", work_id, "--stage", "design"],
                 ["--base-path", str(base), "gate-quality", "--work-id", work_id, "--stage", "design"],
@@ -768,7 +773,7 @@ class TestContinueDriver:
                     "--base-path", str(base), "stage-update",
                     "--work-id", work_id,
                     "--stage", "design",
-                    "--content", "# design v2\n",
+                    "--content", _DESIGN_LIGHT_CONTENT,
                 ],
                 ["--base-path", str(base), "stage-ready", "--work-id", work_id, "--stage", "design"],
                 ["--base-path", str(base), "gate-quality", "--work-id", work_id, "--stage", "design"],
@@ -809,7 +814,7 @@ class TestContinueDriver:
                     "--base-path", str(base), "stage-update",
                     "--work-id", work_id,
                     "--stage", "design",
-                    "--content", "# design v2\n",
+                    "--content", _DESIGN_LIGHT_CONTENT,
                 ],
                 ["--base-path", str(base), "stage-ready", "--work-id", work_id, "--stage", "design"],
                 ["--base-path", str(base), "gate-quality", "--work-id", work_id, "--stage", "design"],
@@ -1130,7 +1135,7 @@ def test_r2p_gap_resolve_delegates():
             )
         assert exc.value.code == 0
         for cmd in (
-            ["--base-path", tmp, "stage-update", "--work-id", work_id, "--stage", "design", "--content", "# design v2\n"],
+            ["--base-path", tmp, "stage-update", "--work-id", work_id, "--stage", "design", "--content", _DESIGN_LIGHT_CONTENT],
             ["--base-path", tmp, "stage-ready", "--work-id", work_id, "--stage", "design"],
             ["--base-path", tmp, "gate-quality", "--work-id", work_id, "--stage", "design"],
         ):
@@ -1171,7 +1176,7 @@ def test_r2p_gap_resolve_wrapper_executes():
         )
         assert r.returncode == 0, r.stderr or r.stdout
         for cmd in (
-            ["--base-path", tmp, "stage-update", "--work-id", work_id, "--stage", "design", "--content", "# design v2\n"],
+            ["--base-path", tmp, "stage-update", "--work-id", work_id, "--stage", "design", "--content", _DESIGN_LIGHT_CONTENT],
             ["--base-path", tmp, "stage-ready", "--work-id", work_id, "--stage", "design"],
             ["--base-path", tmp, "gate-quality", "--work-id", work_id, "--stage", "design"],
         ):

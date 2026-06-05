@@ -532,10 +532,24 @@ class TestAgentShortcuts:
 class TestEndToEndPipeline:
     """True end-to-end test: run-start → all stages → CLOSED via CLI."""
 
+    # Required headings for LIGHT tier by stage — injected when absent so gate-quality passes.
+    _LIGHT_REQUIRED: dict[str, list[str]] = {
+        "requirement_brief": ["## Goal", "## In-Scope", "## Out-of-Scope", "## Acceptance Criteria"],
+        "risk_discovery": ["## Risks", "## Boundaries"],
+        "design": ["## Design Summary", "## Chosen Design", "## SPEC Handoff"],
+        "spec": ["## Behavior Contracts", "## External Documentation Checked", "## PLAN Handoff"],
+        "plan": ["## Tasks"],
+    }
+
     def _drive_stage(self, invoke, tmp, work_id, stage, content):
-        # SPEC quality gate requires an External Documentation Checked section.
-        if stage == "spec" and "## External Documentation Checked" not in content:
-            content = content + "\n\n## External Documentation Checked\n\nN/A — no external dependencies\n"
+        # Inject any missing required LIGHT-tier headings so gate-quality passes.
+        for heading in self._LIGHT_REQUIRED.get(stage, []):
+            if heading not in content:
+                if heading == "## External Documentation Checked":
+                    # Check 6 requires a valid inventory row, not just the heading.
+                    content = content + f"\n\n{heading}\n\nN/A — no external dependencies\n"
+                else:
+                    content = content + f"\n\n{heading}\ncontent\n"
         invoke(["stage-produce", "--work-id", work_id, "--stage", stage, "--content", content], base_path=tmp)
         invoke(["stage-ready", "--work-id", work_id, "--stage", stage], base_path=tmp)
         invoke(["gate-quality", "--work-id", work_id, "--stage", stage], base_path=tmp)
@@ -568,14 +582,14 @@ class TestEndToEndPipeline:
 # TestStandardTierArtifactStructure
 # ---------------------------------------------------------------------------
 
-# Well-formed SPEC content: has an External Documentation Checked section with
-# a real dependency-inventory row (4-cell table) so Check 6 passes.
+# Well-formed SPEC content: all STANDARD required headings present, plus a
+# real dependency-inventory row in External Documentation Checked (Check 6).
 _SPEC_WELL_FORMED = """\
-## Overview
+## Behavior Contracts
 
 This spec covers rate-limiting at the API gateway layer.
 
-## Functional Requirements
+## API / Data / Config Contracts
 
 No upstream IDs referenced here.
 
@@ -584,14 +598,24 @@ No upstream IDs referenced here.
 | Dependency | Version | Check Date | Conclusion |
 |---|---|---|---|
 | pytest | 8.x | 2026-05-31 | Context7 checked |
+
+## Test Matrix
+
+content
+
+## Non-goals
+
+content
+
+## PLAN Handoff
+
+content
 """
 
-# Well-formed PLAN content: PLAN-TASK-001 has TDD Applicable: yes and a
-# fenced python block inside its Skeleton field.
+# Well-formed PLAN content: has ## Tasks (required heading), PLAN-TASK-001
+# with TDD Applicable: yes and a fenced python block inside its Skeleton field.
 _PLAN_WELL_FORMED = """\
-## Summary
-
-Implement rate limiting.
+## Tasks
 
 ### PLAN-TASK-001: Add rate-limit middleware
 
@@ -640,11 +664,27 @@ assert rate_limit(req) == 200
 class TestStandardTierArtifactStructure:
     """Gate-integration test: standard-tier SPEC / PLAN artifact structure checks."""
 
+    # Required headings for STANDARD tier by stage — injected when absent.
+    _STANDARD_REQUIRED: dict[str, list[str]] = {
+        "requirement_brief": [
+            "## Goal", "## In-Scope", "## Out-of-Scope", "## Non-Goals",
+            "## Assumptions", "## Acceptance Criteria", "## Open Questions", "## Sources",
+        ],
+        "risk_discovery": ["## Risks", "## Boundaries", "## Scope Overflow Risks", "## Mitigations"],
+        "design": [
+            "## Design Summary", "## Current Code Evidence", "## Requirements Coverage",
+            "## Options Considered", "## Chosen Design", "## Rollback",
+            "## Observability", "## SPEC Handoff",
+        ],
+    }
+
     # Re-use the _drive_stage logic from TestEndToEndPipeline as a private helper.
     def _drive_stage(self, invoke_fn, tmp, work_id, stage, content):
         """Produce → ready → gate-quality(0) → review-checkpoint → checkpoint-decide approved."""
-        if stage == "spec" and "## External Documentation Checked" not in content:
-            content = content + "\n\n## External Documentation Checked\n\nN/A — no external dependencies\n"
+        # Inject any missing required STANDARD-tier headings so gate-quality passes.
+        for heading in self._STANDARD_REQUIRED.get(stage, []):
+            if heading not in content:
+                content = content + f"\n\n{heading}\ncontent\n"
         invoke_fn(["stage-produce", "--work-id", work_id, "--stage", stage, "--content", content], base_path=tmp)
         invoke_fn(["stage-ready", "--work-id", work_id, "--stage", stage], base_path=tmp)
         invoke_fn(["gate-quality", "--work-id", work_id, "--stage", stage], base_path=tmp)

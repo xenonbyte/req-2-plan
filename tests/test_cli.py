@@ -1514,7 +1514,14 @@ class TestForcedReviewRelocation:
                 stage=Stage.DESIGN, artifact="05-design.md", version=1, status="ready")]
             save_record(tmp, record)
             run_dir = Path(tmp) / ".req-to-plan" / work_id
-            (run_dir / "05-design.md").write_text("---\nr2p_version: 1\n---\nbody", encoding="utf-8")
+            (run_dir / "05-design.md").write_text(
+                "---\nr2p_version: 1\n---\n"
+                "## Design Summary\ncontent\n## Current Code Evidence\ncontent\n"
+                "## Requirements Coverage\ncontent\n## Options Considered\ncontent\n"
+                "## Chosen Design\ncontent\n## Rollback\ncontent\n"
+                "## Observability\ncontent\n## SPEC Handoff\ncontent\n",
+                encoding="utf-8",
+            )
             invoke(["gate-quality", "--work-id", work_id, "--stage", "design"], base_path=tmp)
             record = load_record(tmp, work_id)
             assert record.status == RunStatus.READY_FOR_CHECKPOINT_REVIEW
@@ -1540,7 +1547,7 @@ class TestTierEscalationInvalidatesPlanGate:
         save_record(tmp, record)
         run_dir = Path(tmp) / ".req-to-plan" / work_id
         (run_dir / "07-plan.md").write_text(
-            "---\nr2p_version: 1\n---\n# PLAN\n\nProse-only plan.\n",
+            "---\nr2p_version: 1\n---\n# PLAN\n\n## Tasks\n\nProse-only plan.\n",
             encoding="utf-8",
         )
         invoke(["gate-quality", "--work-id", work_id, "--stage", "plan"], base_path=tmp)
@@ -1800,7 +1807,14 @@ class TestCheckpointDecide:
                 stage=Stage.DESIGN, artifact="05-design.md", version=1, status="ready")]
             save_record(tmp, record)
             run_dir = Path(tmp) / ".req-to-plan" / work_id
-            (run_dir / "05-design.md").write_text("---\nr2p_version: 1\n---\nbody", encoding="utf-8")
+            (run_dir / "05-design.md").write_text(
+                "---\nr2p_version: 1\n---\n"
+                "## Design Summary\ncontent\n## Current Code Evidence\ncontent\n"
+                "## Requirements Coverage\ncontent\n## Options Considered\ncontent\n"
+                "## Chosen Design\ncontent\n## Rollback\ncontent\n"
+                "## Observability\ncontent\n## SPEC Handoff\ncontent\n",
+                encoding="utf-8",
+            )
             invoke(["gate-quality", "--work-id", work_id, "--stage", "design"], base_path=tmp)
             invoke(["review-checkpoint", "--work-id", work_id, "--stage", "design"], base_path=tmp)
             invoke(["checkpoint-decide", "--work-id", work_id, "--stage", "design",
@@ -2274,12 +2288,17 @@ def test_gap_resolve_rejects_missing_run():
                base_path=tmp, expect_exit=7)
 
 
+_DESIGN_LIGHT_CONTENT = (
+    "# design v2\n\n## Design Summary\ncontent\n## Chosen Design\ncontent\n## SPEC Handoff\ncontent\n"
+)
+
+
 def test_gap_resolve_closes_route_when_owner_checkpoint_ready():
     with tempfile.TemporaryDirectory() as tmp:
         work_id, _ = _open_gap_to_design(tmp)
         # Re-work the owner: update design (-> v2 draft), mark ready, then pass quality gate
         invoke(["stage-update", "--work-id", work_id, "--stage", "design",
-                "--content", "# design v2\n"], base_path=tmp, expect_exit=0)
+                "--content", _DESIGN_LIGHT_CONTENT], base_path=tmp, expect_exit=0)
         invoke(["stage-ready", "--work-id", work_id, "--stage", "design"],
                base_path=tmp, expect_exit=0)
         invoke(["gate-quality", "--work-id", work_id, "--stage", "design"],
@@ -2295,7 +2314,7 @@ def test_checkpoint_decide_blocked_while_route_open_then_allowed_after_resolve()
     with tempfile.TemporaryDirectory() as tmp:
         work_id, _ = _open_gap_to_design(tmp)
         invoke(["stage-update", "--work-id", work_id, "--stage", "design",
-                "--content", "# design v2\n"], base_path=tmp, expect_exit=0)
+                "--content", _DESIGN_LIGHT_CONTENT], base_path=tmp, expect_exit=0)
         invoke(["stage-ready", "--work-id", work_id, "--stage", "design"],
                base_path=tmp, expect_exit=0)
         invoke(["gate-quality", "--work-id", work_id, "--stage", "design"],
@@ -2328,7 +2347,7 @@ def test_stage_advance_rejects_stale_downstream_after_route_resolved():
         work_id, _ = _open_gap_to_design(tmp)
 
         invoke(["stage-update", "--work-id", work_id, "--stage", "design",
-                "--content", "# design v2\n"], base_path=tmp, expect_exit=0)
+                "--content", _DESIGN_LIGHT_CONTENT], base_path=tmp, expect_exit=0)
         invoke(["stage-ready", "--work-id", work_id, "--stage", "design"],
                base_path=tmp, expect_exit=0)
         invoke(["gate-quality", "--work-id", work_id, "--stage", "design"],
@@ -2360,7 +2379,7 @@ def test_stage_ready_rejects_stale_downstream_until_stage_update():
         work_id, _ = _open_gap_to_design(tmp)
 
         invoke(["stage-update", "--work-id", work_id, "--stage", "design",
-                "--content", "# design v2\n"], base_path=tmp, expect_exit=0)
+                "--content", _DESIGN_LIGHT_CONTENT], base_path=tmp, expect_exit=0)
         invoke(["stage-ready", "--work-id", work_id, "--stage", "design"],
                base_path=tmp, expect_exit=0)
         invoke(["gate-quality", "--work-id", work_id, "--stage", "design"],
@@ -2398,7 +2417,15 @@ def test_gap_routing_full_cascade_back_to_plan():
 
         def rework_content(stage_value):
             if stage_value == "spec":
-                return "# spec v2\n\n## External Documentation Checked\n\nN/A — no external dependencies\n"
+                return (
+                    "# spec v2\n\n## Behavior Contracts\ncontent\n"
+                    "## External Documentation Checked\n\nN/A — no external dependencies\n\n"
+                    "## PLAN Handoff\ncontent\n"
+                )
+            if stage_value == "design":
+                return _DESIGN_LIGHT_CONTENT
+            if stage_value == "plan":
+                return "# plan v2\n\n## Tasks\n\nProse-only plan.\n"
             return f"# {stage_value} v2\n"
 
         def rework_and_approve(stage_value):
@@ -2417,7 +2444,7 @@ def test_gap_routing_full_cascade_back_to_plan():
         invoke(["gap-open", "--work-id", work_id, "--owner-stage", "design",
                 "--required-action", "fix"], base_path=tmp, expect_exit=0)
         invoke(["stage-update", "--work-id", work_id, "--stage", "design",
-                "--content", "# design v2\n"], base_path=tmp, expect_exit=0)
+                "--content", _DESIGN_LIGHT_CONTENT], base_path=tmp, expect_exit=0)
         invoke(["stage-ready", "--work-id", work_id, "--stage", "design"],
                base_path=tmp, expect_exit=0)
         invoke(["gate-quality", "--work-id", work_id, "--stage", "design"],
@@ -2476,7 +2503,7 @@ def test_status_next_surfaces_gap_route_progress(capsys, monkeypatch):
         assert "R-1" in payload["resume_reason"]
 
         invoke(["stage-update", "--work-id", work_id, "--stage", "design",
-                "--content", "# design v2\n"], base_path=tmp, expect_exit=0)
+                "--content", _DESIGN_LIGHT_CONTENT], base_path=tmp, expect_exit=0)
         invoke(["stage-ready", "--work-id", work_id, "--stage", "design"],
                base_path=tmp, expect_exit=0)
         invoke(["gate-quality", "--work-id", work_id, "--stage", "design"],

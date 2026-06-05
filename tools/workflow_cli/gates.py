@@ -337,6 +337,19 @@ def _plan_tasks_missing_code(content: str) -> bool:
     return False
 
 
+def _check_stage_schema(stage: Stage, tier: TierEstimate, content: str) -> list[str]:
+    """R2: required top-level headings for the stage at this tier base must be present."""
+    from tools.workflow_cli.stage_schema import required_headings
+    issues: list[str] = []
+    for heading in required_headings(stage, tier.base):
+        if heading not in content:
+            issues.append(
+                f"Missing required section {heading!r} for stage {stage.value!r} "
+                f"at tier '{tier.base.value}'."
+            )
+    return issues
+
+
 # ---------------------------------------------------------------------------
 # Quality Gate
 # ---------------------------------------------------------------------------
@@ -401,6 +414,10 @@ def check_quality_gate(
                     "Add it; if there are no external dependencies, include an explicit "
                     "'N/A — no external dependencies' row."
                 )
+
+        # Check 7 (R2): tier-aware required-section schema.
+        if not issues:
+            issues.extend(_check_stage_schema(stage, tier, artifact_content))
 
     return GateResult(
         passed=len(issues) == 0,
