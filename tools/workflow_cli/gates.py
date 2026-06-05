@@ -397,7 +397,12 @@ def _context_pack_repo_root(run_dir: Path) -> Path | None:
 
 def _context_pack_remediation_command(run_dir: Path) -> str:
     import shlex
-    command = f"python3 -m tools.workflow_cli context-build --work-id {run_dir.name}"
+    package_root = Path(__file__).resolve().parents[2]
+    pythonpath = f"PYTHONPATH={shlex.quote(str(package_root))}${{PYTHONPATH:+:$PYTHONPATH}}"
+    command = (
+        f"{pythonpath} python3 -m tools.workflow_cli "
+        f"context-build --work-id {run_dir.name}"
+    )
     if run_dir.parent.name == ".req-to-plan":
         base_dir = run_dir.parent.parent
         try:
@@ -412,8 +417,8 @@ def _context_pack_remediation_command(run_dir: Path) -> str:
 def _check_plan_context_pack(run_dir: Path) -> list[str]:
     """R11: standard-tier PLAN must anchor file facts to a usable Context Pack.
 
-    Every no-usable-truth-anchor path blocks loudly; the remediation command
-    is literally executable (run_dir.name is the work-id, see cli._get_run_dir).
+    Every no-usable-truth-anchor path blocks loudly; after the user replaces
+    <repo-dir>, the remediation command can import the installed workflow modules.
     """
     if _context_pack_repo_root(run_dir) is not None:
         return []

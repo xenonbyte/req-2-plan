@@ -78,8 +78,8 @@ Pass `--repo-path .` whenever the requirement targets the current project (use t
 target repo's path for cross-repo work); it generates the Project Context Pack that
 grounds tier estimation and PLAN file-reference checks. If a standard-tier PLAN gate
 later reports a missing or unusable Context Pack, build it mid-run with
-`python3 -m tools.workflow_cli context-build --work-id <id> --repo-path <dir>`
-(there is no standalone `context-build` executable).
+the `PYTHONPATH=... python3 -m tools.workflow_cli context-build ...` command printed
+by the gate (there is no standalone `context-build` executable).
 
 ### Lifecycle commands
 

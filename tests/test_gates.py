@@ -1963,11 +1963,38 @@ class TestPlanContextPackGate(unittest.TestCase):
             self._VALID_PLAN, encoding="utf-8")
         return run_dir
 
-    def _assert_pack_issue(self, r):
+    def _assert_pack_issue(self, r, expected_work_id="run"):
         self.assertFalse(r.passed)
-        self.assertTrue(
-            any("python3 -m tools.workflow_cli context-build" in i for i in r.issues),
-            f"expected context-build remediation in issues, got: {r.issues}")
+        issue = next(
+            (i for i in r.issues if "tools.workflow_cli context-build" in i),
+            "",
+        )
+        self.assertIn("PYTHONPATH=", issue)
+        self.assertIn("python3 -m tools.workflow_cli context-build", issue)
+        self.assertIn(f"--work-id {expected_work_id}", issue)
+        self.assertIn("--repo-path <repo-dir>", issue)
+
+    def test_standard_plan_pack_remediation_includes_base_path_for_target_repo(self):
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as tmp:
+            base_dir = Path(tmp) / "target repo"
+            run_dir = base_dir / ".req-to-plan" / "WF-20260606-login"
+            run_dir.mkdir(parents=True)
+            from tools.workflow_cli.models import STAGE_ARTIFACT_MAP
+            (run_dir / STAGE_ARTIFACT_MAP[self.Stage.SPEC]).write_text(
+                "## SPEC-AUTH-001 login\n", encoding="utf-8")
+            (run_dir / STAGE_ARTIFACT_MAP[self.Stage.PLAN]).write_text(
+                self._VALID_PLAN, encoding="utf-8")
+            r = self.check(run_dir, self.Stage.PLAN, self.standard, [], self._VALID_PLAN)
+        issue = next(
+            (i for i in r.issues if "tools.workflow_cli context-build" in i),
+            "",
+        )
+        self.assertIn("PYTHONPATH=", issue)
+        self.assertIn("--work-id WF-20260606-login", issue)
+        self.assertIn("--base-path", issue)
+        self.assertRegex(issue, r"--base-path '.*target repo'")
 
     def test_standard_plan_without_pack_fails_with_remediation(self):
         import tempfile
@@ -2098,7 +2125,7 @@ class TestPlanContextPackGate(unittest.TestCase):
             (run_dir / STAGE_ARTIFACT_MAP[self.Stage.PLAN]).write_text(
                 self._VALID_PLAN, encoding="utf-8")
             r = self.check(run_dir, self.Stage.PLAN, self.standard, [], self._VALID_PLAN)
-        self._assert_pack_issue(r)
+        self._assert_pack_issue(r, expected_work_id="work-123")
         self.assertTrue(
             any("--base-path" in i and str(base) in i for i in r.issues),
             f"expected non-default base-path remediation in issues, got: {r.issues}")

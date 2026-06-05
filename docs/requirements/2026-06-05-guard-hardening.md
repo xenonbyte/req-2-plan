@@ -58,7 +58,7 @@ R1–R8 落地后（v0.3.0），r2p 已具备"需求 → tier 估算 → 模板 
 本轮全部是 **gate 收紧**，押注：收紧不会产生高频误报把正常流程卡死。两个具体风险及变形：
 
 - **R9 的误报风险**：consumed SPEC block 扫描会命中 block 内 Non-goals 子章节里的合理排除性引用（文档级 `## Non-goals` 因 block 截断规则天然不在扫描范围，见核验前提）。**变形**：扫描时仅排除 SPEC block 内更深层级的 `Non-goals` 子章节（标题规范化后等于 `non-goals`，覆盖 `Non-goals`/`Non-Goals`）；排除范围从该子标题起，到下一个同级或更高级标题止，后续 sibling section 里的 `SCOPE-OUT-*` 仍必须 fail。pass fixture 必须把 `SCOPE-OUT-*` 放在被消费 SPEC block 内的 Non-goals 子标题下，确保排除路径被真实执行而非空洞通过。
-- **R11 的旧 run 风险**：升级前已开启、未带 pack 的 standard run 会在 PLAN gate 突然变严。**变形**：失败消息必须内含逐字可执行的 `python3 -m tools.workflow_cli context-build --work-id <id> --repo-path <dir>` 补救命令（非默认 base path 时包含 `--base-path <base-dir>`）；run 生命周期短，不做迁移逻辑。
+- **R11 的旧 run 风险**：升级前已开启、未带 pack 的 standard run 会在 PLAN gate 突然变严。**变形**：失败消息必须内含逐字可执行的 `python3 -m tools.workflow_cli context-build --work-id <id> --repo-path <dir>` 补救命令（非默认 base path 时包含 `--base-path <base-dir>`；2026-06-06 owner 复审收紧：命令带 `PYTHONPATH=<安装根>` 前缀，保证从任意 cwd 可执行）；run 生命周期短，不做迁移逻辑。
 
 R12 有一个不同性质的脆弱点：**仅加 gate 是死代码**——会擅自预决策的 agent 根本不会写 `Status: pending`，gate 只能拦住最守纪律（最不需要拦）的 agent。**变形**：standard DESIGN 模板预置 `## Decision Requests` 章节（允许填 `none`），强迫 agent 显式表态；gate 只负责拦 pending。模板不预置，R12 不得单独上。
 
@@ -99,7 +99,7 @@ R12 有一个不同性质的脆弱点：**仅加 gate 是死代码**——会擅
 **R11 standard PLAN 缺失或不可用 Context Pack 时 gate fail**
 - 现状：`_check_plan_file_refs()`（`gates.py:373-380`）在无 `02-project-context.json`、pack JSON 解析失败、缺 `repo_root`、或 `repo_root` 不存在时直接 `return []`，静默跳过全部文件事实校验；`--repo-path` 可选且缺失无提示。
 - 质量损失：standard tier 最需要真值锚定的 run，恰恰可以在完全无根状态下产出 PLAN 并全绿——R4/R5 的核心承诺被静默旁路。
-- 优化：PLAN 阶段 quality gate 增查——`tier.base == standard` 且 context pack 缺失、不可读、格式非法、缺 `repo_root`、或 `repo_root` 不存在时均报 gate issue，消息内含逐字可执行的补救命令 `python3 -m tools.workflow_cli context-build --work-id <id> --repo-path <dir>`（内部子命令已存在，`cli.py:1790`，无需新增独立可执行文件；非默认 base path 时命令需包含 `--base-path <base-dir>`）。light tier 维持现状（纯文档/简单需求不强制绑 repo）。
+- 优化：PLAN 阶段 quality gate 增查——`tier.base == standard` 且 context pack 缺失、不可读、格式非法、缺 `repo_root`、或 `repo_root` 不存在时均报 gate issue，消息内含逐字可执行的补救命令 `python3 -m tools.workflow_cli context-build --work-id <id> --repo-path <dir>`（内部子命令已存在，`cli.py:1790`，无需新增独立可执行文件；非默认 base path 时命令需包含 `--base-path <base-dir>`；命令带 `PYTHONPATH=<安装根>` 前缀使其从任意 cwd 可执行，2026-06-06 owner 复审收紧）。light tier 维持现状（纯文档/简单需求不强制绑 repo）。
 - 收益（G7）：忘传 `--repo-path` 从"静默产出无根 PLAN"变为"明确拦截 + 一条命令补救"。
 - 工作量：小。依赖：与 R10 同批。
 
@@ -123,7 +123,7 @@ R12 有一个不同性质的脆弱点：**仅加 gate 是死代码**——会擅
 - 现状：见核验前提表后五行。
 - 质量损失：用户/agent 按 README 旧路径运行必然落入 R11 所堵的旁路；开发文档误导后续维护者。
 - 优化（全部小修，一次提交）：
-  1. `README.md` + `README.zh-CN.md` quickstart 改为 `r2p-start "Add rate limiting" --repo-path .`，注明"需求针对当前项目时必传，跨仓库需求传目标仓库路径"（N6 决策的配套），并在 PLAN gate 缺失/不可用 pack 的补救说明里使用真实 CLI 入口 `python3 -m tools.workflow_cli context-build --work-id <id> --repo-path <dir>`，不写不存在的 standalone `context-build` 可执行文件；
+  1. `README.md` + `README.zh-CN.md` quickstart 改为 `r2p-start "Add rate limiting" --repo-path .`，注明"需求针对当前项目时必传，跨仓库需求传目标仓库路径"（N6 决策的配套），并在 PLAN gate 缺失/不可用 pack 的补救说明里指向 gate 打印的真实 CLI 入口（带 `PYTHONPATH=` 前缀的 `python3 -m tools.workflow_cli context-build ...`），不写不存在的 standalone `context-build` 可执行文件；
   2. claude 主 `SKILL.md`（`agent_templates/claude/SKILL.md:16-21`）聚合命令表补 `--repo-path` 参数与 `r2p-gap-open`、`r2p-gap-resolve` 两条命令行；codex/gemini 为 per-command 模板形态、无聚合命令表，且其 gap 命令模板与 `r2p-start` 的 `--repo-path` 注记均已存在（`agent_templates/gemini/commands/r2p-start.toml:2` 等），核对即可、不改；
   3. `.claude/skills/req-to-plan.md` 整体对齐 v0.3.0 实态，不止 line 25：过期 `v1` 注释改为不硬编码版本（延续 R6 反魔数原则）；`install_cli.py` 的 "stub (full impl: Task 14)" 注记改为已完整实现；`codex/ # AGENTS.md` 改为 per-command skills 形态（否则与本文 R13-2 自相矛盾）；Module Responsibilities 树补齐缺失模块（R13-4 的 7 个加 `install.py`）；
   4. `CLAUDE.md` module map 补 7 个模块：`context_pack.py`、`stage_schema.py`、`stage_templates.py`、`trace.py`、`markdown.py`、`link_expander.py`、`repo_baseline.py`；
