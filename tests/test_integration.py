@@ -661,7 +661,7 @@ _PLAN_WELL_FORMED = """\
 ### PLAN-TASK-001: Add rate-limit middleware
 
 Spec References: SPEC-CORE-001
-Change Type: new
+Change Type: create
 TDD Applicable: yes
 Files: src/middleware.py
 Scope: SCOPE-IN-001
@@ -687,7 +687,7 @@ Implement rate limiting — bad skeleton.
 ### PLAN-TASK-001: Add rate-limit middleware
 
 Spec References: none
-Change Type: new
+Change Type: create
 TDD Applicable: yes
 Files: src/middleware.py
 Skeleton:

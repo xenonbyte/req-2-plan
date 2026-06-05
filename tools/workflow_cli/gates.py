@@ -381,8 +381,7 @@ def _check_plan_file_refs(run_dir: Path, content: str) -> list[str]:
     repo_root = repo_root.resolve()
     issues: list[str] = []
     for body in _iter_plan_task_bodies(content):
-        change_type = _plan_task_field_value(body, "Change Type").strip().lower()
-        skip_missing_path = change_type == "create"
+        skip_missing_path = _normalized_change_type(_task_change_type(body)) == "create"
         files_field = _plan_task_field_body(body, "Files")
         for path_part in _plan_task_file_paths(files_field):
             path = Path(path_part)
@@ -432,6 +431,21 @@ def _check_spec_refs_valid(run_dir: Path, content: str) -> list[str]:
     return issues
 
 
+# R10: Change Type is a closed operation-kind enum; 'new' is a legacy alias.
+_CHANGE_TYPE_VALUES = frozenset({"create", "modify", "delete"})
+_CHANGE_TYPE_ALIASES = {"new": "create"}
+
+
+def _normalized_change_type(raw: str) -> str:
+    value = raw.strip().lower()
+    return _CHANGE_TYPE_ALIASES.get(value, value)
+
+
+def _task_change_type(body: str) -> str:
+    """Whitespace-normalized Change Type field body (same line + continuation lines)."""
+    return " ".join(_plan_task_field_body(body, "Change Type").split())
+
+
 def _check_plan_task_fields(content: str) -> list[str]:
     issues: list[str] = []
     numbers: list[int] = []
@@ -444,6 +458,12 @@ def _check_plan_task_fields(content: str) -> list[str]:
         for field in PLAN_TASK_FIELDS:
             if not _plan_task_field_body(body, field).strip():
                 issues.append(f"{label} is missing a non-empty '{field}:' field.")
+        raw_change_type = _task_change_type(body)
+        if raw_change_type and _normalized_change_type(raw_change_type) not in _CHANGE_TYPE_VALUES:
+            issues.append(
+                f"{label} has invalid 'Change Type: {raw_change_type}'; "
+                "allowed: create|modify|delete (alias: new = create)."
+            )
     if numbers:
         if len(set(numbers)) != len(numbers):
             issues.append("PLAN-TASK numbers must be unique.")

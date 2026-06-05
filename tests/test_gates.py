@@ -1846,6 +1846,55 @@ class TestPlanTaskFields(unittest.TestCase):
         self.assertFalse(r.passed)
         self.assertTrue(any(str(outside) in i and "outside repo_root" in i for i in r.issues))
 
+    def test_change_type_new_is_accepted_as_create_alias(self):
+        """R10: 'new' aliases 'create' — a missing path under it is exempt."""
+        import json, tempfile
+        from pathlib import Path
+        from tools.workflow_cli.models import STAGE_ARTIFACT_MAP
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "run"
+            run_dir.mkdir()
+            repo = Path(tmp) / "repo"
+            repo.mkdir()
+            (run_dir / "02-project-context.json").write_text(
+                json.dumps({"repo_root": str(repo)}), encoding="utf-8")
+            (run_dir / STAGE_ARTIFACT_MAP[self.Stage.SPEC]).write_text(
+                "## SPEC-AUTH-001 login\n", encoding="utf-8")
+            plan = ("## Tasks\n\n### PLAN-TASK-001 a\n"
+                    "Spec References: SPEC-AUTH-001\nChange Type: new\n"
+                    "TDD Applicable: no\nFiles:\n- src/brand_new.py\n"
+                    "Skeleton: outline\nSteps:\n- [ ] build it\nVerification: pytest\n")
+            (run_dir / STAGE_ARTIFACT_MAP[self.Stage.PLAN]).write_text(plan, encoding="utf-8")
+            r = self.check(run_dir, self.Stage.PLAN, self.tier, [], plan)
+        self.assertFalse(any("brand_new.py" in i for i in r.issues))
+        self.assertFalse(any("invalid 'Change Type" in i for i in r.issues))
+
+    def test_change_type_outside_enum_fails_loud(self):
+        """R10: values outside create|modify|delete (alias new) are a gate issue."""
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as tmp:
+            plan = ("## Tasks\n\n### PLAN-TASK-001 a\n"
+                    "Spec References: none\nChange Type: refactor\n"
+                    "TDD Applicable: no\nFiles: n/a\n"
+                    "Skeleton: outline\nSteps:\n- [ ] do\nVerification: pytest\n")
+            r = self.check(Path(tmp), self.Stage.PLAN, self.tier, [], plan)
+        self.assertFalse(r.passed)
+        self.assertTrue(any("invalid 'Change Type: refactor'" in i for i in r.issues))
+
+    def test_change_type_on_continuation_line_is_still_validated(self):
+        """R10: a Change Type value on a continuation line must not bypass the enum."""
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as tmp:
+            plan = ("## Tasks\n\n### PLAN-TASK-001 a\n"
+                    "Spec References: none\nChange Type:\nrefactor\n"
+                    "TDD Applicable: no\nFiles: n/a\n"
+                    "Skeleton: outline\nSteps:\n- [ ] do\nVerification: pytest\n")
+            r = self.check(Path(tmp), self.Stage.PLAN, self.tier, [], plan)
+        self.assertFalse(r.passed)
+        self.assertTrue(any("invalid 'Change Type: refactor'" in i for i in r.issues))
+
     def test_files_recreate_type_does_not_skip_missing_path_check(self):
         import json, tempfile
         from pathlib import Path
