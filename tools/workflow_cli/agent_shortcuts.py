@@ -237,9 +237,17 @@ def _seed_for_stage(stage, tier, upstream_summary: str = "", context_summary: st
     base = tier.base if tier is not None else None
     text = template_for(stage, base) if base is not None else ""
     if upstream_summary.strip():
-        text += "\n## Upstream Summary (read-only)\n" + upstream_summary.strip() + "\n"
+        text += (
+            "\n## Upstream Summary (read-only)\n"
+            + upstream_summary.strip()
+            + "\n<!-- /r2p-read-only -->\n"
+        )
     if context_summary.strip():
-        text += "\n## Project Context (read-only)\n" + context_summary.strip() + "\n"
+        text += (
+            "\n## Project Context (read-only)\n"
+            + context_summary.strip()
+            + "\n<!-- /r2p-read-only -->\n"
+        )
     return text
 
 

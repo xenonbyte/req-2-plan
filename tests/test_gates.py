@@ -228,6 +228,41 @@ class TestQualityGate(unittest.TestCase):
         self.assertEqual(result.exit_code, 3)
         self.assertTrue(any("REQ-ACC-001" in issue for issue in result.issues))
 
+    def test_readonly_upstream_summary_heading_does_not_define_referenced_id(self):
+        """Read-only seeded summaries must not hide an unclosed upstream reference."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            run_dir = Path(tmpdir)
+            tier = self._locked_tier()
+            content = (
+                "# Design\n\n"
+                "## Design Summary\ncontent\n\n"
+                "## Current Code Evidence\ncontent\n\n"
+                "## Requirements Coverage\n"
+                "RISK-SEC-001 requires hardened token handling.\n\n"
+                "## Options Considered\ncontent\n\n"
+                "## Chosen Design\ncontent\n\n"
+                "### DES-ARCH-001 Selected architecture\ncontent\n\n"
+                "## Rollback\ncontent\n\n"
+                "## Observability\ncontent\n\n"
+                "## SPEC Handoff\ncontent\n\n"
+                "## Upstream Summary (read-only)\n"
+                "# Risk Discovery\n"
+                "## RISK-SEC-001 Sensitive token exposure\n"
+                "Original upstream risk text.\n"
+                "<!-- /r2p-read-only -->\n"
+            )
+            result = self.check_quality_gate(
+                run_dir, self.Stage.DESIGN, tier, [], content
+            )
+        self.assertFalse(result.passed)
+        self.assertTrue(
+            any(
+                "RISK-SEC-001" in issue and "closure status tag" in issue
+                for issue in result.issues
+            ),
+            result.issues,
+        )
+
     def test_quality_gate_passes_when_upstream_id_addressed(self):
         """Quality gate passes when REQ-ACC-001 has [ADDRESSED] closure tag."""
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1541,6 +1576,38 @@ class TestPlanTaskFields(unittest.TestCase):
         self.assertFalse(r.passed)
         self.assertTrue(any("SPEC-FAKE-001" in i and "SPEC artifact" in i for i in r.issues))
 
+    def test_spec_reference_ignores_readonly_spec_headings(self):
+        import tempfile
+        from pathlib import Path
+        from tools.workflow_cli.models import STAGE_ARTIFACT_MAP
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            (run_dir / STAGE_ARTIFACT_MAP[self.Stage.SPEC]).write_text(
+                "## Behavior Contracts\n"
+                "Native SPEC content has no fake heading.\n\n"
+                "## Upstream Summary (read-only)\n"
+                "# Design Artifact\n"
+                "## SPEC-FAKE-001 copied from DESIGN\n"
+                "<!-- /r2p-read-only -->\n",
+                encoding="utf-8",
+            )
+            plan = (
+                "## Tasks\n\n"
+                "### PLAN-TASK-001 a\n"
+                "Spec References: SPEC-FAKE-001\n"
+                "Change Type: modify\n"
+                "TDD Applicable: no\n"
+                "Files: n/a\n"
+                "Skeleton: inspect current behavior\n"
+                "Steps:\n"
+                "- [ ] update implementation\n"
+                "Verification: pytest\n"
+            )
+            (run_dir / STAGE_ARTIFACT_MAP[self.Stage.PLAN]).write_text(plan, encoding="utf-8")
+            r = self.check(run_dir, self.Stage.PLAN, self.tier, [], plan)
+        self.assertFalse(r.passed)
+        self.assertTrue(any("SPEC-FAKE-001" in i and "SPEC artifact" in i for i in r.issues))
+
     def test_files_referencing_missing_path_fails_unless_create(self):
         import json, tempfile
         from pathlib import Path
@@ -1627,6 +1694,31 @@ class TestPlanTaskFields(unittest.TestCase):
                     "Spec References: SPEC-AUTH-001\nChange Type: modify\n"
                     "TDD Applicable: no\n"
                     "Files: src/real.py :: f\n"
+                    "Skeleton: inspect src/real.py\n"
+                    "Steps:\n- [ ] update existing implementation\n"
+                    "Verification: pytest\n")
+            (run_dir / STAGE_ARTIFACT_MAP[self.Stage.PLAN]).write_text(plan, encoding="utf-8")
+            r = self.check(run_dir, self.Stage.PLAN, self.tier, [], plan)
+        self.assertTrue(r.passed, r.issues)
+
+    def test_inline_files_markdown_code_existing_repo_path_passes(self):
+        import json, tempfile
+        from pathlib import Path
+        from tools.workflow_cli.models import STAGE_ARTIFACT_MAP
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "run"
+            run_dir.mkdir()
+            repo = Path(tmp) / "repo"
+            (repo / "src").mkdir(parents=True)
+            (repo / "src" / "real.py").write_text("x=1\n", encoding="utf-8")
+            (run_dir / "02-project-context.json").write_text(
+                json.dumps({"repo_root": str(repo)}), encoding="utf-8")
+            (run_dir / STAGE_ARTIFACT_MAP[self.Stage.SPEC]).write_text(
+                "## SPEC-AUTH-001 login\n", encoding="utf-8")
+            plan = ("## Tasks\n\n### PLAN-TASK-001 a\n"
+                    "Spec References: SPEC-AUTH-001\nChange Type: modify\n"
+                    "TDD Applicable: no\n"
+                    "Files: `src/real.py`\n"
                     "Skeleton: inspect src/real.py\n"
                     "Steps:\n- [ ] update existing implementation\n"
                     "Verification: pytest\n")

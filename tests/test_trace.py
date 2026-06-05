@@ -47,6 +47,42 @@ class TestTrace(unittest.TestCase):
                                     "## Notes\nMentions SPEC-AUTH-001\n\n### PLAN-TASK-001\nSpec References: SPEC-OTHER-999\n")
             self.assertEqual(spec_ids_not_consumed(run_dir), ["SPEC-AUTH-001"])
 
+    def test_build_trace_ignores_readonly_summary_headings(self):
+        from tools.workflow_cli.trace import build_trace
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = self._run_dir(
+                tmp,
+                "",
+                (
+                    "## Tasks\n"
+                    "### PLAN-TASK-001\n"
+                    "Spec References: SPEC-AUTH-001\n\n"
+                    "## Upstream Summary (read-only)\n"
+                    "# Spec Artifact\n"
+                    "## SPEC-FAKE-001 upstream-only heading\n"
+                    "<!-- /r2p-read-only -->\n"
+                ),
+            )
+            self.assertNotIn("SPEC-FAKE-001", build_trace(run_dir).defined)
+
+    def test_spec_heading_in_design_handoff_is_not_a_defined_spec(self):
+        from tools.workflow_cli.trace import spec_ids_not_consumed
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = self._run_dir(
+                tmp,
+                "## SPEC-AUTH-001 login\nbehavior\n",
+                "### PLAN-TASK-001\nSpec References: SPEC-AUTH-001\n",
+            )
+            (run_dir / STAGE_ARTIFACT_MAP[Stage.DESIGN]).write_text(
+                (
+                    "## SPEC Handoff\n"
+                    "### SPEC-RENAMED-999 planned downstream contract\n"
+                    "Use this as a planning note; the actual SPEC renamed it.\n"
+                ),
+                encoding="utf-8",
+            )
+            self.assertEqual(spec_ids_not_consumed(run_dir), [])
+
     def test_scope_in_not_carried_downstream_is_a_gap(self):
         from tools.workflow_cli.trace import check_trace_closure
         with tempfile.TemporaryDirectory() as tmp:

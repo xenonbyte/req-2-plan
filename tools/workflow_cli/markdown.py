@@ -10,6 +10,15 @@ import re
 
 # A fence opener/closer: up to 3 leading spaces, then 3+ backticks or tildes.
 _FENCE_MARKER_RE = re.compile(r"^[ \t]{0,3}(`{3,}|~{3,})")
+_READONLY_SECTION_RE = re.compile(
+    r"^[ \t]{0,3}(#{1,6})\s+"
+    r"(?:Upstream Summary|Project Context)\s+\(read-only\)\s*(?:#+\s*)?$",
+    re.IGNORECASE,
+)
+_READONLY_SECTION_END_RE = re.compile(
+    r"^[ \t]{0,3}<!--\s*/r2p-read-only\s*-->\s*$",
+    re.IGNORECASE,
+)
 
 
 def unfenced_markdown_lines(content: str):
@@ -48,6 +57,69 @@ def unfenced_markdown_lines(content: str):
 
 def unfenced_markdown_text(content: str) -> str:
     return "".join(line for line, _, _ in unfenced_markdown_lines(content))
+
+
+def strip_readonly_sections(content: str) -> str:
+    """Remove seeded read-only Markdown sections before structural validation."""
+    lines = list(unfenced_markdown_lines(content))
+    headings = [
+        (start, level)
+        for line, start, _ in lines
+        if (level := heading_level(line)) is not None
+    ]
+    markers = [
+        (start, len(match.group(1)))
+        for line, start, _ in lines
+        if (match := _READONLY_SECTION_RE.match(line))
+    ]
+    removals: list[tuple[int, int]] = []
+    for marker_start, marker_level in markers:
+        next_marker_start = next(
+            (start for start, _ in markers if start > marker_start),
+            len(content),
+        )
+        # Seeded payloads can contain copied documents with their own #/##
+        # headings, so prefer the explicit terminator when the seed provides it.
+        explicit_end = next(
+            (
+                line_end
+                for line, start, line_end in lines
+                if marker_start < start < next_marker_start
+                and _READONLY_SECTION_END_RE.match(line)
+            ),
+            None,
+        )
+        if explicit_end is not None:
+            removals.append((marker_start, explicit_end))
+            continue
+
+        end = len(content)
+        for heading_start, heading_level_ in headings:
+            if heading_start <= marker_start:
+                continue
+            if heading_level_ <= marker_level:
+                end = heading_start
+                break
+        removals.append((marker_start, end))
+
+    if not removals:
+        return content
+
+    merged: list[tuple[int, int]] = []
+    for start, end in sorted(removals):
+        if not merged or start > merged[-1][1]:
+            merged.append((start, end))
+        else:
+            prev_start, prev_end = merged[-1]
+            merged[-1] = (prev_start, max(prev_end, end))
+
+    pieces: list[str] = []
+    cursor = 0
+    for start, end in merged:
+        pieces.append(content[cursor:start])
+        cursor = end
+    pieces.append(content[cursor:])
+    return "".join(pieces)
 
 
 def heading_level(line: str) -> int | None:

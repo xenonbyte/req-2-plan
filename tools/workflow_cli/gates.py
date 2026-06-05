@@ -22,6 +22,7 @@ from tools.workflow_cli.models import (
 )
 from tools.workflow_cli.markdown import (
     heading_bounded_bodies,
+    strip_readonly_sections,
     unfenced_markdown_lines,
     unfenced_markdown_text,
 )
@@ -249,6 +250,8 @@ def _has_external_docs_inventory(content: str) -> bool:
 
 _PLAN_TASK_RE = re.compile(r"^### PLAN-TASK-\d+", re.MULTILINE)
 _CODE_FENCE_LINE_RE = re.compile(r"^[ \t]{0,3}(`{3,}|~{3,})(.*)$")
+_INLINE_CODE_VALUE_RE = re.compile(r"^(`+)(.*?)\1$", re.DOTALL)
+_MARKDOWN_LINK_VALUE_RE = re.compile(r"^\[([^\]]+)\]\([^)]+\)$")
 
 
 def _plan_task_starts(content: str) -> list[int]:
@@ -303,6 +306,42 @@ def _plan_task_label(body: str) -> str:
     return f"PLAN-TASK-{m.group(1)}" if m else "PLAN-TASK-?"
 
 
+def _strip_markdown_path_wrappers(value: str) -> str:
+    text = value.strip()
+    changed = True
+    while changed:
+        changed = False
+        inline_code = _INLINE_CODE_VALUE_RE.fullmatch(text)
+        if inline_code:
+            text = inline_code.group(2).strip()
+            changed = True
+            continue
+        markdown_link = _MARKDOWN_LINK_VALUE_RE.fullmatch(text)
+        if markdown_link:
+            text = markdown_link.group(1).strip()
+            changed = True
+            continue
+        if len(text) >= 2 and text.startswith("<") and text.endswith(">"):
+            text = text[1:-1].strip()
+            changed = True
+            continue
+        for marker in ("**", "__"):
+            if (
+                len(text) > 2 * len(marker)
+                and text.startswith(marker)
+                and text.endswith(marker)
+            ):
+                text = text[len(marker):-len(marker)].strip()
+                changed = True
+                break
+    return text
+
+
+def _plan_task_path_part(raw_path: str) -> str:
+    value = _strip_markdown_path_wrappers(raw_path)
+    return _strip_markdown_path_wrappers(value.split("::")[0])
+
+
 def _plan_task_file_paths(files_field: str) -> list[str]:
     paths: list[str] = []
     lines = [line for line, _, _ in unfenced_markdown_lines(files_field)]
@@ -311,8 +350,8 @@ def _plan_task_file_paths(files_field: str) -> list[str]:
 
     first = lines[0].strip()
     if first:
-        path_part = first[2:].strip() if first.startswith(("- ", "* ")) else first
-        path_part = path_part.split("::")[0].strip()
+        raw_path = first[2:].strip() if first.startswith(("- ", "* ")) else first
+        path_part = _plan_task_path_part(raw_path)
         if path_part:
             paths.append(path_part)
 
@@ -320,7 +359,7 @@ def _plan_task_file_paths(files_field: str) -> list[str]:
         stripped = line.strip()
         if not stripped.startswith(("- ", "* ")):
             continue
-        path_part = stripped[2:].split("::")[0].strip()
+        path_part = _plan_task_path_part(stripped[2:])
         if path_part:
             paths.append(path_part)
     return paths
@@ -369,7 +408,11 @@ def _check_plan_file_refs(run_dir: Path, content: str) -> list[str]:
 
 def _check_spec_refs_valid(run_dir: Path, content: str) -> list[str]:
     spec_path = run_dir / STAGE_ARTIFACT_MAP[Stage.SPEC]
-    spec_content = spec_path.read_text(encoding="utf-8") if spec_path.exists() else ""
+    spec_content = (
+        strip_readonly_sections(spec_path.read_text(encoding="utf-8"))
+        if spec_path.exists()
+        else ""
+    )
     defined_specs: set[str] = set()
     for line, _, _ in unfenced_markdown_lines(spec_content):
         if line.lstrip().startswith("#"):
@@ -642,14 +685,15 @@ def check_quality_gate(
         )
 
     issues: list[str] = []
+    gate_content = strip_readonly_sections(artifact_content)
 
     # Check 2: content must be non-empty
-    if not artifact_content or not artifact_content.strip():
+    if not gate_content or not gate_content.strip():
         issues.append("Artifact content is empty or whitespace-only.")
 
     if not issues:
         # Check 3: upstream reference coverage closure (all tiers)
-        unclosed = _find_ids_without_closure(artifact_content)
+        unclosed = _find_ids_without_closure(gate_content)
         if stage == Stage.PLAN:
             from tools.workflow_cli.trace import plan_consumed_spec_ids
             consumed_specs = plan_consumed_spec_ids(run_dir)
@@ -664,7 +708,7 @@ def check_quality_gate(
             )
 
         # Check 4: ID uniqueness within artifact
-        duplicates = _find_duplicate_ids(artifact_content)
+        duplicates = _find_duplicate_ids(gate_content)
         for dup_id in duplicates:
             issues.append(
                 f"Duplicate ID definition {dup_id!r} found in artifact; each ID must be unique."
@@ -673,12 +717,12 @@ def check_quality_gate(
         # Check 5 (PLAN, standard tier): TDD-applicable tasks must carry a code block.
         from tools.workflow_cli.models import TierBase
         if stage == Stage.PLAN and tier.base == TierBase.STANDARD:
-            if not _plan_task_starts(artifact_content):
+            if not _plan_task_starts(gate_content):
                 issues.append(
                     "PLAN is missing '### PLAN-TASK-*' sections; standard tier requires "
                     "machine-parseable executable anchors."
                 )
-            elif _plan_tasks_missing_code(artifact_content):
+            elif _plan_tasks_missing_code(gate_content):
                 issues.append(
                     "PLAN has a 'TDD Applicable: yes' task with no fenced code block; "
                     "add a Skeleton code block (standard tier requires executable anchors)."
@@ -691,17 +735,17 @@ def check_quality_gate(
             for sid in scope_out_violations(run_dir):
                 issues.append(f"PLAN references out-of-scope item {sid}; scope overflow (R8).")
             # R5.1: required fields + contiguous numbering
-            issues.extend(_check_plan_task_fields(artifact_content))
+            issues.extend(_check_plan_task_fields(gate_content))
             # R5.2: dangling SPEC references
-            issues.extend(_check_spec_refs_valid(run_dir, artifact_content))
+            issues.extend(_check_spec_refs_valid(run_dir, gate_content))
             # R5.2b: Skeleton is fenced, so detect template placeholders there explicitly.
-            issues.extend(_check_plan_task_skeleton_placeholders(artifact_content))
+            issues.extend(_check_plan_task_skeleton_placeholders(gate_content))
             # R5.3: file refs vs Context Pack repo_root
-            issues.extend(_check_plan_file_refs(run_dir, artifact_content))
+            issues.extend(_check_plan_file_refs(run_dir, gate_content))
 
         # Check 6 (SPEC): the External Documentation Checked section must be present and non-empty.
         if stage == Stage.SPEC:
-            if not _has_external_docs_inventory(artifact_content):
+            if not _has_external_docs_inventory(gate_content):
                 issues.append(
                     "SPEC is missing a non-empty '## External Documentation Checked' section. "
                     "Add it; if there are no external dependencies, include an explicit "
@@ -710,13 +754,13 @@ def check_quality_gate(
 
         # Check 7 (R2): tier-aware required-section schema.
         if not issues:
-            issues.extend(_check_stage_schema(stage, tier, artifact_content))
+            issues.extend(_check_stage_schema(stage, tier, gate_content))
 
         # Check 8 (R8): scope-freeze — In/Out-of-Scope entries must carry stable IDs.
-        issues.extend(_check_scope_freeze(stage, artifact_content))
+        issues.extend(_check_scope_freeze(stage, gate_content))
 
         # Check 9 (R8): elicitation — standard-tier brief must record at least one assumption or open question.
-        issues.extend(_check_elicitation(stage, tier, artifact_content))
+        issues.extend(_check_elicitation(stage, tier, gate_content))
 
     return GateResult(
         passed=len(issues) == 0,

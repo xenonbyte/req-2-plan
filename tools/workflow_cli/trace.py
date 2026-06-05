@@ -8,6 +8,7 @@ from pathlib import Path
 from tools.workflow_cli.markdown import (
     heading_bounded_bodies,
     heading_level,
+    strip_readonly_sections,
     unfenced_markdown_lines,
     unfenced_markdown_text,
 )
@@ -17,6 +18,13 @@ from tools.workflow_cli.stage_schema import PLAN_TASK_FIELD_RE
 # REQ-AUTH-001 / RISK-SEC-001 / DES-AUTH-001 / SPEC-AUTH-001 / SCOPE-IN-001 / SCOPE-OUT-001 / PLAN-TASK-001
 _ID_RE = re.compile(r"(?:REQ|RISK|DES|SPEC)-[A-Z]+-\d+|SCOPE-(?:IN|OUT)-\d+|PLAN-TASK-\d+")
 _PLAN_TASK_HEADING_RE = re.compile(r"^###\s+PLAN-TASK-\d+\b")
+_NATIVE_HEADING_ID_PREFIXES: dict[Stage, tuple[str, ...]] = {
+    Stage.RAW_REQUIREMENT: ("REQ-",),
+    Stage.RISK_DISCOVERY: ("RISK-",),
+    Stage.DESIGN: ("DES-",),
+    Stage.SPEC: ("SPEC-",),
+    Stage.PLAN: ("PLAN-TASK-",),
+}
 
 
 @dataclass
@@ -45,9 +53,23 @@ def _scope_ids_defined_in_brief(stage: Stage, content: str) -> set[str]:
     return ids
 
 
+def _native_heading_ids(stage: Stage, content: str) -> set[str]:
+    prefixes = _NATIVE_HEADING_ID_PREFIXES.get(stage, ())
+    if not prefixes:
+        return set()
+    ids: set[str] = set()
+    for line, _, _ in unfenced_markdown_lines(content):
+        if line.lstrip().startswith("#"):
+            for match in _ID_RE.finditer(line):
+                id_ = match.group(0)
+                if id_.startswith(prefixes):
+                    ids.add(id_)
+    return ids
+
+
 def _artifact_text(run_dir: Path, stage: Stage) -> str:
     path = run_dir / STAGE_ARTIFACT_MAP[stage]
-    return path.read_text(encoding="utf-8") if path.exists() else ""
+    return strip_readonly_sections(path.read_text(encoding="utf-8")) if path.exists() else ""
 
 
 def _plan_task_bodies(plan_content: str):
@@ -162,11 +184,8 @@ def build_trace(run_dir: Path) -> TraceModel:
         path = run_dir / filename
         if not path.exists():
             continue
-        content = path.read_text(encoding="utf-8")
-        heading_ids: set[str] = set()
-        for line, _, _ in unfenced_markdown_lines(content):
-            if line.lstrip().startswith("#"):
-                heading_ids.update(m.group(0) for m in _ID_RE.finditer(line))
+        content = _artifact_text(run_dir, stage)
+        heading_ids = _native_heading_ids(stage, content)
         definition_ids = heading_ids | _scope_ids_defined_in_brief(stage, content)
         for id_ in definition_ids:
             model.defined.setdefault(id_, stage.value)
