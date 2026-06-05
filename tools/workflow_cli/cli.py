@@ -1779,7 +1779,16 @@ def _cmd_context_build(args):
             format_error(f"run not found: {work_id}", exit_code=EXIT_NOT_FOUND),
             EXIT_NOT_FOUND,
         )
-    pack = build_context_pack(Path(args.repo_path))
+    repo_path = Path(args.repo_path)
+    if not repo_path.is_dir():
+        print_and_exit(
+            format_error(
+                f"repo path not found or not a directory: {args.repo_path}",
+                exit_code=EXIT_CLI_ERR,
+            ),
+            EXIT_CLI_ERR,
+        )
+    pack = build_context_pack(repo_path)
     md_path, json_path = write_context_pack(pack, run_dir)
     print_and_exit(
         format_success(

@@ -108,11 +108,19 @@ def plan_consumed_spec_ids(run_dir: Path) -> set[str]:
 
 def _spec_blocks(spec_content: str) -> dict[str, str]:
     spec_content = _unfenced_markdown_text(spec_content)
-    starts = list(re.finditer(r"(?m)^#+\s+.*?\b(SPEC-[A-Z]+-\d+)\b", spec_content))
+    starts = list(re.finditer(r"(?m)^(#+)\s+.*?\b(SPEC-[A-Z]+-\d+)\b", spec_content))
+    headings = list(re.finditer(r"(?m)^(#+)\s+", spec_content))
     blocks: dict[str, str] = {}
-    for index, match in enumerate(starts):
-        end = starts[index + 1].start() if index + 1 < len(starts) else len(spec_content)
-        blocks[match.group(1)] = spec_content[match.start():end]
+    for match in starts:
+        level = len(match.group(1))
+        end = len(spec_content)
+        for heading in headings:
+            if heading.start() <= match.start():
+                continue
+            if len(heading.group(1)) <= level:
+                end = heading.start()
+                break
+        blocks[match.group(2)] = spec_content[match.start():end]
     return blocks
 
 

@@ -78,6 +78,25 @@ class TestTrace(unittest.TestCase):
                 "## Tasks\n### PLAN-TASK-001\nSpec References: SPEC-OTHER-999\n", encoding="utf-8")
             self.assertTrue(any("SCOPE-IN-001" in i for i in check_trace_closure(run_dir)))
 
+    def test_scope_ref_after_consumed_spec_block_does_not_close_scope(self):
+        from tools.workflow_cli.trace import check_trace_closure
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            (run_dir / STAGE_ARTIFACT_MAP[Stage.REQUIREMENT_BRIEF]).write_text(
+                "## In-Scope\n- SCOPE-IN-001 login behavior\n", encoding="utf-8")
+            (run_dir / STAGE_ARTIFACT_MAP[Stage.SPEC]).write_text(
+                (
+                    "## SPEC-AUTH-001 login\n"
+                    "No scope reference in this contract.\n\n"
+                    "## PLAN Handoff\n"
+                    "SCOPE-IN-001 mentioned outside the SPEC block.\n"
+                ),
+                encoding="utf-8",
+            )
+            (run_dir / STAGE_ARTIFACT_MAP[Stage.PLAN]).write_text(
+                "## Tasks\n### PLAN-TASK-001\nSpec References: SPEC-AUTH-001\n", encoding="utf-8")
+            self.assertTrue(any("SCOPE-IN-001" in i for i in check_trace_closure(run_dir)))
+
     def test_fenced_plan_task_heading_does_not_consume_spec(self):
         from tools.workflow_cli.trace import spec_ids_not_consumed
         with tempfile.TemporaryDirectory() as tmp:

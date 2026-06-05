@@ -366,8 +366,8 @@ def _check_plan_file_refs(run_dir: Path, content: str) -> list[str]:
     repo_root = repo_root.resolve()
     issues: list[str] = []
     for body in _iter_plan_task_bodies(content):
-        if "create" in _plan_task_field_value(body, "Change Type").lower():
-            continue
+        change_type = _plan_task_field_value(body, "Change Type").strip().lower()
+        skip_missing_path = change_type == "create"
         files_field = _plan_task_field_body(body, "Files")
         for path_part in _plan_task_file_paths(files_field):
             path = Path(path_part)
@@ -385,10 +385,11 @@ def _check_plan_file_refs(run_dir: Path, content: str) -> list[str]:
                 )
                 continue
             if not resolved.exists():
-                issues.append(
-                    f"PLAN-TASK Files references missing path {path_part!r} "
-                    "(mark the task 'Change Type: create' if it is a new file)."
-                )
+                if not skip_missing_path:
+                    issues.append(
+                        f"PLAN-TASK Files references missing path {path_part!r} "
+                        "(mark the task 'Change Type: create' if it is a new file)."
+                    )
     return issues
 
 

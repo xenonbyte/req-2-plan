@@ -2589,6 +2589,42 @@ class TestContextBuildCommand:
         assert exc_info.value.code == EXIT_CLI_ERR
         assert not (outside / "02-project-context.json").exists()
 
+    def test_context_build_rejects_missing_repo_path_without_traceback(self, tmp_path, capsys):
+        from tools.workflow_cli.output import EXIT_CLI_ERR
+        run_dir = tmp_path / ".req-to-plan" / "WF-20260605-missing-repo"
+        run_dir.mkdir(parents=True)
+
+        with pytest.raises(SystemExit) as exc_info:
+            main([
+                "--base-path", str(tmp_path),
+                "context-build",
+                "--work-id", "WF-20260605-missing-repo",
+                "--repo-path", str(tmp_path / "no-such-repo"),
+            ])
+
+        assert exc_info.value.code == EXIT_CLI_ERR
+        assert "repo path not found or not a directory" in capsys.readouterr().out
+        assert not (run_dir / "02-project-context.json").exists()
+
+    def test_context_build_rejects_file_repo_path_without_traceback(self, tmp_path, capsys):
+        from tools.workflow_cli.output import EXIT_CLI_ERR
+        run_dir = tmp_path / ".req-to-plan" / "WF-20260605-file-repo"
+        run_dir.mkdir(parents=True)
+        repo_file = tmp_path / "repo.txt"
+        repo_file.write_text("not a directory", encoding="utf-8")
+
+        with pytest.raises(SystemExit) as exc_info:
+            main([
+                "--base-path", str(tmp_path),
+                "context-build",
+                "--work-id", "WF-20260605-file-repo",
+                "--repo-path", str(repo_file),
+            ])
+
+        assert exc_info.value.code == EXIT_CLI_ERR
+        assert "repo path not found or not a directory" in capsys.readouterr().out
+        assert not (run_dir / "02-project-context.json").exists()
+
 
 # ---------------------------------------------------------------------------
 # run-start: Context Pack + link expansion
