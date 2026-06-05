@@ -90,6 +90,20 @@ def _validate_work_id(raw: str) -> WorkId:
         print_and_exit(format_error(str(e), exit_code=EXIT_CLI_ERR), EXIT_CLI_ERR)
 
 
+def _validate_repo_path(raw: str) -> Path:
+    """Return a repo path only when it is an existing directory."""
+    repo_path = Path(raw)
+    if not repo_path.is_dir():
+        print_and_exit(
+            format_error(
+                f"repo path not found or not a directory: {raw}",
+                exit_code=EXIT_CLI_ERR,
+            ),
+            EXIT_CLI_ERR,
+        )
+    return repo_path
+
+
 def _parse_stage(raw: str) -> Stage:
     """Parse Stage enum or exit with CLI error."""
     try:
@@ -180,6 +194,7 @@ def _cmd_run_start(args):
             format_error("Requirement must not be blank", exit_code=EXIT_CLI_ERR),
             EXIT_CLI_ERR,
         )
+    repo_path = _validate_repo_path(args.repo_path) if args.repo_path else None
     run_dir = _get_run_dir(work_id, args.base_path)
     mgr = RunStateManager(run_dir)
 
@@ -213,9 +228,8 @@ def _cmd_run_start(args):
     write_artifact(run_dir, Stage.RAW_REQUIREMENT, requirement, version=1, status="draft")
 
     # Tier estimation inputs
-    repo_path = Path(args.repo_path) if args.repo_path else None
     link_results = []
-    if repo_path is not None and repo_path.exists():
+    if repo_path is not None:
         from tools.workflow_cli.link_expander import expand_links
         # Local relative links expand; HTTP is recorded as not-expanded (needs confirmation).
         link_results = expand_links(requirement, base_path=repo_path, fetch_urls=False)
@@ -225,7 +239,7 @@ def _cmd_run_start(args):
     record.tier_estimate = tier_estimate
 
     # Context Pack + link expansion (when repo_path is provided)
-    if repo_path is not None and repo_path.exists():
+    if repo_path is not None:
         from tools.workflow_cli.context_pack import build_context_pack, write_context_pack
         write_context_pack(build_context_pack(repo_path), run_dir)
         if link_results:
@@ -1779,15 +1793,7 @@ def _cmd_context_build(args):
             format_error(f"run not found: {work_id}", exit_code=EXIT_NOT_FOUND),
             EXIT_NOT_FOUND,
         )
-    repo_path = Path(args.repo_path)
-    if not repo_path.is_dir():
-        print_and_exit(
-            format_error(
-                f"repo path not found or not a directory: {args.repo_path}",
-                exit_code=EXIT_CLI_ERR,
-            ),
-            EXIT_CLI_ERR,
-        )
+    repo_path = _validate_repo_path(args.repo_path)
     pack = build_context_pack(repo_path)
     md_path, json_path = write_context_pack(pack, run_dir)
     print_and_exit(

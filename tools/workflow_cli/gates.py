@@ -86,7 +86,10 @@ def check_entry_gate(
 
 _PLACEHOLDER_PATTERNS = [
     re.compile(r"<!--\s*fill in\s*-->", re.IGNORECASE),  # untouched template body
-    re.compile(r"(?m)^\s*TBD\s*$"),                       # TBD as a standalone final line
+    re.compile(
+        r"(?im)^\s*(?:[-*]\s*)?(?:[A-Za-z][A-Za-z0-9 /_-]*:\s*)?TBD\s*$"
+    ),                                                     # TBD as a line, field value, or list item
+    re.compile(r"(?im)^\s*(?:[-*]\s*)?maybe\s*$"),
     re.compile(r"\bTODO later\b", re.IGNORECASE),
     re.compile(r"\bFIXME\b"),
 ]
@@ -240,6 +243,15 @@ _CODE_FENCE_LINE_RE = re.compile(r"^[ \t]{0,3}(`{3,}|~{3,})(.*)$")
 _PLAN_TASK_FIELD_RE = re.compile(
     r"^(Spec References|Change Type|TDD Applicable|Files|Skeleton|Steps|Verification):"
 )
+_PLAN_TASK_REQUIRED_FIELDS = (
+    "Spec References",
+    "Change Type",
+    "TDD Applicable",
+    "Files",
+    "Skeleton",
+    "Steps",
+    "Verification",
+)
 
 
 def _plan_task_starts(content: str) -> list[int]:
@@ -248,6 +260,13 @@ def _plan_task_starts(content: str) -> list[int]:
         for line, start, _ in unfenced_markdown_lines(content)
         if _PLAN_TASK_RE.match(line)
     ]
+
+
+def _markdown_heading_level(line: str) -> int | None:
+    stripped = line.lstrip()
+    if not stripped.startswith("#"):
+        return None
+    return len(stripped) - len(stripped.lstrip("#"))
 
 
 def _plan_task_field_body(task_body: str, field: str) -> str:
@@ -286,10 +305,25 @@ def _plan_task_field_value(task_body: str, field: str) -> str:
 
 
 def _iter_plan_task_bodies(content: str):
-    starts = _plan_task_starts(content)
-    for i, s in enumerate(starts):
-        e = starts[i + 1] if i + 1 < len(starts) else len(content)
-        yield content[s:e]
+    starts = [
+        (start, _markdown_heading_level(line) or 0)
+        for line, start, _ in unfenced_markdown_lines(content)
+        if _PLAN_TASK_RE.match(line)
+    ]
+    headings = [
+        (start, level)
+        for line, start, _ in unfenced_markdown_lines(content)
+        if (level := _markdown_heading_level(line)) is not None
+    ]
+    for start, level in starts:
+        end = len(content)
+        for heading_start, heading_level in headings:
+            if heading_start <= start:
+                continue
+            if heading_level <= level:
+                end = heading_start
+                break
+        yield content[start:end]
 
 
 def _plan_task_file_paths(files_field: str) -> list[str]:
@@ -337,11 +371,9 @@ def _check_plan_file_refs(run_dir: Path, content: str) -> list[str]:
         for path_part in _plan_task_file_paths(files_field):
             path = Path(path_part)
             if path.is_absolute():
-                issues.append(
-                    f"PLAN-TASK Files references path outside repo_root {path_part!r}."
-                )
-                continue
-            resolved = (repo_root / path).resolve()
+                resolved = path.resolve()
+            else:
+                resolved = (repo_root / path).resolve()
             try:
                 resolved.relative_to(repo_root)
             except ValueError:
@@ -367,7 +399,7 @@ def _check_spec_refs_valid(run_dir: Path, content: str) -> list[str]:
             defined_specs.update(re.findall(r"\bSPEC-[A-Z]+-\d+\b", line))
     issues: list[str] = []
     for body in _iter_plan_task_bodies(content):
-        refs = re.findall(r"SPEC-[A-Z]+-\d+", _plan_task_field_value(body, "Spec References"))
+        refs = re.findall(r"SPEC-[A-Z]+-\d+", _plan_task_field_body(body, "Spec References"))
         for ref in refs:
             if ref not in defined_specs:
                 issues.append(f"PLAN-TASK references {ref} which is not defined in the SPEC artifact.")
@@ -383,10 +415,9 @@ def _check_plan_task_fields(content: str) -> list[str]:
         if num is not None:
             numbers.append(num)
         label = f"PLAN-TASK-{num if num is not None else '?'}"
-        if not _plan_task_field_value(body, "Spec References").strip():
-            issues.append(f"{label} is missing a non-empty 'Spec References:' field.")
-        if not _plan_task_field_value(body, "Verification").strip():
-            issues.append(f"{label} is missing a non-empty 'Verification:' field.")
+        for field in _PLAN_TASK_REQUIRED_FIELDS:
+            if not _plan_task_field_body(body, field).strip():
+                issues.append(f"{label} is missing a non-empty '{field}:' field.")
     if numbers:
         if len(set(numbers)) != len(numbers):
             issues.append("PLAN-TASK numbers must be unique.")
@@ -429,12 +460,10 @@ def _has_complete_code_fence(content: str) -> bool:
 
 def _plan_tasks_missing_code(content: str) -> bool:
     """True if any TDD-applicable PLAN-TASK has no fenced code block in its Skeleton field."""
-    starts = _plan_task_starts(content)
-    if not starts:
+    bodies = list(_iter_plan_task_bodies(content))
+    if not bodies:
         return False
-    bounds = starts + [len(content)]
-    for i in range(len(starts)):
-        body = content[bounds[i]:bounds[i + 1]]
+    for body in bodies:
         skeleton = _plan_task_field_body(body, "Skeleton")
         tdd_applicable = _plan_task_field_value(body, "TDD Applicable")
         if tdd_applicable.lower() == "yes" and not _has_complete_code_fence(skeleton):

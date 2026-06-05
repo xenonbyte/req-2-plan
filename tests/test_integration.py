@@ -574,7 +574,18 @@ class TestEndToEndPipeline:
             content = content + f"\n\n{self._NATIVE_ID_HEADINGS[stage]}"
         # Inject a PLAN-TASK consuming SPEC-CORE-001 and SCOPE-IN-001 so trace closure passes (R3/R8).
         if stage == "plan" and "PLAN-TASK-001" not in content:
-            content = content + "\n\n### PLAN-TASK-001 implement\nSpec References: SPEC-CORE-001\nTDD Applicable: no\nScope: SCOPE-IN-001\nVerification: pytest\n"
+            content = (
+                content
+                + "\n\n### PLAN-TASK-001 implement\n"
+                "Spec References: SPEC-CORE-001\n"
+                "Change Type: modify\n"
+                "TDD Applicable: no\n"
+                "Files: n/a\n"
+                "Skeleton: update implementation\n"
+                "Steps:\n- [ ] apply change\n"
+                "Scope: SCOPE-IN-001\n"
+                "Verification: pytest\n"
+            )
         invoke(["stage-produce", "--work-id", work_id, "--stage", stage, "--content", content], base_path=tmp)
         invoke(["stage-ready", "--work-id", work_id, "--stage", stage], base_path=tmp)
         invoke(["gate-quality", "--work-id", work_id, "--stage", stage], base_path=tmp)

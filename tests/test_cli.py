@@ -2432,7 +2432,14 @@ def test_gap_routing_full_cascade_back_to_plan():
             if stage_value == "plan":
                 return (
                     "# plan v2\n\n## Tasks\n\n"
-                    "### PLAN-TASK-001 do thing\nSpec References: SPEC-CORE-001\nTDD Applicable: no\nVerification: pytest\n"
+                    "### PLAN-TASK-001 do thing\n"
+                    "Spec References: SPEC-CORE-001\n"
+                    "Change Type: modify\n"
+                    "TDD Applicable: no\n"
+                    "Files: n/a\n"
+                    "Skeleton: update implementation\n"
+                    "Steps:\n- [ ] apply change\n"
+                    "Verification: pytest\n"
                 )
             return f"# {stage_value} v2\n"
 
@@ -2647,6 +2654,42 @@ class TestRunStartBuildsContextPack:
             ])
         assert exc.value.code == 0
         assert (tmp_path / ".req-to-plan" / "WF-20260605-rate-limit" / "02-project-context.json").exists()
+
+    def test_run_start_rejects_missing_repo_path_before_writing_run(self, tmp_path, capsys):
+        from tools.workflow_cli.cli import main
+        from tools.workflow_cli.output import EXIT_CLI_ERR
+        work_id = "WF-20260605-missing-repo"
+
+        with pytest.raises(SystemExit) as exc:
+            main([
+                "--base-path", str(tmp_path),
+                "run-start", "--work-id", work_id,
+                "--requirement", "add rate limiting",
+                "--repo-path", str(tmp_path / "no-such-repo"),
+            ])
+
+        assert exc.value.code == EXIT_CLI_ERR
+        assert "repo path not found or not a directory" in capsys.readouterr().out
+        assert not (tmp_path / ".req-to-plan" / work_id).exists()
+
+    def test_run_start_rejects_file_repo_path_before_writing_run(self, tmp_path, capsys):
+        from tools.workflow_cli.cli import main
+        from tools.workflow_cli.output import EXIT_CLI_ERR
+        work_id = "WF-20260605-file-repo"
+        repo_file = tmp_path / "package.json"
+        repo_file.write_text("{}", encoding="utf-8")
+
+        with pytest.raises(SystemExit) as exc:
+            main([
+                "--base-path", str(tmp_path),
+                "run-start", "--work-id", work_id,
+                "--requirement", "add rate limiting",
+                "--repo-path", str(repo_file),
+            ])
+
+        assert exc.value.code == EXIT_CLI_ERR
+        assert "repo path not found or not a directory" in capsys.readouterr().out
+        assert not (tmp_path / ".req-to-plan" / work_id).exists()
 
     def test_run_start_with_repo_path_persists_local_and_http_link_context(self, tmp_path):
         from tools.workflow_cli.cli import main

@@ -18,6 +18,21 @@ class TestTrace(unittest.TestCase):
                                     "### PLAN-TASK-001\nSpec References: SPEC-AUTH-001\n")
             self.assertEqual(spec_ids_not_consumed(run_dir), [])
 
+    def test_spec_references_markdown_list_consumes_specs(self):
+        from tools.workflow_cli.trace import spec_ids_not_consumed
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = self._run_dir(
+                tmp,
+                "## SPEC-AUTH-001 login\nbehavior\n\n## SPEC-SESSION-001 session\nbehavior\n",
+                (
+                    "### PLAN-TASK-001\n"
+                    "Spec References:\n"
+                    "- SPEC-AUTH-001\n"
+                    "- SPEC-SESSION-001\n"
+                ),
+            )
+            self.assertEqual(spec_ids_not_consumed(run_dir), [])
+
     def test_spec_not_referenced_by_plan_is_a_gap(self):
         from tools.workflow_cli.trace import spec_ids_not_consumed
         with tempfile.TemporaryDirectory() as tmp:
@@ -38,6 +53,22 @@ class TestTrace(unittest.TestCase):
             run_dir = Path(tmp)
             (run_dir / STAGE_ARTIFACT_MAP[Stage.REQUIREMENT_BRIEF]).write_text(
                 "## In-Scope\n- SCOPE-IN-001 rate limit per IP\n", encoding="utf-8")
+            (run_dir / STAGE_ARTIFACT_MAP[Stage.SPEC]).write_text(
+                "## Behavior Contracts\nno scope ref here\n", encoding="utf-8")
+            self.assertTrue(any("SCOPE-IN-001" in i for i in check_trace_closure(run_dir)))
+
+    def test_scope_in_under_nested_brief_heading_is_defined(self):
+        from tools.workflow_cli.trace import check_trace_closure
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            (run_dir / STAGE_ARTIFACT_MAP[Stage.REQUIREMENT_BRIEF]).write_text(
+                "## In-Scope\n"
+                "### API\n"
+                "- SCOPE-IN-001 rate limit per IP\n"
+                "## Out-of-Scope\n"
+                "- SCOPE-OUT-001 admin UI\n",
+                encoding="utf-8",
+            )
             (run_dir / STAGE_ARTIFACT_MAP[Stage.SPEC]).write_text(
                 "## Behavior Contracts\nno scope ref here\n", encoding="utf-8")
             self.assertTrue(any("SCOPE-IN-001" in i for i in check_trace_closure(run_dir)))
@@ -224,6 +255,23 @@ class TestTrace(unittest.TestCase):
                 "```md\n"
                 "Do not implement SCOPE-OUT-001 here.\n"
                 "```\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(scope_out_violations(run_dir), [])
+
+    def test_seeded_upstream_summary_scope_out_reference_is_not_a_violation(self):
+        from tools.workflow_cli.trace import scope_out_violations
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            (run_dir / STAGE_ARTIFACT_MAP[Stage.REQUIREMENT_BRIEF]).write_text(
+                "## Out-of-Scope\n- SCOPE-OUT-001 admin UI\n", encoding="utf-8")
+            (run_dir / STAGE_ARTIFACT_MAP[Stage.PLAN]).write_text(
+                "## Tasks\n"
+                "### PLAN-TASK-001 build auth\n"
+                "Spec References: SPEC-AUTH-001\n"
+                "Verification: pytest\n\n"
+                "## Upstream Summary (read-only)\n"
+                "Brief excluded SCOPE-OUT-001 from this workflow.\n",
                 encoding="utf-8",
             )
             self.assertEqual(scope_out_violations(run_dir), [])

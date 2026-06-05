@@ -597,6 +597,66 @@ class TestStageSchemaGate(unittest.TestCase):
             result = self.check_quality_gate(Path(tmp), self.Stage.REQUIREMENT_BRIEF, self.tier, [], body)
         self.assertFalse(result.passed)
 
+    def test_maybe_as_final_design_content_fails(self):
+        import tempfile
+        from pathlib import Path
+        content = (
+            "# Design\n\n"
+            "## Design Summary\nmaybe\n\n"
+            "## Current Code Evidence\ncontent\n\n"
+            "## Requirements Coverage\ncontent\n\n"
+            "## Options Considered\ncontent\n\n"
+            "## Chosen Design\ncontent\n\n"
+            "### DES-ARCH-001 Selected architecture\ncontent\n\n"
+            "## Rollback\ncontent\n\n"
+            "## Observability\ncontent\n\n"
+            "## SPEC Handoff\ncontent\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            result = self.check_quality_gate(Path(tmp), self.Stage.DESIGN, self.tier, [], content)
+        self.assertFalse(result.passed)
+        self.assertTrue(any("placeholder" in i.lower() for i in result.issues))
+
+    def test_tbd_inside_required_field_value_fails(self):
+        import tempfile
+        from pathlib import Path
+        from tools.workflow_cli.stage_schema import required_headings
+        from tools.workflow_cli.models import TierBase
+        parts = ["# Requirement Brief"]
+        for h in required_headings(self.Stage.REQUIREMENT_BRIEF, TierBase.STANDARD):
+            if h == "## Goal":
+                parts.append(f"{h}\nStatus: TBD\n")
+            elif h == "## In-Scope":
+                parts.append(f"{h}\n- SCOPE-IN-001 real scope\n")
+            elif h == "## Out-of-Scope":
+                parts.append(f"{h}\n- SCOPE-OUT-001 real exclusion\n")
+            else:
+                parts.append(f"{h}\n- real content\n")
+        with tempfile.TemporaryDirectory() as tmp:
+            result = self.check_quality_gate(Path(tmp), self.Stage.REQUIREMENT_BRIEF, self.tier, [], "\n".join(parts))
+        self.assertFalse(result.passed)
+        self.assertTrue(any("placeholder" in i.lower() for i in result.issues))
+
+    def test_tbd_list_item_in_required_section_fails(self):
+        import tempfile
+        from pathlib import Path
+        from tools.workflow_cli.stage_schema import required_headings
+        from tools.workflow_cli.models import TierBase
+        parts = ["# Requirement Brief"]
+        for h in required_headings(self.Stage.REQUIREMENT_BRIEF, TierBase.STANDARD):
+            if h == "## In-Scope":
+                parts.append(f"{h}\n- SCOPE-IN-001 real scope\n")
+            elif h == "## Out-of-Scope":
+                parts.append(f"{h}\n- SCOPE-OUT-001 real exclusion\n")
+            elif h == "## Acceptance Criteria":
+                parts.append(f"{h}\n- TBD\n")
+            else:
+                parts.append(f"{h}\n- real content\n")
+        with tempfile.TemporaryDirectory() as tmp:
+            result = self.check_quality_gate(Path(tmp), self.Stage.REQUIREMENT_BRIEF, self.tier, [], "\n".join(parts))
+        self.assertFalse(result.passed)
+        self.assertTrue(any("placeholder" in i.lower() for i in result.issues))
+
     def test_required_section_with_empty_body_fails(self):
         import tempfile
         from pathlib import Path
@@ -796,7 +856,9 @@ class TestPlanCodeBlockGate(unittest.TestCase):
             "## Tasks\n\n"
             "### PLAN-TASK-001: do thing\n"
             "Spec References: n/a\n"
+            "Change Type: modify\n"
             "TDD Applicable: yes\n"
+            "Files: n/a\n"
             f"Skeleton:\n{skeleton}\n"
             "Steps:\n- [ ] red\n- [ ] green\n"
             f"{verification}"
@@ -897,7 +959,9 @@ class TestPlanCodeBlockGate(unittest.TestCase):
             "## Tasks\n\n"
             "### PLAN-TASK-001: do thing\n"
             "Spec References: n/a\n"
+            "Change Type: modify\n"
             "TDD Applicable: no\n"
+            "Files: docs/generated.md\n"
             "Skeleton:\n"
             "(prose only)\n"
             "Steps:\n"
@@ -1214,6 +1278,31 @@ class TestTraceClosureInPlanGate(unittest.TestCase):
         self.assertFalse(r.passed)
         self.assertTrue(any("SCOPE-OUT-001" in i for i in r.issues))
 
+    def test_plan_gate_ignores_scope_out_in_seeded_upstream_summary(self):
+        import tempfile
+        from pathlib import Path
+        from tools.workflow_cli.gates import check_quality_gate
+        from tools.workflow_cli.models import Stage, TierBase, TierEstimate, STAGE_ARTIFACT_MAP
+        tier = TierEstimate(base=TierBase.STANDARD, modifiers=frozenset())
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            (run_dir / STAGE_ARTIFACT_MAP[Stage.REQUIREMENT_BRIEF]).write_text(
+                "## Out-of-Scope\n- SCOPE-OUT-001 admin UI\n", encoding="utf-8")
+            (run_dir / STAGE_ARTIFACT_MAP[Stage.SPEC]).write_text(
+                "## SPEC-AUTH-001 auth\nbehavior\n", encoding="utf-8")
+            plan = (
+                "## Tasks\n"
+                "### PLAN-TASK-001 touch auth\n"
+                "Spec References: SPEC-AUTH-001\n"
+                "TDD Applicable: no\n"
+                "Verification: pytest\n\n"
+                "## Upstream Summary (read-only)\n"
+                "The brief excluded SCOPE-OUT-001 from implementation.\n"
+            )
+            (run_dir / STAGE_ARTIFACT_MAP[Stage.PLAN]).write_text(plan, encoding="utf-8")
+            r = check_quality_gate(run_dir, Stage.PLAN, tier, [], plan)
+        self.assertFalse(any("scope overflow" in i.lower() for i in r.issues))
+
 
 class TestScopeFreeze(unittest.TestCase):
     def setUp(self):
@@ -1336,6 +1425,18 @@ class TestPlanTaskFields(unittest.TestCase):
         r = self._gate(plan)
         self.assertFalse(r.passed)
         self.assertTrue(any("Verification" in i for i in r.issues))
+
+    def test_task_missing_execution_fields_fails(self):
+        plan = ("## Tasks\n\n### PLAN-TASK-001 do it\n"
+                "Spec References: SPEC-AUTH-001\n"
+                "Verification: pytest\n")
+        r = self._gate(plan)
+        self.assertFalse(r.passed)
+        for field in ("Change Type", "TDD Applicable", "Files", "Skeleton", "Steps"):
+            self.assertTrue(
+                any(field in i for i in r.issues),
+                f"expected missing field issue for {field}; got {r.issues}",
+            )
 
     def test_noncontiguous_numbering_fails(self):
         plan = ("## Tasks\n\n### PLAN-TASK-001 a\nSpec References: SPEC-AUTH-001\nVerification: pytest\n"
@@ -1472,7 +1573,37 @@ class TestPlanTaskFields(unittest.TestCase):
                 "## SPEC-AUTH-001 login\n", encoding="utf-8")
             plan = ("## Tasks\n\n### PLAN-TASK-001 a\n"
                     "Spec References: SPEC-AUTH-001\nChange Type: modify\n"
-                    "Files: src/real.py :: f\nVerification: pytest\n")
+                    "TDD Applicable: no\n"
+                    "Files: src/real.py :: f\n"
+                    "Skeleton: inspect src/real.py\n"
+                    "Steps:\n- [ ] update existing implementation\n"
+                    "Verification: pytest\n")
+            (run_dir / STAGE_ARTIFACT_MAP[self.Stage.PLAN]).write_text(plan, encoding="utf-8")
+            r = self.check(run_dir, self.Stage.PLAN, self.tier, [], plan)
+        self.assertTrue(r.passed, r.issues)
+
+    def test_files_existing_absolute_repo_path_passes(self):
+        import json, tempfile
+        from pathlib import Path
+        from tools.workflow_cli.models import STAGE_ARTIFACT_MAP
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "run"
+            run_dir.mkdir()
+            repo = Path(tmp) / "repo"
+            (repo / "src").mkdir(parents=True)
+            existing = repo / "src" / "real.py"
+            existing.write_text("x=1\n", encoding="utf-8")
+            (run_dir / "02-project-context.json").write_text(
+                json.dumps({"repo_root": str(repo)}), encoding="utf-8")
+            (run_dir / STAGE_ARTIFACT_MAP[self.Stage.SPEC]).write_text(
+                "## SPEC-AUTH-001 login\n", encoding="utf-8")
+            plan = ("## Tasks\n\n### PLAN-TASK-001 a\n"
+                    "Spec References: SPEC-AUTH-001\nChange Type: modify\n"
+                    "TDD Applicable: no\n"
+                    f"Files: {existing} :: f\n"
+                    "Skeleton: inspect src/real.py\n"
+                    "Steps:\n- [ ] update existing implementation\n"
+                    "Verification: pytest\n")
             (run_dir / STAGE_ARTIFACT_MAP[self.Stage.PLAN]).write_text(plan, encoding="utf-8")
             r = self.check(run_dir, self.Stage.PLAN, self.tier, [], plan)
         self.assertTrue(r.passed, r.issues)
@@ -1516,7 +1647,11 @@ class TestPlanTaskFields(unittest.TestCase):
                 "## SPEC-AUTH-001 login\n", encoding="utf-8")
             plan = ("## Tasks\n\n### PLAN-TASK-001 a\n"
                     "Spec References: SPEC-AUTH-001\nChange Type: create\n"
-                    "Files:\n- src/new.py\nVerification: pytest\n")
+                    "TDD Applicable: no\n"
+                    "Files:\n- src/new.py\n"
+                    "Skeleton: create src/new.py\n"
+                    "Steps:\n- [ ] add new implementation\n"
+                    "Verification: pytest\n")
             (run_dir / STAGE_ARTIFACT_MAP[self.Stage.PLAN]).write_text(plan, encoding="utf-8")
             r = self.check(run_dir, self.Stage.PLAN, self.tier, [], plan)
         self.assertTrue(r.passed)

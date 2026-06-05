@@ -235,6 +235,8 @@ falsifier 字段天然抗套话：`收益：提升性能` 可以随便写；`失
 - SPEC 必须包含非空、非占位的外部文档检查清单，或显式说明没有外部依赖；
 - 达到代码定义任务锚点要求的 PLAN 必须包含任务锚点；启用 TDD 骨架要求的任务必须提供带非空
   信息标记且正文非空的 `Skeleton` 代码块；
+- 每个 PLAN-TASK 锚点的全部结构字段（`Spec References` / `Change Type` / `TDD Applicable` /
+  `Files` / `Skeleton` / `Steps` / `Verification`）正文均须非空，任务编号唯一且从 1 起连续；
 - 命中代码定义高风险 modifier 的 DESIGN / SPEC / PLAN，在检查点批准前必须存在版本匹配的
   subagent review 文件；文件是否确由只读 reviewer 生成、内容是否有效，仍由 agent / 主控语义审查确认。
 

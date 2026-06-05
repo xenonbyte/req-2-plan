@@ -11,6 +11,9 @@ from tools.workflow_cli.models import STAGE_ARTIFACT_MAP, Stage
 # REQ-AUTH-001 / RISK-SEC-001 / DES-AUTH-001 / SPEC-AUTH-001 / SCOPE-IN-001 / SCOPE-OUT-001 / PLAN-TASK-001
 _ID_RE = re.compile(r"(?:REQ|RISK|DES|SPEC)-[A-Z]+-\d+|SCOPE-(?:IN|OUT)-\d+|PLAN-TASK-\d+")
 _PLAN_TASK_HEADING_RE = re.compile(r"^###\s+PLAN-TASK-\d+\b")
+_PLAN_TASK_FIELD_RE = re.compile(
+    r"^(Spec References|Change Type|TDD Applicable|Files|Skeleton|Steps|Verification):"
+)
 
 
 @dataclass
@@ -25,16 +28,26 @@ def _scope_ids_defined_in_brief(stage: Stage, content: str) -> set[str]:
         return set()
     ids: set[str] = set()
     capture = False
+    capture_level = 0
     for line, _, _ in unfenced_markdown_lines(content):
         stripped = line.strip()
+        level = _heading_level(line)
         if stripped in {"## In-Scope", "## Out-of-Scope"}:
             capture = True
+            capture_level = level or 0
             continue
-        if capture and line.lstrip().startswith("#"):
+        if capture and level is not None and level <= capture_level:
             capture = False
         if capture:
             ids.update(m.group(0) for m in _ID_RE.finditer(line) if m.group(0).startswith("SCOPE-"))
     return ids
+
+
+def _heading_level(line: str) -> int | None:
+    stripped = line.lstrip()
+    if not stripped.startswith("#"):
+        return None
+    return len(stripped) - len(stripped.lstrip("#"))
 
 
 def _artifact_text(run_dir: Path, stage: Stage) -> str:
@@ -44,22 +57,51 @@ def _artifact_text(run_dir: Path, stage: Stage) -> str:
 
 def _plan_task_bodies(plan_content: str):
     starts = [
-        start
+        (start, _heading_level(line) or 0)
         for line, start, _ in unfenced_markdown_lines(plan_content)
         if _PLAN_TASK_HEADING_RE.match(line)
     ]
-    for index, start in enumerate(starts):
-        end = starts[index + 1] if index + 1 < len(starts) else len(plan_content)
+    headings = [
+        (start, level)
+        for line, start, _ in unfenced_markdown_lines(plan_content)
+        if (level := _heading_level(line)) is not None
+    ]
+    for start, level in starts:
+        end = len(plan_content)
+        for heading_start, heading_level in headings:
+            if heading_start <= start:
+                continue
+            if heading_level <= level:
+                end = heading_start
+                break
         yield plan_content[start:end]
 
 
-def _plan_task_field_value(body: str, field: str) -> str:
+def _find_plan_task_field(body: str, field: str):
     field_re = re.compile(rf"^{re.escape(field)}:\s*(.*)$")
-    for line, _, _ in unfenced_markdown_lines(body):
+    for line, start, _ in unfenced_markdown_lines(body):
         m = field_re.match(line)
         if m:
-            return m.group(1).strip()
-    return ""
+            return m, start
+    return None
+
+
+def _find_next_plan_task_field_start(body: str, after: int) -> int | None:
+    for line, start, _ in unfenced_markdown_lines(body):
+        if start >= after and _PLAN_TASK_FIELD_RE.match(line):
+            return start
+    return None
+
+
+def _plan_task_field_value(body: str, field: str) -> str:
+    found = _find_plan_task_field(body, field)
+    if found is None:
+        return ""
+    match, line_start = found
+    body_start = line_start + match.end()
+    next_start = _find_next_plan_task_field_start(body, body_start)
+    end = next_start if next_start is not None else len(body)
+    return f"{match.group(1)}\n{body[body_start:end]}".strip()
 
 
 def plan_consumed_spec_ids(run_dir: Path) -> set[str]:
@@ -168,12 +210,15 @@ def spec_ids_not_consumed(run_dir: Path) -> list[str]:
 
 
 def scope_out_violations(run_dir: Path) -> list[str]:
-    """SCOPE-OUT-* ids that the PLAN references — a scope overflow (R8)."""
-    model = build_trace(run_dir)
-    plan = Stage.PLAN.value
+    """SCOPE-OUT-* ids that executable PLAN-TASK bodies reference — a scope overflow (R8)."""
+    plan_text = _artifact_text(run_dir, Stage.PLAN)
+    plan_task_text = "\n".join(unfenced_markdown_text(body) for body in _plan_task_bodies(plan_text))
     return sorted(
-        id_ for id_, stages in model.referenced.items()
-        if id_.startswith("SCOPE-OUT-") and plan in stages
+        {
+            m.group(0)
+            for m in _ID_RE.finditer(plan_task_text)
+            if m.group(0).startswith("SCOPE-OUT-")
+        }
     )
 
 
