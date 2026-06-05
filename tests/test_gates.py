@@ -1277,6 +1277,49 @@ class TestPlanTaskFields(unittest.TestCase):
         self.assertFalse(r.passed)
         self.assertTrue(any("SPEC-GHOST-999" in i for i in r.issues))
 
+    def test_files_referencing_missing_path_fails_unless_create(self):
+        import json, tempfile
+        from pathlib import Path
+        from tools.workflow_cli.models import STAGE_ARTIFACT_MAP
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "run"
+            run_dir.mkdir()
+            repo = Path(tmp) / "repo"
+            (repo / "src").mkdir(parents=True)
+            (repo / "src" / "real.py").write_text("x=1\n", encoding="utf-8")
+            (run_dir / "02-project-context.json").write_text(
+                json.dumps({"repo_root": str(repo)}), encoding="utf-8")
+            (run_dir / STAGE_ARTIFACT_MAP[self.Stage.SPEC]).write_text(
+                "## SPEC-AUTH-001 login\n", encoding="utf-8")
+            plan = ("## Tasks\n\n### PLAN-TASK-001 a\n"
+                    "Spec References: SPEC-AUTH-001\nChange Type: modify\n"
+                    "Files:\n- src/ghost.py :: f\nVerification: pytest\n")
+            (run_dir / STAGE_ARTIFACT_MAP[self.Stage.PLAN]).write_text(plan, encoding="utf-8")
+            r = self.check(run_dir, self.Stage.PLAN, self.tier, [], plan)
+        self.assertFalse(r.passed)
+        self.assertTrue(any("ghost.py" in i for i in r.issues))
+
+    def test_files_create_type_is_exempt(self):
+        import json, tempfile
+        from pathlib import Path
+        from tools.workflow_cli.models import STAGE_ARTIFACT_MAP
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "run"
+            run_dir.mkdir()
+            repo = Path(tmp) / "repo"
+            repo.mkdir()
+            (run_dir / "02-project-context.json").write_text(
+                json.dumps({"repo_root": str(repo)}), encoding="utf-8")
+            (run_dir / STAGE_ARTIFACT_MAP[self.Stage.SPEC]).write_text(
+                "## SPEC-AUTH-001 login\n", encoding="utf-8")
+            plan = ("## Tasks\n\n### PLAN-TASK-001 a\n"
+                    "Spec References: SPEC-AUTH-001\nChange Type: create\n"
+                    "Files:\n- src/new.py\nVerification: pytest\n")
+            (run_dir / STAGE_ARTIFACT_MAP[self.Stage.PLAN]).write_text(plan, encoding="utf-8")
+            r = self.check(run_dir, self.Stage.PLAN, self.tier, [], plan)
+        self.assertTrue(r.passed)
+        self.assertFalse(any("new.py" in i for i in r.issues))
+
 
 if __name__ == "__main__":
     unittest.main()

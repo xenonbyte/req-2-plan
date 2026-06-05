@@ -321,6 +321,39 @@ def _iter_plan_task_bodies(content: str):
         yield content[s:e]
 
 
+def _check_plan_file_refs(run_dir: Path, content: str) -> list[str]:
+    """Hard-check Files paths against the Context Pack repo_root. create-type tasks
+    are exempt; the part after '::' (a symbol) is advisory and not checked (no AST pack yet)."""
+    import json
+    pack_json = run_dir / "02-project-context.json"
+    if not pack_json.exists():
+        return []  # no ground truth -> advisory only
+    try:
+        repo_root = Path(json.loads(pack_json.read_text(encoding="utf-8")).get("repo_root", ""))
+    except (ValueError, OSError):
+        return []
+    if not repo_root or not repo_root.exists():
+        return []
+    issues: list[str] = []
+    for body in _iter_plan_task_bodies(content):
+        if "create" in _plan_task_field_value(body, "Change Type").lower():
+            continue
+        files_field = _plan_task_field_body(body, "Files")
+        for line in files_field.splitlines():
+            stripped = line.strip()
+            if not stripped.startswith(("- ", "* ")):
+                continue
+            path_part = stripped[2:].split("::")[0].strip()
+            if not path_part:
+                continue
+            if not (repo_root / path_part).exists():
+                issues.append(
+                    f"PLAN-TASK Files references missing path {path_part!r} "
+                    "(mark the task 'Change Type: create' if it is a new file)."
+                )
+    return issues
+
+
 def _check_spec_refs_valid(run_dir: Path, content: str) -> list[str]:
     from tools.workflow_cli.trace import build_trace
     defined_specs = {i for i in build_trace(run_dir).defined if i.startswith("SPEC-")}
@@ -337,7 +370,7 @@ def _check_plan_task_fields(content: str) -> list[str]:
     issues: list[str] = []
     numbers: list[int] = []
     for body in _iter_plan_task_bodies(content):
-        m = re.match(r"###\s+PLAN-TASK-(\d+)", body.lstrip())
+        m = re.match(r"###\s+PLAN-TASK-(\d+)", body)
         num = int(m.group(1)) if m else None
         if num is not None:
             numbers.append(num)
@@ -349,7 +382,7 @@ def _check_plan_task_fields(content: str) -> list[str]:
     if numbers:
         if len(set(numbers)) != len(numbers):
             issues.append("PLAN-TASK numbers must be unique.")
-        if sorted(numbers) != list(range(1, len(numbers) + 1)):
+        elif sorted(numbers) != list(range(1, len(numbers) + 1)):
             issues.append("PLAN-TASK numbers must be contiguous starting at 1.")
     return issues
 
@@ -598,6 +631,8 @@ def check_quality_gate(
             issues.extend(_check_plan_task_fields(artifact_content))
             # R5.2: dangling SPEC references
             issues.extend(_check_spec_refs_valid(run_dir, artifact_content))
+            # R5.3: file refs vs Context Pack repo_root
+            issues.extend(_check_plan_file_refs(run_dir, artifact_content))
 
         # Check 6 (SPEC): the External Documentation Checked section must be present and non-empty.
         if stage == Stage.SPEC:
