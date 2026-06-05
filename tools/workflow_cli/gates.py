@@ -550,8 +550,10 @@ def check_quality_gate(
 
         # Check 5b (PLAN): trace closure — all upstream SPEC/RISK/SCOPE-IN IDs must be consumed.
         if stage == Stage.PLAN:
-            from tools.workflow_cli.trace import check_trace_closure
+            from tools.workflow_cli.trace import check_trace_closure, scope_out_violations
             issues.extend(check_trace_closure(run_dir))
+            for sid in scope_out_violations(run_dir):
+                issues.append(f"PLAN references out-of-scope item {sid}; scope overflow (R8).")
 
         # Check 6 (SPEC): the External Documentation Checked section must be present and non-empty.
         if stage == Stage.SPEC:

@@ -100,3 +100,13 @@ class TestTrace(unittest.TestCase):
             (run_dir / STAGE_ARTIFACT_MAP[Stage.RISK_DISCOVERY]).write_text(
                 "## RISK-SEC-001 token leak\nThis needs mitigation.\nMitigation: TBD\n", encoding="utf-8")
             self.assertTrue(any("RISK-SEC-001" in i for i in check_trace_closure(run_dir)))
+
+    def test_plan_referencing_scope_out_is_a_violation(self):
+        from tools.workflow_cli.trace import scope_out_violations
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            (run_dir / STAGE_ARTIFACT_MAP[Stage.REQUIREMENT_BRIEF]).write_text(
+                "## Out-of-Scope\n- SCOPE-OUT-001 admin UI\n", encoding="utf-8")
+            (run_dir / STAGE_ARTIFACT_MAP[Stage.PLAN]).write_text(
+                "## Tasks\n### PLAN-TASK-001 build admin UI per SCOPE-OUT-001\n", encoding="utf-8")
+            self.assertEqual(scope_out_violations(run_dir), ["SCOPE-OUT-001"])

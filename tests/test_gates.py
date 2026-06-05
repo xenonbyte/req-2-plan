@@ -1135,6 +1135,22 @@ class TestTraceClosureInPlanGate(unittest.TestCase):
             result = check_quality_gate(run_dir, Stage.PLAN, tier, [], plan)
         self.assertFalse(any("closure status tag" in i for i in result.issues))
 
+    def test_plan_gate_fails_on_scope_overflow(self):
+        import tempfile
+        from pathlib import Path
+        from tools.workflow_cli.gates import check_quality_gate
+        from tools.workflow_cli.models import Stage, TierBase, TierEstimate, STAGE_ARTIFACT_MAP
+        tier = TierEstimate(base=TierBase.STANDARD, modifiers=frozenset())
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            (run_dir / STAGE_ARTIFACT_MAP[Stage.REQUIREMENT_BRIEF]).write_text(
+                "## Out-of-Scope\n- SCOPE-OUT-001 admin UI\n", encoding="utf-8")
+            plan = "## Tasks\n### PLAN-TASK-001 touch SCOPE-OUT-001\n"
+            (run_dir / STAGE_ARTIFACT_MAP[Stage.PLAN]).write_text(plan, encoding="utf-8")
+            r = check_quality_gate(run_dir, Stage.PLAN, tier, [], plan)
+        self.assertFalse(r.passed)
+        self.assertTrue(any("SCOPE-OUT-001" in i for i in r.issues))
+
 
 class TestScopeFreeze(unittest.TestCase):
     def setUp(self):

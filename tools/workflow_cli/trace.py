@@ -145,6 +145,16 @@ def spec_ids_not_consumed(run_dir: Path) -> list[str]:
                   if id_.startswith("SPEC-") and id_ not in consumed)
 
 
+def scope_out_violations(run_dir: Path) -> list[str]:
+    """SCOPE-OUT-* ids that the PLAN references — a scope overflow (R8)."""
+    model = build_trace(run_dir)
+    plan = Stage.PLAN.value
+    return sorted(
+        id_ for id_, stages in model.referenced.items()
+        if id_.startswith("SCOPE-OUT-") and plan in stages
+    )
+
+
 def check_trace_closure(run_dir: Path) -> list[str]:
     issues: list[str] = []
     for id_ in spec_ids_not_consumed(run_dir):
