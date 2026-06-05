@@ -18,7 +18,8 @@
     "README.md"
   ],
   "scripts": {
-    "test": ".venv/bin/python -m pytest",
+    "test": "python -m pytest",
+    "test:local": ".venv/bin/python -m pytest",
     "prepack": "node bin/r2p.js version >/dev/null"
   },
   "repository": {

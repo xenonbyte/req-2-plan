@@ -51,7 +51,7 @@
 
 - All tests use `tempfile.TemporaryDirectory` for filesystem isolation.
 - Always pass `base_path=Path(tmp)` to CLI/shortcuts — never use real `.req-to-plan/`.
-- Test runner: `.venv/bin/python -m pytest` (never bare `pytest` or `python -m pytest`).
+- Test runner: locally use `.venv/bin/python -m pytest` or `npm run test:local`; in an environment with `requirements-dev.txt` installed (CI, fresh venv) `python -m pytest` or `npm test` is fine. Never use bare `pytest`.
 - New features: write tests first (red → green → commit).
 - All tests must stay green. Run the full suite; the exact count is intentionally not pinned here.
 
