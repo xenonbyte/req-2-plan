@@ -394,6 +394,20 @@ def _section_entries_missing_id(content: str, heading: str, id_prefix: str) -> l
     return missing
 
 
+def _section_has_bullets(content: str, heading: str) -> bool:
+    return any(l.lstrip().startswith(("- ", "* ")) for l in _section_body(content, heading).splitlines())
+
+
+def _check_elicitation(stage: Stage, tier: TierEstimate, content: str) -> list[str]:
+    """R8: standard-tier brief must record at least one assumption or open question."""
+    from tools.workflow_cli.models import TierBase
+    if stage != Stage.REQUIREMENT_BRIEF or tier.base != TierBase.STANDARD:
+        return []
+    if _section_has_bullets(content, "## Assumptions") or _section_has_bullets(content, "## Open Questions"):
+        return []
+    return ["Standard-tier brief must record at least one assumption or open question (R8 elicitation)."]
+
+
 def _check_scope_freeze(stage: Stage, content: str) -> list[str]:
     """R8: brief's In/Out-of-Scope must carry stable IDs so trace can anchor them."""
     if stage != Stage.REQUIREMENT_BRIEF:
@@ -554,6 +568,9 @@ def check_quality_gate(
 
         # Check 8 (R8): scope-freeze — In/Out-of-Scope entries must carry stable IDs.
         issues.extend(_check_scope_freeze(stage, artifact_content))
+
+        # Check 9 (R8): elicitation — standard-tier brief must record at least one assumption or open question.
+        issues.extend(_check_elicitation(stage, tier, artifact_content))
 
     return GateResult(
         passed=len(issues) == 0,
