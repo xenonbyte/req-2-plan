@@ -1192,6 +1192,19 @@ class TestScopeFreeze(unittest.TestCase):
             r = self.check(Path(tmp), self.Stage.REQUIREMENT_BRIEF, self.tier, [], content)
         self.assertFalse(any("SCOPE-IN" in i or "SCOPE-OUT" in i for i in r.issues))
 
+    def test_duplicate_scope_stable_ids_fail(self):
+        import tempfile
+        from pathlib import Path
+        content = self._brief(
+            "- SCOPE-IN-001 rate limit per IP\n- SCOPE-IN-001 login throttling",
+            "- SCOPE-OUT-001 admin UI\n- SCOPE-OUT-001 reporting dashboard",
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            r = self.check(Path(tmp), self.Stage.REQUIREMENT_BRIEF, self.tier, [], content)
+        self.assertFalse(r.passed)
+        self.assertTrue(any("SCOPE-IN-001" in i and "duplicate" in i.lower() for i in r.issues))
+        self.assertTrue(any("SCOPE-OUT-001" in i and "duplicate" in i.lower() for i in r.issues))
+
     def test_each_scope_entry_must_have_matching_id(self):
         import tempfile
         from pathlib import Path
@@ -1298,6 +1311,53 @@ class TestPlanTaskFields(unittest.TestCase):
             r = self.check(run_dir, self.Stage.PLAN, self.tier, [], plan)
         self.assertFalse(r.passed)
         self.assertTrue(any("ghost.py" in i for i in r.issues))
+
+    def test_files_referencing_parent_path_outside_repo_fails_even_if_file_exists(self):
+        import json, tempfile
+        from pathlib import Path
+        from tools.workflow_cli.models import STAGE_ARTIFACT_MAP
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = root / "run"
+            run_dir.mkdir()
+            repo = root / "repo"
+            repo.mkdir()
+            (root / "outside.py").write_text("x=1\n", encoding="utf-8")
+            (run_dir / "02-project-context.json").write_text(
+                json.dumps({"repo_root": str(repo)}), encoding="utf-8")
+            (run_dir / STAGE_ARTIFACT_MAP[self.Stage.SPEC]).write_text(
+                "## SPEC-AUTH-001 login\n", encoding="utf-8")
+            plan = ("## Tasks\n\n### PLAN-TASK-001 a\n"
+                    "Spec References: SPEC-AUTH-001\nChange Type: modify\n"
+                    "Files:\n- ../outside.py\nVerification: pytest\n")
+            (run_dir / STAGE_ARTIFACT_MAP[self.Stage.PLAN]).write_text(plan, encoding="utf-8")
+            r = self.check(run_dir, self.Stage.PLAN, self.tier, [], plan)
+        self.assertFalse(r.passed)
+        self.assertTrue(any("../outside.py" in i and "outside repo_root" in i for i in r.issues))
+
+    def test_files_referencing_absolute_path_outside_repo_fails_even_if_file_exists(self):
+        import json, tempfile
+        from pathlib import Path
+        from tools.workflow_cli.models import STAGE_ARTIFACT_MAP
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = root / "run"
+            run_dir.mkdir()
+            repo = root / "repo"
+            repo.mkdir()
+            outside = root / "outside.py"
+            outside.write_text("x=1\n", encoding="utf-8")
+            (run_dir / "02-project-context.json").write_text(
+                json.dumps({"repo_root": str(repo)}), encoding="utf-8")
+            (run_dir / STAGE_ARTIFACT_MAP[self.Stage.SPEC]).write_text(
+                "## SPEC-AUTH-001 login\n", encoding="utf-8")
+            plan = ("## Tasks\n\n### PLAN-TASK-001 a\n"
+                    "Spec References: SPEC-AUTH-001\nChange Type: modify\n"
+                    f"Files:\n- {outside}\nVerification: pytest\n")
+            (run_dir / STAGE_ARTIFACT_MAP[self.Stage.PLAN]).write_text(plan, encoding="utf-8")
+            r = self.check(run_dir, self.Stage.PLAN, self.tier, [], plan)
+        self.assertFalse(r.passed)
+        self.assertTrue(any(str(outside) in i and "outside repo_root" in i for i in r.issues))
 
     def test_files_create_type_is_exempt(self):
         import json, tempfile

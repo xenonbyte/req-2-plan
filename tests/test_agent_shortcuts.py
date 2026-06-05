@@ -991,6 +991,48 @@ class TestContinueDriver:
             assert _expected_workflow_cli_prefix(base) in out
             assert f"gate-entry --work-id {work_id} --stage requirement_brief" in out
 
+    def test_continue_next_stage_seeds_content_file_after_entry_gate_passes(self, capsys):
+        import tempfile
+        from pathlib import Path
+        from tools.workflow_cli import agent_shortcuts as A
+        from tools.workflow_cli.models import RunStatus, Stage, TierBase, TierEstimate
+        from tools.workflow_cli.state import RunStateManager
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            with pytest.raises(SystemExit):
+                A.main(["start", "Add rate limiting"], base_path=base)
+            capsys.readouterr()
+            work_id = A.read_active_pointer(base)["selected_work_id"]
+            run_dir = base / ".req-to-plan" / work_id
+            manager = RunStateManager(run_dir)
+            record = manager.load()
+            record.status = RunStatus.NEXT_STAGE
+            record.current_stage = Stage.REQUIREMENT_BRIEF
+            record.tier_locked = TierEstimate(base=TierBase.STANDARD, modifiers=frozenset())
+            manager.save(record)
+            (run_dir / "02-project-context.md").write_text("repo summary", encoding="utf-8")
+
+            def fake_gate_entry(args, gate_base_path):
+                assert gate_base_path == base
+                assert args == ["gate-entry", "--work-id", work_id, "--stage", "requirement_brief"]
+                updated = manager.load()
+                updated.status = RunStatus.ACTIVE_STAGE_DRAFT
+                manager.save(updated)
+                return 0
+
+            with patch("tools.workflow_cli.agent_shortcuts._run_cli", side_effect=fake_gate_entry):
+                with pytest.raises(SystemExit) as exc:
+                    A.main(["continue"], base_path=base)
+
+            out = capsys.readouterr().out
+            content = (run_dir / "inputs" / "requirement_brief-content.md").read_text(encoding="utf-8")
+            assert exc.value.code == 0
+            assert "entered_stage" in out
+            assert "## In-Scope" in content
+            assert "## Upstream Summary (read-only)" in content
+            assert "## Project Context (read-only)\nrepo summary" in content
+
     def test_continue_entry_gate_failed_prints_executable_retry(self, capsys):
         import tempfile
         from pathlib import Path

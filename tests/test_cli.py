@@ -2551,6 +2551,44 @@ class TestContextBuildCommand:
         data = json.loads((run_dir / "02-project-context.json").read_text(encoding="utf-8"))
         assert "pip" in data["package_managers"]
 
+    def test_context_build_honors_global_base_path(self, tmp_path):
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        (repo / "requirements.txt").write_text("pyyaml>=6.0\n", encoding="utf-8")
+        run_dir = tmp_path / ".req-to-plan" / "WF-20260605-global-base"
+        run_dir.mkdir(parents=True)
+
+        with pytest.raises(SystemExit) as exc_info:
+            main([
+                "--base-path", str(tmp_path),
+                "context-build",
+                "--work-id", "WF-20260605-global-base",
+                "--repo-path", str(repo),
+            ])
+
+        assert exc_info.value.code == 0
+        assert (run_dir / "02-project-context.json").exists()
+
+    def test_context_build_rejects_invalid_work_id_before_writing(self, tmp_path):
+        from tools.workflow_cli.output import EXIT_CLI_ERR
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        base = tmp_path / "base"
+        (base / ".req-to-plan").mkdir(parents=True)
+        outside = tmp_path / "existing-dir"
+        outside.mkdir()
+
+        with pytest.raises(SystemExit) as exc_info:
+            main([
+                "context-build",
+                "--work-id", "../../existing-dir",
+                "--repo-path", str(repo),
+                "--base-path", str(base),
+            ])
+
+        assert exc_info.value.code == EXIT_CLI_ERR
+        assert not (outside / "02-project-context.json").exists()
+
 
 # ---------------------------------------------------------------------------
 # run-start: Context Pack + link expansion

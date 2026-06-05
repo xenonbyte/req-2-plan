@@ -585,7 +585,15 @@ def _cmd_continue(ns: argparse.Namespace, base_path: Path) -> None:
                       f"content_file: {content_file}\n"
                       f"next: {update_cmd}\n")
                 sys.exit(0)
-            content_file = _prepare_input_file(run_path.parent, stage, "content")
+            prev = _prev_stage(record.current_stage)
+            try:
+                upstream = read_artifact(run_path.parent, prev) if prev else ""
+            except FileNotFoundError:
+                upstream = ""
+            pack_md = run_path.parent / "02-project-context.md"
+            context_summary = pack_md.read_text(encoding="utf-8") if pack_md.exists() else ""
+            seed = _seed_for_stage(record.current_stage, record.tier_locked, upstream, context_summary)
+            content_file = _prepare_input_file(run_path.parent, stage, "content", seed)
             produce_cmd = _stage_content_command(
                 base_path,
                 work_id,

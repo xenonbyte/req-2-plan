@@ -72,11 +72,19 @@ def _spec_blocks(spec_content: str) -> dict[str, str]:
 
 
 def _risk_blocks(content: str) -> dict[str, str]:
-    starts = list(re.finditer(r"(?m)^#+\s+(RISK-[A-Z]+-\d+)\b", content))
+    starts = list(re.finditer(r"(?m)^(#+)\s+(RISK-[A-Z]+-\d+)\b", content))
+    headings = list(re.finditer(r"(?m)^(#+)\s+", content))
     blocks: dict[str, str] = {}
-    for index, match in enumerate(starts):
-        end = starts[index + 1].start() if index + 1 < len(starts) else len(content)
-        blocks[match.group(1)] = content[match.start():end]
+    for match in starts:
+        level = len(match.group(1))
+        end = len(content)
+        for heading in headings:
+            if heading.start() <= match.start():
+                continue
+            if len(heading.group(1)) <= level:
+                end = heading.start()
+                break
+        blocks[match.group(2)] = content[match.start():end]
     return blocks
 
 
@@ -100,14 +108,12 @@ def scope_in_not_closed(run_dir: Path) -> list[str]:
 def risk_ids_not_closed(run_dir: Path) -> list[str]:
     """RISK-* blocks must declare Status: mitigated|deferred|out_of_scope.
 
-    v1 limitation: blocks are split by RISK-* headings over the concatenated
-    artifacts, so a block runs until the next RISK heading, and Status must be
-    one of the three exact tokens. This is conservative but coarse; refine the
-    block boundaries if false positives surface in practice.
+    Closure is read only from the risk definition block in RISK_DISCOVERY.
+    A block stops at the next same-or-higher Markdown heading, so unrelated
+    downstream Status fields cannot close an open risk.
     """
     model = build_trace(run_dir)
-    content = "\n".join(_artifact_text(run_dir, s) for s in STAGE_ARTIFACT_MAP)
-    blocks = _risk_blocks(content)
+    blocks = _risk_blocks(_artifact_text(run_dir, Stage.RISK_DISCOVERY))
     open_risks: list[str] = []
     for id_ in sorted(i for i in model.defined if i.startswith("RISK-")):
         if not re.search(r"(?m)^Status:\s*(mitigated|deferred|out_of_scope)\s*$", blocks.get(id_, "")):

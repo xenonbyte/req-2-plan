@@ -1768,18 +1768,18 @@ def _register_route_commands(subparsers):
 def _cmd_context_build(args):
     from tools.workflow_cli.context_pack import build_context_pack, write_context_pack
 
-    base_path = Path(args.base_path) if args.base_path else Path.cwd()
-    run_dir = base_path / ".req-to-plan" / args.work_id
+    work_id = str(_validate_work_id(args.work_id))
+    run_dir = _get_run_dir(work_id, args.base_path)
     if not run_dir.exists():
         print_and_exit(
-            format_error(f"run not found: {args.work_id}", exit_code=EXIT_NOT_FOUND),
+            format_error(f"run not found: {work_id}", exit_code=EXIT_NOT_FOUND),
             EXIT_NOT_FOUND,
         )
     pack = build_context_pack(Path(args.repo_path))
     md_path, json_path = write_context_pack(pack, run_dir)
     print_and_exit(
         format_success(
-            {"work_id": args.work_id, "context_md": str(md_path), "context_json": str(json_path)},
+            {"work_id": work_id, "context_md": str(md_path), "context_json": str(json_path)},
             message="Context Pack built",
         ),
         EXIT_OK,
@@ -1790,7 +1790,7 @@ def _register_context_commands(subparsers):
     p = subparsers.add_parser("context-build", help="Build Project Context Pack for a run")
     p.add_argument("--work-id", required=True)
     p.add_argument("--repo-path", required=True)
-    p.add_argument("--base-path", default=None)
+    p.add_argument("--base-path", type=Path, default=argparse.SUPPRESS)
     p.set_defaults(func=_cmd_context_build)
 
 

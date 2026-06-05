@@ -101,6 +101,16 @@ class TestTrace(unittest.TestCase):
                 "## RISK-SEC-001 token leak\nThis needs mitigation.\nMitigation: TBD\n", encoding="utf-8")
             self.assertTrue(any("RISK-SEC-001" in i for i in check_trace_closure(run_dir)))
 
+    def test_status_outside_risk_block_does_not_close_risk(self):
+        from tools.workflow_cli.trace import check_trace_closure
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            (run_dir / STAGE_ARTIFACT_MAP[Stage.RISK_DISCOVERY]).write_text(
+                "## RISK-SEC-001 token leak\nThis needs mitigation.\n", encoding="utf-8")
+            (run_dir / STAGE_ARTIFACT_MAP[Stage.DESIGN]).write_text(
+                "## Design Summary\nStatus: mitigated\n", encoding="utf-8")
+            self.assertTrue(any("RISK-SEC-001" in i for i in check_trace_closure(run_dir)))
+
     def test_plan_referencing_scope_out_is_a_violation(self):
         from tools.workflow_cli.trace import scope_out_violations
         with tempfile.TemporaryDirectory() as tmp:

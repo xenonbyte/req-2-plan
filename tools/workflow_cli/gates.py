@@ -7,6 +7,7 @@ The Agent handles semantic quality; this module handles structural validation.
 from __future__ import annotations
 
 import re
+from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -334,6 +335,7 @@ def _check_plan_file_refs(run_dir: Path, content: str) -> list[str]:
         return []
     if not repo_root or not repo_root.exists():
         return []
+    repo_root = repo_root.resolve()
     issues: list[str] = []
     for body in _iter_plan_task_bodies(content):
         if "create" in _plan_task_field_value(body, "Change Type").lower():
@@ -346,7 +348,21 @@ def _check_plan_file_refs(run_dir: Path, content: str) -> list[str]:
             path_part = stripped[2:].split("::")[0].strip()
             if not path_part:
                 continue
-            if not (repo_root / path_part).exists():
+            path = Path(path_part)
+            if path.is_absolute():
+                issues.append(
+                    f"PLAN-TASK Files references path outside repo_root {path_part!r}."
+                )
+                continue
+            resolved = (repo_root / path).resolve()
+            try:
+                resolved.relative_to(repo_root)
+            except ValueError:
+                issues.append(
+                    f"PLAN-TASK Files references path outside repo_root {path_part!r}."
+                )
+                continue
+            if not resolved.exists():
                 issues.append(
                     f"PLAN-TASK Files references missing path {path_part!r} "
                     "(mark the task 'Change Type: create' if it is a new file)."
@@ -467,6 +483,21 @@ def _section_entries_missing_id(content: str, heading: str, id_prefix: str) -> l
     return missing
 
 
+def _section_entry_ids(content: str, heading: str, id_prefix: str) -> list[str]:
+    ids: list[str] = []
+    pattern = re.compile(rf"\b{re.escape(id_prefix)}-\d+\b")
+    for line in _section_body(content, heading).splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("<!--"):
+            continue
+        if not stripped.startswith(("- ", "* ")):
+            continue
+        match = pattern.search(stripped)
+        if match:
+            ids.append(match.group(0))
+    return ids
+
+
 def _section_has_bullets(content: str, heading: str) -> bool:
     return any(l.lstrip().startswith(("- ", "* ")) for l in _section_body(content, heading).splitlines())
 
@@ -490,6 +521,12 @@ def _check_scope_freeze(stage: Stage, content: str) -> list[str]:
         issues.append(f"In-Scope entry must carry a SCOPE-IN-* stable ID (R8): {entry}")
     for entry in _section_entries_missing_id(content, "## Out-of-Scope", "SCOPE-OUT"):
         issues.append(f"Out-of-Scope entry must carry a SCOPE-OUT-* stable ID (R8): {entry}")
+    for id_, count in Counter(_section_entry_ids(content, "## In-Scope", "SCOPE-IN")).items():
+        if count > 1:
+            issues.append(f"In-Scope stable ID {id_} is duplicate; scope IDs must be unique (R8).")
+    for id_, count in Counter(_section_entry_ids(content, "## Out-of-Scope", "SCOPE-OUT")).items():
+        if count > 1:
+            issues.append(f"Out-of-Scope stable ID {id_} is duplicate; scope IDs must be unique (R8).")
     if not re.search(r"\bSCOPE-IN-\d+\b", _section_body(content, "## In-Scope")):
         issues.append("In-Scope must list at least one stable-ID entry (SCOPE-IN-001, ...); none found (R8).")
     if not re.search(r"\bSCOPE-OUT-\d+\b", _section_body(content, "## Out-of-Scope")):
