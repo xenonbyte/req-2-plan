@@ -75,9 +75,8 @@
 
 - `docs/req-to-plan-design.md` — the authoritative entry doc: background, goals,
   architecture, and the per-stage quality model (enforced gate criteria).
-  Note: `docs/` is local-only (gitignored) except `docs/requirements/` and
-  `docs/plans/`, which are whitelisted and versioned as the authoritative
-  requirement inputs and their implementation plans.
+  Note: the entire `docs/` tree is local-only (gitignored), including
+  requirement and plan documents.
 
 Machine facts (exit codes, statuses, `ALLOWED_TRANSITIONS`, tier tables, command
 and flag names) are owned by code under `tools/workflow_cli/`, not by prose docs.
