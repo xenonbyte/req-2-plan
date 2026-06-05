@@ -1185,3 +1185,21 @@ def test_r2p_gap_resolve_wrapper_executes():
         assert r.returncode == 0, r.stderr or r.stdout
         rec = RunStateManager(Path(tmp) / ".req-to-plan" / work_id).load()
         assert rec.open_routes[0].status == "repaired"
+
+
+class TestSeedForStage:
+    def test_seed_includes_scope_headings_for_brief(self):
+        from tools.workflow_cli.agent_shortcuts import _seed_for_stage
+        from tools.workflow_cli.models import Stage, TierBase, TierEstimate
+        tier = TierEstimate(base=TierBase.STANDARD, modifiers=frozenset())
+        seed = _seed_for_stage(Stage.REQUIREMENT_BRIEF, tier, upstream_summary="")
+        assert "## In-Scope" in seed
+        assert "## Out-of-Scope" in seed
+
+    def test_seed_appends_upstream_summary_when_present(self):
+        from tools.workflow_cli.agent_shortcuts import _seed_for_stage
+        from tools.workflow_cli.models import Stage, TierBase, TierEstimate
+        tier = TierEstimate(base=TierBase.LIGHT, modifiers=frozenset())
+        seed = _seed_for_stage(Stage.DESIGN, tier, upstream_summary="REQ-AUTH-001: do X")
+        assert "REQ-AUTH-001: do X" in seed
+        assert "## Upstream Summary (read-only)" in seed

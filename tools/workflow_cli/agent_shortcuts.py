@@ -224,6 +224,26 @@ def _prepare_input_file(run_dir: Path, stage: str, suffix: str, seed: str = "") 
     return path
 
 
+def _prev_stage(stage):
+    """Return the Stage enum member immediately before *stage*, or None if first."""
+    from tools.workflow_cli.models import STAGE_ORDER
+    i = STAGE_ORDER.index(stage)
+    return STAGE_ORDER[i - 1] if i > 0 else None
+
+
+def _seed_for_stage(stage, tier, upstream_summary: str = "") -> str:
+    """Build the seed text for a stage content file: template + upstream summary.
+
+    Context Pack summary injection is added in R4 (Task R4.5); not here.
+    """
+    from tools.workflow_cli.stage_templates import template_for
+    base = tier.base if tier is not None else None
+    text = template_for(stage, base) if base is not None else ""
+    if upstream_summary.strip():
+        text += "\n## Upstream Summary (read-only)\n" + upstream_summary.strip() + "\n"
+    return text
+
+
 def _stage_content_command(
     base_path: Path,
     work_id: str,
@@ -441,7 +461,13 @@ def _cmd_continue(ns: argparse.Namespace, base_path: Path) -> None:
                 body = ""
             open_owner_route = _open_owner_route(record)
             if aa is None or not body:
-                content_file = _prepare_input_file(run_path.parent, stage, "content")
+                prev = _prev_stage(record.current_stage)
+                try:
+                    upstream = read_artifact(run_path.parent, prev) if prev else ""
+                except FileNotFoundError:
+                    upstream = ""
+                seed = _seed_for_stage(record.current_stage, record.tier_locked, upstream)
+                content_file = _prepare_input_file(run_path.parent, stage, "content", seed)
                 content_cmd = _stage_content_command(
                     base_path,
                     work_id,
