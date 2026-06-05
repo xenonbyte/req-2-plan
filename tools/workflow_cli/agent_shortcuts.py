@@ -387,6 +387,16 @@ def _resolve_start_requirement(ns: argparse.Namespace) -> tuple[str, Path | None
     return raw, None
 
 
+def _build_run_start_args(work_id, requirement, file_path, repo_path=None):
+    if file_path is not None:
+        args = ["run-start", "--work-id", work_id, "--requirement-file", str(file_path)]
+    else:
+        args = ["run-start", "--work-id", work_id, "--requirement", requirement]
+    if repo_path:
+        args += ["--repo-path", str(repo_path)]
+    return args
+
+
 def _cmd_start(ns: argparse.Namespace, base_path: Path) -> None:
     requirement, file_path = _resolve_start_requirement(ns)
 
@@ -407,10 +417,7 @@ def _cmd_start(ns: argparse.Namespace, base_path: Path) -> None:
             sys.exit(1)
 
     work_id = generate_work_id(requirement, base_path)
-    if file_path is not None:
-        run_args = ["run-start", "--work-id", work_id, "--requirement-file", str(file_path)]
-    else:
-        run_args = ["run-start", "--work-id", work_id, "--requirement", requirement]
+    run_args = _build_run_start_args(work_id, requirement, file_path, getattr(ns, "repo_path", None))
     exit_code = _run_cli(run_args, base_path)
     if exit_code != 0:
         sys.exit(exit_code)
@@ -740,6 +747,7 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Read the requirement from a file instead of a positional argument",
     )
+    p_start.add_argument("--repo-path", dest="repo_path", default=None)
 
     sub.add_parser("continue")
 

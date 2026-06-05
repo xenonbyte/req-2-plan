@@ -1210,3 +1210,16 @@ class TestSeedForStage:
         seed = _seed_for_stage(Stage.DESIGN, tier, upstream_summary="REQ-AUTH-001: do X")
         assert "REQ-AUTH-001: do X" in seed
         assert "## Upstream Summary (read-only)" in seed
+
+
+class TestRunStartArgs:
+    def test_repo_path_is_forwarded_to_run_start(self):
+        from tools.workflow_cli.agent_shortcuts import _build_run_start_args
+        args = _build_run_start_args("WF-x", "do thing", None, repo_path=".")
+        assert "--repo-path" in args
+        assert args[args.index("--repo-path") + 1] == "."
+
+    def test_repo_path_absent_when_not_given(self):
+        from tools.workflow_cli.agent_shortcuts import _build_run_start_args
+        args = _build_run_start_args("WF-x", "do thing", None, repo_path=None)
+        assert "--repo-path" not in args
