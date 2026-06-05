@@ -395,21 +395,28 @@ def _context_pack_repo_root(run_dir: Path) -> Path | None:
     return repo_root.resolve()
 
 
+def _python_executable() -> str:
+    import shutil
+    import sys
+    if sys.executable:
+        return sys.executable
+    return "python3" if shutil.which("python3") else "python"
+
+
 def _context_pack_remediation_command(run_dir: Path) -> str:
     import shlex
     package_root = Path(__file__).resolve().parents[2]
     pythonpath = f"PYTHONPATH={shlex.quote(str(package_root))}${{PYTHONPATH:+:$PYTHONPATH}}"
     command = (
-        f"{pythonpath} python3 -m tools.workflow_cli "
+        f"{pythonpath} {shlex.quote(_python_executable())} -m tools.workflow_cli "
         f"context-build --work-id {run_dir.name}"
     )
     if run_dir.parent.name == ".req-to-plan":
         base_dir = run_dir.parent.parent
         try:
-            if base_dir.resolve() != Path.cwd().resolve():
-                command += f" --base-path {shlex.quote(str(base_dir))}"
+            command += f" --base-path {shlex.quote(str(base_dir.resolve()))}"
         except (OSError, RuntimeError):
-            # cwd deleted (OSError) or symlink-loop resolve (RuntimeError)
+            # Path resolution failed (for example, a symlink loop).
             command += " --base-path <base-dir>"
     return command + " --repo-path <repo-dir>"
 
@@ -586,23 +593,36 @@ def _check_plan_task_skeleton_placeholders(content: str) -> list[str]:
     return issues
 
 
-def _section_body(content: str, heading: str) -> str:
-    """Return the text of the section under `heading`, stopping at the next same-or-higher heading."""
+def _section_bodies(content: str, heading: str) -> list[str]:
+    """Return all bodies under `heading`, each stopping at the next same-or-higher heading."""
     level = len(heading) - len(heading.lstrip("#"))
-    out, capture = [], False
+    bodies: list[str] = []
+    out: list[str] | None = None
     for line, _, _ in unfenced_markdown_lines(content):
         if line.strip() == heading:
-            capture = True
+            if out is not None:
+                bodies.append("\n".join(out))
+            out = []
             continue
-        if capture:
+        if out is not None:
             stripped = line.lstrip()
             if stripped.startswith("#"):
                 # Count hashes of this line's heading
                 line_level = len(stripped) - len(stripped.lstrip("#"))
                 if line_level <= level:
-                    break
+                    bodies.append("\n".join(out))
+                    out = None
+                    continue
             out.append(line.rstrip("\r\n"))
-    return "\n".join(out)
+    if out is not None:
+        bodies.append("\n".join(out))
+    return bodies
+
+
+def _section_body(content: str, heading: str) -> str:
+    """Return the first section body under `heading`, stopping at the next same-or-higher heading."""
+    bodies = _section_bodies(content, heading)
+    return bodies[0] if bodies else ""
 
 
 def _section_entries_missing_id(content: str, heading: str, id_prefix: str) -> list[str]:
@@ -654,7 +674,9 @@ def _check_elicitation(stage: Stage, tier: TierEstimate, content: str) -> list[s
 # at checkpoint, not here (Agent/CLI boundary).
 _DECISION_SECTION = "## Decision Requests"
 _DECISION_BLOCK_RE = re.compile(r"^###\s+(DECISION-\d+)\b")
-_DECISION_NESTED_MARKER_RE = re.compile(r"^(?:#{1,6}\s+|[-*]\s+)DECISION-\d+\b")
+_DECISION_NESTED_MARKER_RE = re.compile(
+    r"^(?:#{1,6}\s+|[-*]\s+(?:\[[ xX]\]\s+)?|(?:\[[ xX]\]\s+)?)DECISION-\d+\b"
+)
 _DECISION_STATUS_VALUES = frozenset({"pending", "selected"})
 
 
@@ -678,28 +700,30 @@ def _check_decision_requests(stage: Stage, tier: TierEstimate, content: str) -> 
     from tools.workflow_cli.models import TierBase
     if stage != Stage.DESIGN or tier.base != TierBase.STANDARD:
         return []
-    lines = _section_body(content, _DECISION_SECTION).splitlines()
-    starts = [
-        (i, m)
-        for i, line in enumerate(lines)
-        if (m := _DECISION_BLOCK_RE.match(line.strip()))
-    ]
     blocks: list[tuple[str, list[str]]] = []
-    covered: set[int] = set()
-    for start, match in starts:
-        end = len(lines)
-        for j in range(start + 1, len(lines)):
-            if heading_level(lines[j]) is not None:
-                end = j
-                break
-        decision_id = match.group(1)
-        blocks.append((decision_id, lines[start + 1:end]))
-        covered.update(range(start, end))
-    stray = [
-        line.strip()
-        for i, line in enumerate(lines)
-        if i not in covered and line.strip() and not line.strip().startswith("<!--")
-    ]
+    stray: list[str] = []
+    for section_body in _section_bodies(content, _DECISION_SECTION):
+        lines = section_body.splitlines()
+        starts = [
+            (i, m)
+            for i, line in enumerate(lines)
+            if (m := _DECISION_BLOCK_RE.match(line.strip()))
+        ]
+        covered: set[int] = set()
+        for start, match in starts:
+            end = len(lines)
+            for j in range(start + 1, len(lines)):
+                if heading_level(lines[j]) is not None:
+                    end = j
+                    break
+            decision_id = match.group(1)
+            blocks.append((decision_id, lines[start + 1:end]))
+            covered.update(range(start, end))
+        stray.extend(
+            line.strip()
+            for i, line in enumerate(lines)
+            if i not in covered and line.strip() and not line.strip().startswith("<!--")
+        )
 
     issues: list[str] = []
     if not blocks:

@@ -1964,13 +1964,15 @@ class TestPlanContextPackGate(unittest.TestCase):
         return run_dir
 
     def _assert_pack_issue(self, r, expected_work_id="run"):
+        import shlex
+        import sys
         self.assertFalse(r.passed)
         issue = next(
             (i for i in r.issues if "tools.workflow_cli context-build" in i),
             "",
         )
         self.assertIn("PYTHONPATH=", issue)
-        self.assertIn("python3 -m tools.workflow_cli context-build", issue)
+        self.assertIn(f"{shlex.quote(sys.executable)} -m tools.workflow_cli context-build", issue)
         self.assertIn(f"--work-id {expected_work_id}", issue)
         self.assertIn("--repo-path <repo-dir>", issue)
 
@@ -1996,12 +1998,52 @@ class TestPlanContextPackGate(unittest.TestCase):
         self.assertIn("--base-path", issue)
         self.assertRegex(issue, r"--base-path '.*target repo'")
 
+    def test_standard_plan_pack_remediation_includes_base_path_from_base_cwd(self):
+        import os
+        import tempfile
+        from pathlib import Path
+        from tools.workflow_cli.models import STAGE_ARTIFACT_MAP
+        original_cwd = Path.cwd()
+        with tempfile.TemporaryDirectory() as tmp:
+            base_dir = Path(tmp) / "target repo"
+            run_dir = base_dir / ".req-to-plan" / "WF-20260606-login"
+            run_dir.mkdir(parents=True)
+            (run_dir / STAGE_ARTIFACT_MAP[self.Stage.SPEC]).write_text(
+                "## SPEC-AUTH-001 login\n", encoding="utf-8")
+            (run_dir / STAGE_ARTIFACT_MAP[self.Stage.PLAN]).write_text(
+                self._VALID_PLAN, encoding="utf-8")
+            try:
+                os.chdir(base_dir)
+                r = self.check(run_dir, self.Stage.PLAN, self.standard, [], self._VALID_PLAN)
+            finally:
+                os.chdir(original_cwd)
+        issue = next(
+            (i for i in r.issues if "tools.workflow_cli context-build" in i),
+            "",
+        )
+        self.assertIn("--base-path", issue)
+        self.assertRegex(issue, r"--base-path '.*target repo'")
+
     def test_standard_plan_without_pack_fails_with_remediation(self):
         import tempfile
         with tempfile.TemporaryDirectory() as tmp:
             run_dir = self._run_dir_with_spec(tmp)
             r = self.check(run_dir, self.Stage.PLAN, self.standard, [], self._VALID_PLAN)
         self._assert_pack_issue(r)
+
+    def test_standard_plan_remediation_uses_active_python_executable(self):
+        import tempfile
+        from unittest import mock
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = self._run_dir_with_spec(tmp)
+            with mock.patch("sys.executable", "/tmp/python with spaces"):
+                r = self.check(run_dir, self.Stage.PLAN, self.standard, [], self._VALID_PLAN)
+        issue = next(
+            (i for i in r.issues if "tools.workflow_cli context-build" in i),
+            "",
+        )
+        self.assertIn("'/tmp/python with spaces' -m tools.workflow_cli context-build", issue)
+        self.assertNotIn(" python3 -m tools.workflow_cli context-build", issue)
 
     def test_standard_plan_with_corrupt_pack_json_fails(self):
         import tempfile
@@ -2172,6 +2214,33 @@ class TestDecisionRequestsGate(unittest.TestCase):
         issues = self._issues(self._design(section))
         self.assertTrue(any("DECISION-001" in i and "pending" in i for i in issues))
 
+    def test_pending_decision_in_duplicate_section_fails(self):
+        content = self._design("none\n").replace(
+            "## SPEC Handoff\ncontent\n",
+            "## SPEC Handoff\ncontent\n\n"
+            "## Decision Requests\n"
+            "### DECISION-002 region choice\n"
+            "Question: q\nOptions: A / B\nRecommended: A\n"
+            "Status: pending\n",
+        )
+        issues = self._issues(content)
+        self.assertTrue(any("DECISION-002" in i and "pending" in i for i in issues),
+                        f"duplicate section pending decision must fail: {issues}")
+
+    def test_none_in_later_duplicate_section_after_block_fails(self):
+        section = ("### DECISION-001 limiter backend\n"
+                   "Question: q\nOptions: A / B\nRecommended: A\n"
+                   "Status: selected\nSelected: A\nRationale: approved\n")
+        content = self._design(section).replace(
+            "## SPEC Handoff\ncontent\n",
+            "## SPEC Handoff\ncontent\n\n"
+            "## Decision Requests\n"
+            "none\n",
+        )
+        issues = self._issues(content)
+        self.assertTrue(any("mixes `none` with DECISION blocks" in i for i in issues),
+                        f"duplicate section none must not be absorbed: {issues}")
+
     def test_selected_with_fields_passes(self):
         section = ("### DECISION-001 limiter backend\n"
                    "Question: Redis or in-process?\nOptions: A / B\n"
@@ -2250,6 +2319,16 @@ class TestDecisionRequestsGate(unittest.TestCase):
         issues = self._issues(self._design(section))
         self.assertTrue(any("nested 'DECISION-NNN' marker" in i for i in issues),
                         f"bullet marker must fail loud: {issues}")
+
+    def test_pending_checklist_decision_inside_block_body_fails(self):
+        """A checklist DECISION marker inside a block body must fail loud."""
+        section = ("### DECISION-001 limiter backend\n"
+                   "Question: q\nOptions: A / B\nRecommended: A\n"
+                   "Status: selected\nSelected: A\nRationale: approved\n"
+                   "- [ ] DECISION-002 choose region. Status: pending\n")
+        issues = self._issues(self._design(section))
+        self.assertTrue(any("nested 'DECISION-NNN' marker" in i for i in issues),
+                        f"checklist marker must fail loud: {issues}")
 
     def test_duplicate_decision_ids_fail(self):
         section = ("### DECISION-001 limiter backend\n"

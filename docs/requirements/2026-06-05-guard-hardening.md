@@ -24,7 +24,7 @@
 **报告漏报的四个细节（直接影响方案）：**
 
 1. **Non-goals 误报陷阱（限 block 内子章节）**：schema 强制的文档级 `## Non-goals`（`stage_schema.py:44`）是 SPEC 标题的同级或更高级标题（模板将 SPEC ID 种子化为 `### SPEC-BEHAVIOR-001`，`stage_templates.py:25`，低于 `## Non-goals` 一级），按 `_heading_blocks` 的截断规则（`trace.py:116-137`，block 止于下一个同级或更高级标题）**天然不在任何 SPEC block 内**，不构成误报源。真正的误报向量是 agent 在 SPEC block **内部**写的 Non-goals 子章节（如 `### SPEC-X-001` 下的 `#### Non-goals`）引用 `SCOPE-OUT-*` 声明排除——这是合理写法，按报告原方案全文扫 consumed SPEC block 会被误判为 scope overflow。修复须排除的正是这种 block 内子章节。
-2. **`context-build` 内部子命令已存在**（`cli.py:1790`），可中途为已有 run 补建 context pack。R11 的 gate 拦截不会形成死胡同，失败消息必须指向真实 CLI 入口：`python3 -m tools.workflow_cli context-build --work-id <id> --repo-path <dir>`（如 run 使用非默认 base path，则命令需带 `--base-path <base-dir>`，全局位置与子命令位置均可，`cli.py:1816/1830` 各注册一份）。
+2. **`context-build` 内部子命令已存在**（`cli.py:1790`），可中途为已有 run 补建 context pack。R11 的 gate 拦截不会形成死胡同，失败消息必须指向真实 CLI 入口：`<python> -m tools.workflow_cli context-build --work-id <id> --base-path <base> --repo-path <dir>`（`<python>` 为运行 gate 的解释器 `sys.executable`；`--base-path` 始终携带解析后的绝对路径，消除 cwd 敏感性；该参数全局与子命令位置均可，`cli.py:1816/1830` 各注册一份；2026-06-06 owner 复审收紧）。
 3. **fixture 互相掩护**：`Change Type: new` 的集成测试能过，是因为那些 fixture 恰好没有 context pack，file-ref 校验被静默跳过。R10 与 R11 必须同批落地，否则单修 gate 会立刻打红现有测试。
 4. **Context Pack 不可用也会静默跳过**：不止文件缺失会旁路；`02-project-context.json` 解析失败、缺 `repo_root`、或 `repo_root` 不存在时，`_check_plan_file_refs()` 也直接 `return []`（`gates.py:375-380`）。R11 必须收紧所有"无可用真值锚点"路径，而不是只查文件存在性。
 
@@ -58,7 +58,7 @@ R1–R8 落地后（v0.3.0），r2p 已具备"需求 → tier 估算 → 模板 
 本轮全部是 **gate 收紧**，押注：收紧不会产生高频误报把正常流程卡死。两个具体风险及变形：
 
 - **R9 的误报风险**：consumed SPEC block 扫描会命中 block 内 Non-goals 子章节里的合理排除性引用（文档级 `## Non-goals` 因 block 截断规则天然不在扫描范围，见核验前提）。**变形**：扫描时仅排除 SPEC block 内更深层级的 `Non-goals` 子章节（标题规范化后等于 `non-goals`，覆盖 `Non-goals`/`Non-Goals`）；排除范围从该子标题起，到下一个同级或更高级标题止，后续 sibling section 里的 `SCOPE-OUT-*` 仍必须 fail。pass fixture 必须把 `SCOPE-OUT-*` 放在被消费 SPEC block 内的 Non-goals 子标题下，确保排除路径被真实执行而非空洞通过。
-- **R11 的旧 run 风险**：升级前已开启、未带 pack 的 standard run 会在 PLAN gate 突然变严。**变形**：失败消息必须内含逐字可执行的 `python3 -m tools.workflow_cli context-build --work-id <id> --repo-path <dir>` 补救命令（非默认 base path 时包含 `--base-path <base-dir>`；2026-06-06 owner 复审收紧：命令带 `PYTHONPATH=<安装根>` 前缀，保证从任意 cwd 可执行）；run 生命周期短，不做迁移逻辑。
+- **R11 的旧 run 风险**：升级前已开启、未带 pack 的 standard run 会在 PLAN gate 突然变严。**变形**：失败消息必须内含逐字可执行的补救命令 `PYTHONPATH=<安装根> <python> -m tools.workflow_cli context-build --work-id <id> --base-path <base> --repo-path <dir>`（2026-06-06 owner 复审收紧：PYTHONPATH 前缀 + `sys.executable` 解释器 + 无条件携带解析后 `--base-path`，保证从任意 cwd、任意 Python 布局下可执行）；run 生命周期短，不做迁移逻辑。
 
 R12 有一个不同性质的脆弱点：**仅加 gate 是死代码**——会擅自预决策的 agent 根本不会写 `Status: pending`，gate 只能拦住最守纪律（最不需要拦）的 agent。**变形**：standard DESIGN 模板预置 `## Decision Requests` 章节（允许填 `none`），强迫 agent 显式表态；gate 只负责拦 pending。模板不预置，R12 不得单独上。
 
@@ -99,7 +99,7 @@ R12 有一个不同性质的脆弱点：**仅加 gate 是死代码**——会擅
 **R11 standard PLAN 缺失或不可用 Context Pack 时 gate fail**
 - 现状：`_check_plan_file_refs()`（`gates.py:373-380`）在无 `02-project-context.json`、pack JSON 解析失败、缺 `repo_root`、或 `repo_root` 不存在时直接 `return []`，静默跳过全部文件事实校验；`--repo-path` 可选且缺失无提示。
 - 质量损失：standard tier 最需要真值锚定的 run，恰恰可以在完全无根状态下产出 PLAN 并全绿——R4/R5 的核心承诺被静默旁路。
-- 优化：PLAN 阶段 quality gate 增查——`tier.base == standard` 且 context pack 缺失、不可读、格式非法、缺 `repo_root`、或 `repo_root` 不存在时均报 gate issue，消息内含逐字可执行的补救命令 `python3 -m tools.workflow_cli context-build --work-id <id> --repo-path <dir>`（内部子命令已存在，`cli.py:1790`，无需新增独立可执行文件；非默认 base path 时命令需包含 `--base-path <base-dir>`；命令带 `PYTHONPATH=<安装根>` 前缀使其从任意 cwd 可执行，2026-06-06 owner 复审收紧）。light tier 维持现状（纯文档/简单需求不强制绑 repo）。
+- 优化：PLAN 阶段 quality gate 增查——`tier.base == standard` 且 context pack 缺失、不可读、格式非法、缺 `repo_root`、或 `repo_root` 不存在时均报 gate issue，消息内含逐字可执行的补救命令 `PYTHONPATH=<安装根> <python> -m tools.workflow_cli context-build --work-id <id> --base-path <base> --repo-path <dir>`（内部子命令已存在，`cli.py:1790`，无需新增独立可执行文件；`<python>` 取 `sys.executable`，`--base-path` 无条件携带解析后路径，2026-06-06 owner 复审收紧）。light tier 维持现状（纯文档/简单需求不强制绑 repo）。
 - 收益（G7）：忘传 `--repo-path` 从"静默产出无根 PLAN"变为"明确拦截 + 一条命令补救"。
 - 工作量：小。依赖：与 R10 同批。
 
@@ -111,7 +111,7 @@ R12 有一个不同性质的脆弱点：**仅加 gate 是死代码**——会擅
 - 优化（三处缺一不可，见最脆弱前提）：
   1. standard DESIGN 模板预置 `## Decision Requests` 章节，预置说明允许填 `none`，否则按约定列出 `DECISION-NNN` heading 条目。条目语法固定为 `### DECISION-NNN <title>`，block 截止到下一个任意层级 heading（实现复审 2026-06-05 收紧，与项 3 一致）；block 内字段契约为 `Question:` / `Options:` / `Recommended:` / `Status:`，且 `Status: selected` 时另须 `Selected:` 与 `Rationale:`（仅此状态必填）。`none` 必须是章节内唯一非空、非注释正文；
   2. `stage_schema.py` 将该章节登记为 standard DESIGN required heading；
-  3. quality gate 只扫描 `## Decision Requests` 章节内的 `### DECISION-NNN` blocks，存在 `Status: pending` 时 fail，消息列出未决 `DECISION-*` ID；`Status: selected` 但缺 `Selected:` 或 `Rationale:` 同样 fail；DECISION-* block 缺 `Status:` 视同枚举外 fail-loud；章节为空、`none` 与 DECISION 条目混用、或既无 `none` 也无条目同样 fail；DECISION blocks 之外出现非 `none`、非注释的杂散正文同样 fail（章节内容只允许 `none` 或 block 两种形态）；重复的 `DECISION-NNN` id fail；单 block 内多条 `Status:` 行 fail；block 体内出现 bullet 形态的嵌套 `DECISION-*` 标记 fail；block 截断于任意层级标题——块内子标题（含 `#### DECISION-*` 伪块）落入杂散正文规则（实现复审 2026-06-05 收紧，堵"合法 block 之后的伪块被静默吸收"漏洞）。gate 兜底范围**仅限 Status 生命周期**（枚举值、Status 行存在性、章节非空 + selected 时 `Selected:`/`Rationale:` 的存在性）；Question/Options/Recommended 为模板引导字段，语义完整性由 checkpoint 把关，CLI 不验（Agent/CLI 分界原则）。
+  3. quality gate 只扫描 `## Decision Requests` 章节内的 `### DECISION-NNN` blocks，存在 `Status: pending` 时 fail，消息列出未决 `DECISION-*` ID；`Status: selected` 但缺 `Selected:` 或 `Rationale:` 同样 fail；DECISION-* block 缺 `Status:` 视同枚举外 fail-loud；章节为空、`none` 与 DECISION 条目混用、或既无 `none` 也无条目同样 fail；DECISION blocks 之外出现非 `none`、非注释的杂散正文同样 fail（章节内容只允许 `none` 或 block 两种形态）；重复的 `DECISION-NNN` id fail；单 block 内多条 `Status:` 行 fail；block 体内出现 bullet 形态的嵌套 `DECISION-*` 标记 fail；block 截断于任意层级标题——块内子标题（含 `#### DECISION-*` 伪块）落入杂散正文规则（实现复审 2026-06-05 收紧，堵"合法 block 之后的伪块被静默吸收"漏洞）；重复出现的 `## Decision Requests` 章节聚合扫描，第二个同名章节不可作旁路；嵌套标记检测覆盖 bullet、checkbox（`- [ ]`）与裸行首 `DECISION-*` 形态（2026-06-06 owner 复审收紧）。gate 兜底范围**仅限 Status 生命周期**（枚举值、Status 行存在性、章节非空 + selected 时 `Selected:`/`Rationale:` 的存在性）；Question/Options/Recommended 为模板引导字段，语义完整性由 checkpoint 把关，CLI 不验（Agent/CLI 分界原则）。
 - 边界：**无新 CLI 命令、无新状态机、无新 RunStatus**。决策放行复用既有 repair flow（agent 改 `Status: selected` + `Selected:`/`Rationale:` → `stage-update → stage-ready → gate-quality`）。`Status` 词汇只认 `pending|selected`，枚举外 fail-loud（与 R10 同原则）。
 - 旧 run：升级前已 seeded 的在途 standard DESIGN 会因新增 required heading 在 schema gate 以 missing-heading 消息失败，经既有 repair flow 补 `## Decision Requests` 章节即可；不做迁移（与 R11 同理由：run 生命周期短）。
 - 收益（G9）：选型从"checkpoint 事后发现"变为"gate 前置拦截"；agent 必须显式表态（none 或列决策）。
@@ -123,7 +123,7 @@ R12 有一个不同性质的脆弱点：**仅加 gate 是死代码**——会擅
 - 现状：见核验前提表后五行。
 - 质量损失：用户/agent 按 README 旧路径运行必然落入 R11 所堵的旁路；开发文档误导后续维护者。
 - 优化（全部小修，一次提交）：
-  1. `README.md` + `README.zh-CN.md` quickstart 改为 `r2p-start "Add rate limiting" --repo-path .`，注明"需求针对当前项目时必传，跨仓库需求传目标仓库路径"（N6 决策的配套），并在 PLAN gate 缺失/不可用 pack 的补救说明里指向 gate 打印的真实 CLI 入口（带 `PYTHONPATH=` 前缀的 `python3 -m tools.workflow_cli context-build ...`），不写不存在的 standalone `context-build` 可执行文件；
+  1. `README.md` + `README.zh-CN.md` quickstart 改为 `r2p-start "Add rate limiting" --repo-path .`，注明"需求针对当前项目时必传，跨仓库需求传目标仓库路径"（N6 决策的配套），并在 PLAN gate 缺失/不可用 pack 的补救说明里指向 gate 打印的真实 CLI 入口（带 `PYTHONPATH=` 前缀、以运行时解释器开头的 `<python> -m tools.workflow_cli context-build ...`），不写不存在的 standalone `context-build` 可执行文件；
   2. claude 主 `SKILL.md`（`agent_templates/claude/SKILL.md:16-21`）聚合命令表补 `--repo-path` 参数与 `r2p-gap-open`、`r2p-gap-resolve` 两条命令行；codex/gemini 为 per-command 模板形态、无聚合命令表，且其 gap 命令模板与 `r2p-start` 的 `--repo-path` 注记均已存在（`agent_templates/gemini/commands/r2p-start.toml:2` 等），核对即可、不改；
   3. `.claude/skills/req-to-plan.md` 整体对齐 v0.3.0 实态，不止 line 25：过期 `v1` 注释改为不硬编码版本（延续 R6 反魔数原则）；`install_cli.py` 的 "stub (full impl: Task 14)" 注记改为已完整实现；`codex/ # AGENTS.md` 改为 per-command skills 形态（否则与本文 R13-2 自相矛盾）；Module Responsibilities 树补齐缺失模块（R13-4 的 7 个加 `install.py`）；
   4. `CLAUDE.md` module map 补 7 个模块：`context_pack.py`、`stage_schema.py`、`stage_templates.py`、`trace.py`、`markdown.py`、`link_expander.py`、`repo_baseline.py`；
@@ -139,8 +139,8 @@ R12 有一个不同性质的脆弱点：**仅加 gate 是死代码**——会擅
 
 - R9：「SPEC 承载 SCOPE-OUT + PLAN 消费」fail；「SCOPE-OUT 位于被消费 SPEC block **内部的 Non-goals 子标题**下 + PLAN 消费」pass（fixture 必须用 block 内子标题，确保排除路径被真实执行，而非借文档级 `## Non-goals` 空洞通过）；「Non-goals 子章节之后的 sibling section 含 `SCOPE-OUT-*` + PLAN 消费」fail；「PLAN-TASK 直接引用」维持 fail（既有行为回归）。
 - R10：`new` 等价 `create`（有 pack、新文件路径不报 missing）；枚举外值（如 `Change Type: refactor`）fail。
-- R11：standard + 无 pack + PLAN gate → fail 且消息含 `python3 -m tools.workflow_cli context-build`；standard + pack JSON 解析失败 / 缺 `repo_root` / `repo_root` 不存在 → fail 且不静默跳过；light + 无 pack → pass；standard + 有可用 pack → 走既有 file-ref 校验。
-- R12：standard DESIGN 含 `Status: pending` → fail 并列出 ID；全部 `selected`（含 `Selected:` 与 `Rationale:`）或章节内仅显式 `none` → pass；`Status: selected` 但缺 `Selected:` 或 `Rationale:` → fail；`Status` 枚举外值 → fail；`### DECISION-NNN` block 缺 `Status:` → fail；`none` 与 DECISION 条目混用 → fail；blocks 之外的杂散非注释正文 → fail；章节为空（无 `none` 无条目）→ fail；重复 DECISION id → fail；单 block 多 `Status:` 行 → fail；合法 block 之后的 `#### DECISION-*` 伪块或块内 bullet `DECISION-*` 标记 → fail。
+- R11：standard + 无 pack + PLAN gate → fail 且消息含 `PYTHONPATH=` 前缀与 `-m tools.workflow_cli context-build`（解释器为 `sys.executable`，含空格时 shell-quoted）；run 目录位于 `.req-to-plan` 下时无条件含 `--base-path`；standard + pack JSON 解析失败 / 缺 `repo_root` / `repo_root` 不存在 → fail 且不静默跳过；light + 无 pack → pass；standard + 有可用 pack → 走既有 file-ref 校验。
+- R12：standard DESIGN 含 `Status: pending` → fail 并列出 ID；全部 `selected`（含 `Selected:` 与 `Rationale:`）或章节内仅显式 `none` → pass；`Status: selected` 但缺 `Selected:` 或 `Rationale:` → fail；`Status` 枚举外值 → fail；`### DECISION-NNN` block 缺 `Status:` → fail；`none` 与 DECISION 条目混用 → fail；blocks 之外的杂散非注释正文 → fail；章节为空（无 `none` 无条目）→ fail；重复 DECISION id → fail；单 block 多 `Status:` 行 → fail；合法 block 之后的 `#### DECISION-*` 伪块或块内 bullet/checkbox `DECISION-*` 标记 → fail；重复 `## Decision Requests` 章节内的 pending → fail；后置重复章节的 `none` 与前章节 blocks 混用 → fail。
 - R13：无可执行断言，人工核对清单五项；如 SKILL 模板有渲染测试则同步更新。
 
 完成口径：全量测试绿（`.venv/bin/python -m pytest tests/ -v`）+ 新增 fixture 全绿 + CI（3.11/3.12 matrix）在 PR 跑通。不钉死精确测试数（R6 原则）。

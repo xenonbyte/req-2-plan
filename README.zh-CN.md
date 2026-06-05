@@ -71,7 +71,7 @@ r2p status                                    # 查看已安装情况
 需求针对当前项目时必传 `--repo-path .`（跨仓库需求传目标仓库路径）；它生成的
 Project Context Pack 是 tier 估算与 PLAN 文件引用校验的真值锚点。若 standard tier
 的 PLAN gate 提示 Context Pack 缺失/不可用，直接执行 gate 打印的
-`PYTHONPATH=... python3 -m tools.workflow_cli context-build ...` 命令中途补建
+`PYTHONPATH=... <python> -m tools.workflow_cli context-build ...` 命令中途补建
 （不存在独立的 `context-build` 可执行文件）。
 
 ### Lifecycle commands
