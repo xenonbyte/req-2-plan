@@ -200,17 +200,72 @@ def spec_ids_not_consumed(run_dir: Path) -> list[str]:
                   if id_.startswith("SPEC-") and id_ not in consumed)
 
 
+_NON_GOALS_TITLE = "non-goals"
+
+
+def _strip_nested_non_goals(block: str) -> str:
+    """Remove Non-goals subsections nested inside a SPEC block (R9).
+
+    Only headings deeper than the block's own heading qualify; an exempt
+    subsection runs to the next same-or-higher heading, so a later sibling
+    section still counts toward scope-overflow scanning. The document-level
+    `## Non-goals` never enters a SPEC block (see `_heading_blocks`), so it
+    needs no handling here.
+    """
+    headings: list[tuple[int, int, bool]] = []  # (offset, level, is_non_goals)
+    block_level: int | None = None
+    offset = 0
+    for line in block.splitlines(keepends=True):
+        level = heading_level(line)
+        if level is not None:
+            if block_level is None:
+                block_level = level  # the SPEC block's own heading
+            else:
+                title = line.strip().strip("#").strip().lower()
+                headings.append((offset, level, title == _NON_GOALS_TITLE))
+        offset += len(line)
+    removals: list[tuple[int, int]] = []
+    for i, (start, level, is_non_goals) in enumerate(headings):
+        if not is_non_goals or (block_level is not None and level <= block_level):
+            continue
+        end = len(block)
+        for next_start, next_level, _ in headings[i + 1:]:
+            if next_level <= level:
+                end = next_start
+                break
+        removals.append((start, end))
+    pieces: list[str] = []
+    cursor = 0
+    for start, end in removals:
+        if start < cursor:
+            continue  # nested inside an already-removed Non-goals section
+        pieces.append(block[cursor:start])
+        cursor = end
+    pieces.append(block[cursor:])
+    return "".join(pieces)
+
+
 def scope_out_violations(run_dir: Path) -> list[str]:
-    """SCOPE-OUT-* ids that executable PLAN-TASK bodies reference — a scope overflow (R8)."""
+    """SCOPE-OUT-* ids that PLAN-TASK bodies reference, directly or via a
+    consumed SPEC block — a scope overflow (R8/R9). Non-goals subsections
+    nested inside a consumed SPEC block are exempt (legitimate exclusion
+    declarations)."""
     plan_text = _artifact_text(run_dir, Stage.PLAN)
     plan_task_text = "\n".join(unfenced_markdown_text(body) for body in _plan_task_bodies(plan_text))
-    return sorted(
-        {
+    violations = {
+        m.group(0)
+        for m in _ID_RE.finditer(plan_task_text)
+        if m.group(0).startswith("SCOPE-OUT-")
+    }
+    spec_blocks = _spec_blocks(_artifact_text(run_dir, Stage.SPEC))
+    for spec_id in plan_consumed_spec_ids(run_dir):
+        scanned = _strip_nested_non_goals(spec_blocks.get(spec_id, ""))
+        violations.update(
             m.group(0)
-            for m in _ID_RE.finditer(plan_task_text)
+            for m in _ID_RE.finditer(scanned)
             if m.group(0).startswith("SCOPE-OUT-")
-        }
-    )
+        )
+    return sorted(violations)
 
 
 def check_trace_closure(run_dir: Path) -> list[str]:

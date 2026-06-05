@@ -310,3 +310,95 @@ class TestTrace(unittest.TestCase):
                 encoding="utf-8",
             )
             self.assertEqual(scope_out_violations(run_dir), [])
+
+    def test_scope_out_via_consumed_spec_is_a_violation(self):
+        """R9 red-team: SCOPE-OUT carried by a consumed SPEC block must fail."""
+        from tools.workflow_cli.trace import scope_out_violations
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = self._run_dir(
+                tmp,
+                "## SPEC-ADMIN-001 admin dashboard\nImplements SCOPE-OUT-001\n",
+                "### PLAN-TASK-001\nSpec References: SPEC-ADMIN-001\n",
+            )
+            self.assertEqual(scope_out_violations(run_dir), ["SCOPE-OUT-001"])
+
+    def test_scope_out_in_nested_non_goals_subsection_is_not_a_violation(self):
+        """R9 pass fixture: SCOPE-OUT under an in-block Non-goals subheading is exempt.
+        Must use a subheading INSIDE the SPEC block (deeper level), not the
+        document-level ## Non-goals, so the exclusion path is actually exercised."""
+        from tools.workflow_cli.trace import scope_out_violations
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = self._run_dir(
+                tmp,
+                "## SPEC-AUTH-001 login\nbehavior\n\n"
+                "### Non-goals\n- SCOPE-OUT-001 explicitly excluded\n",
+                "### PLAN-TASK-001\nSpec References: SPEC-AUTH-001\n",
+            )
+            self.assertEqual(scope_out_violations(run_dir), [])
+
+    def test_scope_out_in_sibling_section_after_non_goals_is_a_violation(self):
+        """R9 boundary: exemption ends at the next same-or-higher heading."""
+        from tools.workflow_cli.trace import scope_out_violations
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = self._run_dir(
+                tmp,
+                "## SPEC-AUTH-001 login\nbehavior\n\n"
+                "### Non-goals\n- excluded items\n\n"
+                "### Follow-up work\nImplements SCOPE-OUT-001\n",
+                "### PLAN-TASK-001\nSpec References: SPEC-AUTH-001\n",
+            )
+            self.assertEqual(scope_out_violations(run_dir), ["SCOPE-OUT-001"])
+
+    def test_scope_out_in_unconsumed_spec_is_not_a_violation(self):
+        """Only SPEC blocks actually consumed by PLAN-TASK Spec References count."""
+        from tools.workflow_cli.trace import scope_out_violations
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = self._run_dir(
+                tmp,
+                "## SPEC-AUTH-001 login\nbehavior\n\n"
+                "## SPEC-OTHER-001 other\nImplements SCOPE-OUT-001\n",
+                "### PLAN-TASK-001\nSpec References: SPEC-AUTH-001\n",
+            )
+            self.assertEqual(scope_out_violations(run_dir), [])
+
+    def test_non_goals_heading_case_variants_are_exempt(self):
+        """Normalized heading match: `### Non-Goals` (case variant) is exempt."""
+        from tools.workflow_cli.trace import scope_out_violations
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = self._run_dir(
+                tmp,
+                "## SPEC-AUTH-001 login\nbehavior\n\n"
+                "### Non-Goals\n- SCOPE-OUT-002 excluded\n",
+                "### PLAN-TASK-001\nSpec References: SPEC-AUTH-001\n",
+            )
+            self.assertEqual(scope_out_violations(run_dir), [])
+
+    def test_nested_non_goals_does_not_swallow_sibling_violation(self):
+        """Regression: a deeper Non-goals nested inside a Non-goals section must
+        not corrupt excision offsets and hide a sibling-section violation."""
+        from tools.workflow_cli.trace import scope_out_violations
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = self._run_dir(
+                tmp,
+                "## SPEC-AUTH-001 login\nbehavior\n\n"
+                "### Non-goals\n- excluded items\n\n"
+                "#### Non-goals\n- nested noise\n\n"
+                "### Follow-up work\nImplements SCOPE-OUT-001\n",
+                "### PLAN-TASK-001\nSpec References: SPEC-AUTH-001\n",
+            )
+            self.assertEqual(scope_out_violations(run_dir), ["SCOPE-OUT-001"])
+
+    def test_two_non_goals_subsections_keep_violation_between_them(self):
+        """Two sibling Non-goals subsections are both exempt; a kept section
+        between them still reports its violation (multi-removal path)."""
+        from tools.workflow_cli.trace import scope_out_violations
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = self._run_dir(
+                tmp,
+                "## SPEC-AUTH-001 login\nbehavior\n\n"
+                "### Non-goals\n- SCOPE-OUT-002 excluded\n\n"
+                "### Implementation notes\nImplements SCOPE-OUT-001\n\n"
+                "### Non-goals\n- SCOPE-OUT-003 also excluded\n",
+                "### PLAN-TASK-001\nSpec References: SPEC-AUTH-001\n",
+            )
+            self.assertEqual(scope_out_violations(run_dir), ["SCOPE-OUT-001"])
