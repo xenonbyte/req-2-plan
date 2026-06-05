@@ -557,6 +557,31 @@ class TestStageSchemaGate(unittest.TestCase):
             result = self.check_quality_gate(Path(tmp), self.Stage.REQUIREMENT_BRIEF, self.tier, [], body)
         self.assertFalse(any("Missing required section" in i for i in result.issues))
 
+    def test_unfilled_template_placeholder_fails(self):
+        import tempfile
+        from pathlib import Path
+        from tools.workflow_cli.stage_schema import required_headings
+        from tools.workflow_cli.models import TierBase
+        body = "# Requirement Brief\n\n" + "\n".join(
+            f"{h}\n<!-- fill in -->\n" for h in required_headings(self.Stage.REQUIREMENT_BRIEF, TierBase.STANDARD)
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            result = self.check_quality_gate(Path(tmp), self.Stage.REQUIREMENT_BRIEF, self.tier, [], body)
+        self.assertFalse(result.passed)
+        self.assertTrue(any("placeholder" in i.lower() for i in result.issues))
+
+    def test_tbd_as_final_content_fails(self):
+        import tempfile
+        from pathlib import Path
+        from tools.workflow_cli.stage_schema import required_headings
+        from tools.workflow_cli.models import TierBase
+        body = "# Requirement Brief\n\n" + "\n".join(
+            f"{h}\nTBD\n" for h in required_headings(self.Stage.REQUIREMENT_BRIEF, TierBase.STANDARD)
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            result = self.check_quality_gate(Path(tmp), self.Stage.REQUIREMENT_BRIEF, self.tier, [], body)
+        self.assertFalse(result.passed)
+
 
 def test_forced_review_version_aware(tmp_path):
     from tools.workflow_cli.gates import check_forced_subagent_review

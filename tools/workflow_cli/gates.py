@@ -82,6 +82,13 @@ def check_entry_gate(
 # Upstream ID reference pattern
 # ---------------------------------------------------------------------------
 
+_PLACEHOLDER_PATTERNS = [
+    re.compile(r"<!--\s*fill in\s*-->", re.IGNORECASE),  # untouched template body
+    re.compile(r"(?m)^\s*TBD\s*$"),                       # TBD as a standalone final line
+    re.compile(r"\bTODO later\b", re.IGNORECASE),
+    re.compile(r"\bFIXME\b"),
+]
+
 # IDs that represent upstream references: REQ-*, RISK-*, DES-*, SPEC-*
 _UPSTREAM_ID_PATTERN = re.compile(
     r"\b(REQ-[A-Z]+-\d+|RISK-[A-Z]+-\d+|DES-[A-Z]+-\d+|SPEC-[A-Z]+-\d+)\b"
@@ -347,6 +354,13 @@ def _check_stage_schema(stage: Stage, tier: TierEstimate, content: str) -> list[
                 f"Missing required section {heading!r} for stage {stage.value!r} "
                 f"at tier '{tier.base.value}'."
             )
+    for pat in _PLACEHOLDER_PATTERNS:
+        if pat.search(content):
+            issues.append(
+                "Artifact contains an unresolved placeholder "
+                f"(pattern {pat.pattern!r}); fill it before passing the gate."
+            )
+            break
     return issues
 
 
