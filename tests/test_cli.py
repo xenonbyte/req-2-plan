@@ -2523,3 +2523,27 @@ def test_status_next_surfaces_gap_route_progress(capsys, monkeypatch):
         assert payload["active_item"] == "design"
         assert "R-1" in payload["resume_reason"]
         assert "repaired" in payload["resume_reason"]
+
+
+# ---------------------------------------------------------------------------
+# context-build command
+# ---------------------------------------------------------------------------
+
+
+class TestContextBuildCommand:
+    def test_context_build_writes_pack_into_run_dir(self, tmp_path):
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        (repo / "requirements.txt").write_text("pyyaml>=6.0\n", encoding="utf-8")
+        run_dir = tmp_path / ".req-to-plan" / "WF-20260605-ctx"
+        run_dir.mkdir(parents=True)
+        with pytest.raises(SystemExit) as exc_info:
+            main([
+                "context-build",
+                "--work-id", "WF-20260605-ctx",
+                "--repo-path", str(repo),
+                "--base-path", str(tmp_path),
+            ])
+        assert exc_info.value.code == 0
+        data = json.loads((run_dir / "02-project-context.json").read_text(encoding="utf-8"))
+        assert "pip" in data["package_managers"]
