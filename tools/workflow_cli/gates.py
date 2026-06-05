@@ -908,7 +908,8 @@ def check_quality_gate(
                 f"Duplicate ID definition {dup_id!r} found in artifact; each ID must be unique."
             )
 
-        # Check 5 (PLAN, standard tier): TDD-applicable tasks must carry a code block.
+        # Check 5 (PLAN, standard tier): usable Context Pack required (R11);
+        # TDD-applicable tasks must carry a code block.
         from tools.workflow_cli.models import TierBase
         if stage == Stage.PLAN and tier.base == TierBase.STANDARD:
             # R11: a usable Context Pack is the truth anchor for file-ref checks.
