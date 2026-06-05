@@ -163,7 +163,7 @@ def scope_in_not_closed(run_dir: Path) -> list[str]:
 
 
 def risk_ids_not_closed(run_dir: Path) -> list[str]:
-    """RISK-* blocks must declare Status: mitigated|deferred|out_of_scope.
+    """RISK-* blocks must declare Status: mitigated|deferred|out_of_scope|out-of-scope.
 
     Closure is read only from the risk definition block in RISK_DISCOVERY.
     A block stops at the next same-or-higher Markdown heading, so unrelated
@@ -173,7 +173,7 @@ def risk_ids_not_closed(run_dir: Path) -> list[str]:
     blocks = _risk_blocks(_artifact_text(run_dir, Stage.RISK_DISCOVERY))
     open_risks: list[str] = []
     for id_ in sorted(i for i in model.defined if i.startswith("RISK-")):
-        if not re.search(r"(?m)^Status:\s*(mitigated|deferred|out_of_scope)\s*$", blocks.get(id_, "")):
+        if not re.search(r"(?m)^Status:\s*(mitigated|deferred|out(?:_of_scope|-of-scope))\s*$", blocks.get(id_, "")):
             open_risks.append(id_)
     return open_risks
 

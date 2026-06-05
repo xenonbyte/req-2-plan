@@ -243,12 +243,11 @@ class TestTrace(unittest.TestCase):
         from tools.workflow_cli.trace import check_trace_closure
         with tempfile.TemporaryDirectory() as tmp:
             run_dir = Path(tmp)
-            (run_dir / STAGE_ARTIFACT_MAP[Stage.RISK_DISCOVERY]).write_text(
-                "## RISK-OPS-001 operational runbook\nStatus: deferred\n", encoding="utf-8")
-            self.assertFalse(any("RISK-OPS-001" in i for i in check_trace_closure(run_dir)))
-            (run_dir / STAGE_ARTIFACT_MAP[Stage.RISK_DISCOVERY]).write_text(
-                "## RISK-OPS-001 operational runbook\nStatus: out_of_scope\n", encoding="utf-8")
-            self.assertFalse(any("RISK-OPS-001" in i for i in check_trace_closure(run_dir)))
+            for status in ("deferred", "out_of_scope", "out-of-scope"):
+                with self.subTest(status=status):
+                    (run_dir / STAGE_ARTIFACT_MAP[Stage.RISK_DISCOVERY]).write_text(
+                        f"## RISK-OPS-001 operational runbook\nStatus: {status}\n", encoding="utf-8")
+                    self.assertFalse(any("RISK-OPS-001" in i for i in check_trace_closure(run_dir)))
 
     def test_needs_mitigation_wording_does_not_close_risk(self):
         from tools.workflow_cli.trace import check_trace_closure
