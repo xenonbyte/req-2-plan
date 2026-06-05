@@ -585,6 +585,24 @@ class TestStageSchemaGate(unittest.TestCase):
             result = self.check_quality_gate(Path(tmp), self.Stage.RAW_REQUIREMENT, self.tier, [], body)
         self.assertTrue(result.passed, result.issues)
 
+    def test_downstream_artifact_allows_literal_fixme_in_prose(self):
+        import tempfile
+        from pathlib import Path
+        content = (
+            "# Requirement Brief\n\n"
+            "## Goal\nFix the literal FIXME marker in code comments.\n\n"
+            "## In-Scope\n- SCOPE-IN-001 Update code paths that mention FIXME\n\n"
+            "## Out-of-Scope\n- SCOPE-OUT-001 Do not change unrelated TODO handling\n\n"
+            "## Non-Goals\n- Preserve user text that names code markers\n\n"
+            "## Assumptions\n- The string FIXME may appear in prose as requirement content\n\n"
+            "## Acceptance Criteria\n- Quality gate accepts prose that mentions FIXME.\n\n"
+            "## Open Questions\n- None.\n\n"
+            "## Sources\n- User request\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            result = self.check_quality_gate(Path(tmp), self.Stage.REQUIREMENT_BRIEF, self.tier, [], content)
+        self.assertTrue(result.passed, result.issues)
+
     def test_tbd_as_final_content_fails(self):
         import tempfile
         from pathlib import Path
@@ -855,7 +873,7 @@ class TestPlanCodeBlockGate(unittest.TestCase):
             "# PLAN\n\n"
             "## Tasks\n\n"
             "### PLAN-TASK-001: do thing\n"
-            "Spec References: n/a\n"
+            "Spec References: SPEC-AUTH-001\n"
             "Change Type: modify\n"
             "TDD Applicable: yes\n"
             "Files: n/a\n"
@@ -864,11 +882,20 @@ class TestPlanCodeBlockGate(unittest.TestCase):
             f"{verification}"
         )
 
+    def _check_plan(self, tmp: str, tier, plan: str):
+        from pathlib import Path
+        from tools.workflow_cli.models import STAGE_ARTIFACT_MAP
+        run_dir = Path(tmp)
+        (run_dir / STAGE_ARTIFACT_MAP[self.Stage.SPEC]).write_text(
+            "## SPEC-AUTH-001 auth\n", encoding="utf-8"
+        )
+        (run_dir / STAGE_ARTIFACT_MAP[self.Stage.PLAN]).write_text(plan, encoding="utf-8")
+        return self.check(run_dir, self.Stage.PLAN, tier, [], plan)
+
     def test_standard_plan_without_code_block_fails(self):
         import tempfile
-        from pathlib import Path
         with tempfile.TemporaryDirectory() as tmp:
-            r = self.check(Path(tmp), self.Stage.PLAN, self.standard, [], self._plan(False))
+            r = self._check_plan(tmp, self.standard, self._plan(False))
             self.assertFalse(r.passed)
             self.assertEqual(r.exit_code, 3)
 
@@ -911,28 +938,19 @@ class TestPlanCodeBlockGate(unittest.TestCase):
 
     def test_standard_plan_code_block_outside_skeleton_fails(self):
         import tempfile
-        from pathlib import Path
         with tempfile.TemporaryDirectory() as tmp:
-            r = self.check(
-                Path(tmp),
-                self.Stage.PLAN,
-                self.standard,
-                [],
-                self._plan(False, outside_skeleton_code=True),
-            )
+            r = self._check_plan(tmp, self.standard, self._plan(False, outside_skeleton_code=True))
             self.assertFalse(r.passed)
             self.assertEqual(r.exit_code, 3)
 
     def test_standard_plan_with_code_block_passes_this_check(self):
         import tempfile
-        from pathlib import Path
         with tempfile.TemporaryDirectory() as tmp:
-            r = self.check(Path(tmp), self.Stage.PLAN, self.standard, [], self._plan(True))
+            r = self._check_plan(tmp, self.standard, self._plan(True))
             self.assertTrue(r.passed)
 
     def test_standard_plan_allows_field_labels_inside_skeleton_code_block(self):
         import tempfile
-        from pathlib import Path
         skeleton = (
             "```yaml\n"
             "Steps:\n"
@@ -942,23 +960,16 @@ class TestPlanCodeBlockGate(unittest.TestCase):
             "```\n"
         )
         with tempfile.TemporaryDirectory() as tmp:
-            r = self.check(
-                Path(tmp),
-                self.Stage.PLAN,
-                self.standard,
-                [],
-                self._plan(True, skeleton_override=skeleton),
-            )
+            r = self._check_plan(tmp, self.standard, self._plan(True, skeleton_override=skeleton))
             self.assertTrue(r.passed)
 
     def test_standard_plan_uses_tdd_applicable_field_value_only(self):
         import tempfile
-        from pathlib import Path
         plan = (
             "# PLAN\n\n"
             "## Tasks\n\n"
             "### PLAN-TASK-001: do thing\n"
-            "Spec References: n/a\n"
+            "Spec References: SPEC-AUTH-001\n"
             "Change Type: modify\n"
             "TDD Applicable: no\n"
             "Files: docs/generated.md\n"
@@ -969,46 +980,25 @@ class TestPlanCodeBlockGate(unittest.TestCase):
             "Verification: inspect generated docs\n"
         )
         with tempfile.TemporaryDirectory() as tmp:
-            r = self.check(Path(tmp), self.Stage.PLAN, self.standard, [], plan)
+            r = self._check_plan(tmp, self.standard, plan)
             self.assertTrue(r.passed)
 
     def test_standard_plan_with_indented_skeleton_code_block_passes_this_check(self):
         import tempfile
-        from pathlib import Path
         with tempfile.TemporaryDirectory() as tmp:
-            r = self.check(
-                Path(tmp),
-                self.Stage.PLAN,
-                self.standard,
-                [],
-                self._plan(True, indented_skeleton_code=True),
-            )
+            r = self._check_plan(tmp, self.standard, self._plan(True, indented_skeleton_code=True))
             self.assertTrue(r.passed)
 
     def test_standard_plan_with_tilde_skeleton_code_block_passes_this_check(self):
         import tempfile
-        from pathlib import Path
         with tempfile.TemporaryDirectory() as tmp:
-            r = self.check(
-                Path(tmp),
-                self.Stage.PLAN,
-                self.standard,
-                [],
-                self._plan(True, fence="~~~"),
-            )
+            r = self._check_plan(tmp, self.standard, self._plan(True, fence="~~~"))
             self.assertTrue(r.passed)
 
     def test_standard_plan_with_bare_skeleton_fence_fails(self):
         import tempfile
-        from pathlib import Path
         with tempfile.TemporaryDirectory() as tmp:
-            r = self.check(
-                Path(tmp),
-                self.Stage.PLAN,
-                self.standard,
-                [],
-                self._plan(True, fence="```", skeleton_override="```\n"),
-            )
+            r = self._check_plan(tmp, self.standard, self._plan(True, fence="```", skeleton_override="```\n"))
             self.assertFalse(r.passed)
             self.assertEqual(r.exit_code, 3)
 
@@ -1031,27 +1021,17 @@ class TestPlanCodeBlockGate(unittest.TestCase):
 
     def test_standard_plan_with_empty_skeleton_code_block_fails(self):
         import tempfile
-        from pathlib import Path
         with tempfile.TemporaryDirectory() as tmp:
-            r = self.check(
-                Path(tmp),
-                self.Stage.PLAN,
-                self.standard,
-                [],
-                self._plan(True, skeleton_override="```python\n```\n"),
-            )
+            r = self._check_plan(tmp, self.standard, self._plan(True, skeleton_override="```python\n```\n"))
             self.assertFalse(r.passed)
             self.assertEqual(r.exit_code, 3)
 
     def test_standard_plan_with_language_missing_from_skeleton_code_block_fails(self):
         import tempfile
-        from pathlib import Path
         with tempfile.TemporaryDirectory() as tmp:
-            r = self.check(
-                Path(tmp),
-                self.Stage.PLAN,
+            r = self._check_plan(
+                tmp,
                 self.standard,
-                [],
                 self._plan(True, skeleton_override="```\ndef f():\n    return 1\n```\n"),
             )
             self.assertFalse(r.passed)
@@ -1059,9 +1039,8 @@ class TestPlanCodeBlockGate(unittest.TestCase):
 
     def test_light_plan_without_code_block_exempt(self):
         import tempfile
-        from pathlib import Path
         with tempfile.TemporaryDirectory() as tmp:
-            r = self.check(Path(tmp), self.Stage.PLAN, self.light, [], self._plan(False))
+            r = self._check_plan(tmp, self.light, self._plan(False))
             self.assertTrue(r.passed)
 
     def test_non_plan_stage_unaffected(self):
@@ -1451,6 +1430,52 @@ class TestPlanTaskFields(unittest.TestCase):
         r = self._gate(plan)
         self.assertFalse(r.passed)
         self.assertTrue(any("SPEC-GHOST-999" in i for i in r.issues))
+
+    def test_each_plan_task_requires_at_least_one_spec_reference(self):
+        plan = (
+            "## Tasks\n\n"
+            "### PLAN-TASK-001 a\n"
+            "Spec References: SPEC-AUTH-001\n"
+            "Change Type: modify\n"
+            "TDD Applicable: no\n"
+            "Files: tools/a.py\n"
+            "Skeleton: inspect tools/a.py\n"
+            "Steps:\n"
+            "- [ ] update a\n"
+            "Verification: pytest\n\n"
+            "### PLAN-TASK-002 b\n"
+            "Spec References: n/a\n"
+            "Change Type: modify\n"
+            "TDD Applicable: no\n"
+            "Files: tools/b.py\n"
+            "Skeleton: inspect tools/b.py\n"
+            "Steps:\n"
+            "- [ ] update b\n"
+            "Verification: pytest\n"
+        )
+        r = self._gate(plan)
+        self.assertFalse(r.passed)
+        self.assertTrue(any("PLAN-TASK-002" in i and "SPEC-*" in i for i in r.issues))
+
+    def test_skeleton_template_placeholder_inside_fenced_code_fails(self):
+        plan = (
+            "## Tasks\n\n"
+            "### PLAN-TASK-001 a\n"
+            "Spec References: SPEC-AUTH-001\n"
+            "Change Type: create\n"
+            "TDD Applicable: yes\n"
+            "Files: src/new.py\n"
+            "Skeleton:\n"
+            "```python\n"
+            "# <!-- fill in -->\n"
+            "```\n"
+            "Steps:\n"
+            "- [ ] add implementation\n"
+            "Verification: pytest\n"
+        )
+        r = self._gate(plan)
+        self.assertFalse(r.passed)
+        self.assertTrue(any("PLAN-TASK-001" in i and "Skeleton" in i and "placeholder" in i for i in r.issues))
 
     def test_spec_reference_must_be_defined_in_spec_artifact(self):
         import tempfile

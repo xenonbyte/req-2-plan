@@ -25,6 +25,11 @@ class LinkExpansionResult:
 _URL_PATTERN = re.compile(r'https?://[^\s\)\]\>\"\']+')
 _LOCAL_DOT_PATTERN = re.compile(r'(?:^|[\s\(\[])(\./[^\s\)\]\>\"\']+|\.{2}/[^\s\)\]\>\"\']+)')
 _LOCAL_SUBDIR_PATTERN = re.compile(r'(?:^|[\s\(\[])([a-zA-Z][a-zA-Z0-9_\-]*/[a-zA-Z0-9_\-][a-zA-Z0-9_\-./]*\.md)')
+_PREVIEWABLE_LOCAL_EXTENSIONS = frozenset({".md", ".markdown", ".rst", ".adoc"})
+_SENSITIVE_LOCAL_NAME_RE = re.compile(
+    r"(?:^|[-_.])(?:secrets?|credentials?|tokens?|passwords?|passwd|private[-_]?key|api[-_]?key)(?:$|[-_.])",
+    re.IGNORECASE,
+)
 
 
 def extract_links(text: str) -> list[str]:
@@ -54,7 +59,23 @@ def _fetch_url(url: str) -> LinkExpansionResult:
         return LinkExpansionResult(url=url, status=LinkStatus.UNREACHABLE, error=str(e))
 
 
+def _local_preview_block_reason(path_str: str, candidate: Path, base: Path | None) -> str | None:
+    try:
+        relative = candidate.relative_to(base) if base is not None else Path(path_str)
+    except ValueError:
+        relative = Path(path_str)
+    parts = [part for part in relative.parts if part not in ("", ".", "..")]
+    if any(part.startswith(".") for part in parts):
+        return "Local preview skipped for hidden path."
+    if _SENSITIVE_LOCAL_NAME_RE.search(candidate.name):
+        return "Local preview skipped for sensitive-looking path."
+    if candidate.suffix.lower() not in _PREVIEWABLE_LOCAL_EXTENSIONS:
+        return "Local preview skipped for unsupported local document extension."
+    return None
+
+
 def _expand_local(path_str: str, base_path: Path | None) -> LinkExpansionResult:
+    base = None
     if base_path is not None:
         base = base_path.resolve()
         candidate = (base / path_str).resolve()
@@ -68,6 +89,13 @@ def _expand_local(path_str: str, base_path: Path | None) -> LinkExpansionResult:
         candidate = Path(path_str).resolve()
 
     if candidate.exists() and candidate.is_file():
+        block_reason = _local_preview_block_reason(path_str, candidate, base)
+        if block_reason is not None:
+            return LinkExpansionResult(
+                url=path_str,
+                status=LinkStatus.LOCAL_FOUND,
+                error=block_reason,
+            )
         try:
             preview = candidate.read_text(encoding="utf-8", errors="ignore")[:500]
             return LinkExpansionResult(url=path_str, status=LinkStatus.LOCAL_FOUND,

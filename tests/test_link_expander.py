@@ -120,6 +120,26 @@ class TestExpandLinksLocalFiles(unittest.TestCase):
             self.assertEqual(results[0].status, LinkStatus.LOCAL_FOUND)
             self.assertLessEqual(len(results[0].content_preview), 500)
 
+    def test_hidden_local_file_is_not_previewed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / ".env"
+            path.write_text("API_TOKEN=SECRET", encoding="utf-8")
+            results = expand_links("See ./.env", base_path=Path(tmp))
+            self.assertEqual(results[0].status, LinkStatus.LOCAL_FOUND)
+            self.assertEqual(results[0].content_preview, "")
+            self.assertIn("hidden", results[0].error.lower())
+            self.assertNotIn("SECRET", results[0].error)
+
+    def test_sensitive_local_file_is_not_previewed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "secrets.txt"
+            path.write_text("PASSWORD=SECRET", encoding="utf-8")
+            results = expand_links("See ./secrets.txt", base_path=Path(tmp))
+            self.assertEqual(results[0].status, LinkStatus.LOCAL_FOUND)
+            self.assertEqual(results[0].content_preview, "")
+            self.assertIn("sensitive", results[0].error.lower())
+            self.assertNotIn("SECRET", results[0].error)
+
     def test_local_file_missing(self):
         results = expand_links("See ./nonexistent.md", base_path=Path("/tmp"))
         self.assertEqual(len(results), 1)

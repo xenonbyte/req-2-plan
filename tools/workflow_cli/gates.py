@@ -89,14 +89,18 @@ def check_entry_gate(
 # Upstream ID reference pattern
 # ---------------------------------------------------------------------------
 
+_FILL_IN_PLACEHOLDER_RE = re.compile(r"<!--\s*fill in\s*-->", re.IGNORECASE)
+
 _PLACEHOLDER_PATTERNS = [
-    re.compile(r"<!--\s*fill in\s*-->", re.IGNORECASE),  # untouched template body
+    _FILL_IN_PLACEHOLDER_RE,                              # untouched template body
     re.compile(
         r"(?im)^\s*(?:[-*]\s*)?(?:[A-Za-z][A-Za-z0-9 /_-]*:\s*)?TBD\s*$"
     ),                                                     # TBD as a line, field value, or list item
     re.compile(r"(?im)^\s*(?:[-*]\s*)?maybe\s*$"),
     re.compile(r"\bTODO later\b", re.IGNORECASE),
-    re.compile(r"\bFIXME\b"),
+    re.compile(
+        r"(?im)^\s*(?:[-*]\s*)?(?:[A-Za-z][A-Za-z0-9 /_-]*:\s*)?FIXME\s*$"
+    ),                                                     # FIXME as a placeholder line/field, not prose
 ]
 
 # IDs that represent upstream references: REQ-*, RISK-*, DES-*, SPEC-*
@@ -294,6 +298,11 @@ def _iter_plan_task_bodies(content: str):
     return heading_bounded_bodies(content, _PLAN_TASK_RE.match)
 
 
+def _plan_task_label(body: str) -> str:
+    m = re.match(r"###\s+PLAN-TASK-(\d+)", body)
+    return f"PLAN-TASK-{m.group(1)}" if m else "PLAN-TASK-?"
+
+
 def _plan_task_file_paths(files_field: str) -> list[str]:
     paths: list[str] = []
     lines = [line for line, _, _ in unfenced_markdown_lines(files_field)]
@@ -367,7 +376,13 @@ def _check_spec_refs_valid(run_dir: Path, content: str) -> list[str]:
             defined_specs.update(re.findall(r"\bSPEC-[A-Z]+-\d+\b", line))
     issues: list[str] = []
     for body in _iter_plan_task_bodies(content):
-        refs = re.findall(r"SPEC-[A-Z]+-\d+", _plan_task_field_body(body, "Spec References"))
+        refs_body = _plan_task_field_body(body, "Spec References")
+        refs = re.findall(r"SPEC-[A-Z]+-\d+", refs_body)
+        if refs_body.strip() and not refs:
+            issues.append(
+                f"{_plan_task_label(body)} must reference at least one SPEC-* ID "
+                "in 'Spec References:'."
+            )
         for ref in refs:
             if ref not in defined_specs:
                 issues.append(f"PLAN-TASK references {ref} which is not defined in the SPEC artifact.")
@@ -382,7 +397,7 @@ def _check_plan_task_fields(content: str) -> list[str]:
         num = int(m.group(1)) if m else None
         if num is not None:
             numbers.append(num)
-        label = f"PLAN-TASK-{num if num is not None else '?'}"
+        label = _plan_task_label(body)
         for field in PLAN_TASK_FIELDS:
             if not _plan_task_field_body(body, field).strip():
                 issues.append(f"{label} is missing a non-empty '{field}:' field.")
@@ -437,6 +452,18 @@ def _plan_tasks_missing_code(content: str) -> bool:
         if tdd_applicable.lower() == "yes" and not _has_complete_code_fence(skeleton):
             return True
     return False
+
+
+def _check_plan_task_skeleton_placeholders(content: str) -> list[str]:
+    issues: list[str] = []
+    for body in _iter_plan_task_bodies(content):
+        skeleton = _plan_task_field_body(body, "Skeleton")
+        if skeleton.strip() and _FILL_IN_PLACEHOLDER_RE.search(skeleton):
+            issues.append(
+                f"{_plan_task_label(body)} Skeleton contains an unresolved template "
+                "placeholder; replace '<!-- fill in -->' before passing the gate."
+            )
+    return issues
 
 
 def _section_body(content: str, heading: str) -> str:
@@ -667,6 +694,8 @@ def check_quality_gate(
             issues.extend(_check_plan_task_fields(artifact_content))
             # R5.2: dangling SPEC references
             issues.extend(_check_spec_refs_valid(run_dir, artifact_content))
+            # R5.2b: Skeleton is fenced, so detect template placeholders there explicitly.
+            issues.extend(_check_plan_task_skeleton_placeholders(artifact_content))
             # R5.3: file refs vs Context Pack repo_root
             issues.extend(_check_plan_file_refs(run_dir, artifact_content))
 
