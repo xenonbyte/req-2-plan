@@ -629,6 +629,37 @@ class TestRunClose:
 
 
 class TestRunReopen:
+    def test_reopen_copies_context_pack_files(self, tmp_path):
+        source = "WF-20260605-reopen-context"
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        (repo / "requirements.txt").write_text("pyyaml>=6.0\n", encoding="utf-8")
+        invoke(
+            [
+                "run-start", "--work-id", source,
+                "--requirement", "add rate limiting",
+                "--repo-path", str(repo),
+            ],
+            base_path=tmp_path,
+        )
+        record = load_record(tmp_path, source)
+        record.status = RunStatus.CLOSED_AT_PLAN_CHECKPOINT
+        record.current_stage = Stage.CLOSED
+        record.approved_checkpoints = [plan_checkpoint()]
+        save_record(tmp_path, record)
+
+        source_dir = tmp_path / ".req-to-plan" / source
+        invoke(
+            ["run-reopen", "--from", source, "--stage", "plan", "--reason", "repair plan"],
+            base_path=tmp_path,
+        )
+
+        reopened_dir = tmp_path / ".req-to-plan" / f"{source}-r1"
+        for context_file in ("02-project-context.json", "02-project-context.md"):
+            assert (reopened_dir / context_file).read_text(encoding="utf-8") == (
+                source_dir / context_file
+            ).read_text(encoding="utf-8")
+
     def test_repeated_reopen_uses_next_free_suffix(self):
         with tempfile.TemporaryDirectory() as tmp:
             source = "WF-20260527-test"

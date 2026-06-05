@@ -454,6 +454,10 @@ def _cmd_run_reopen(args):
             src_path = source_dir / artifact_file
             if src_path.exists():
                 shutil.copy2(src_path, new_run_dir / artifact_file)
+    for context_file in ("02-project-context.json", "02-project-context.md"):
+        src_path = source_dir / context_file
+        if src_path.exists():
+            shutil.copy2(src_path, new_run_dir / context_file)
 
     # Create new run record
     new_record = create_run_record(new_work_id)
