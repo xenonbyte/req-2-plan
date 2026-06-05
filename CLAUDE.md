@@ -41,8 +41,8 @@
 | `tools/workflow_cli/trace.py` | Derived trace model: SPEC consumption, scope/risk closure, scope-out violations |
 | `tools/workflow_cli/gates.py` | check_entry_gate, check_quality_gate, check_forced_subagent_review |
 | `tools/workflow_cli/output.py` | Exit code constants, format_success/error/gate_result, is_json_mode |
-| `tools/workflow_cli/cli.py` | argparse router: run/tier/gate/status/stage command groups |
-| `tools/workflow_cli/agent_shortcuts.py` | r2p-* shortcut surface: start/continue/status/switch/reopen |
+| `tools/workflow_cli/cli.py` | argparse router: run/tier/gate/status/stage/context command groups |
+| `tools/workflow_cli/agent_shortcuts.py` | r2p-* shortcut surface: start/continue/status/switch/reopen/gap |
 | `tools/workflow_cli/install.py` | InstallService: install/uninstall/status |
 | `tools/workflow_cli/install_cli.py` | r2p lifecycle binary (delegates to InstallService) |
 | `tools/workflow_cli/agent_templates/` | Install templates for claude/codex/gemini |
@@ -75,8 +75,9 @@
 
 - `docs/req-to-plan-design.md` — the authoritative entry doc: background, goals,
   architecture, and the per-stage quality model (enforced gate criteria).
-  Note: `docs/` is local-only (gitignored) except `docs/requirements/`, which is
-  whitelisted and versioned as the authoritative PLAN inputs.
+  Note: `docs/` is local-only (gitignored) except `docs/requirements/` and
+  `docs/plans/`, which are whitelisted and versioned as the authoritative
+  requirement inputs and their implementation plans.
 
 Machine facts (exit codes, statuses, `ALLOWED_TRANSITIONS`, tier tables, command
 and flag names) are owned by code under `tools/workflow_cli/`, not by prose docs.
