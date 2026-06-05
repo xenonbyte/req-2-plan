@@ -1,4 +1,19 @@
+import re
+
 from tools.workflow_cli.models import Stage, TierBase
+
+# Structural fields every PLAN-TASK anchor must carry (gate + trace share these).
+PLAN_TASK_FIELDS = (
+    "Spec References",
+    "Change Type",
+    "TDD Applicable",
+    "Files",
+    "Skeleton",
+    "Steps",
+    "Verification",
+)
+# Matches a line that opens one of those fields, e.g. "Files: src/a.py".
+PLAN_TASK_FIELD_RE = re.compile(r"^(" + "|".join(PLAN_TASK_FIELDS) + r"):")
 
 # Headings MUST stay byte-identical to any existing gate regex they overlap.
 # Notably "## External Documentation Checked" matches gates.py:_EXTERNAL_DOCS_RE.

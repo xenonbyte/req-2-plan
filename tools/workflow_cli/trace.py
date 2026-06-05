@@ -5,21 +5,23 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from tools.workflow_cli.markdown import unfenced_markdown_lines, unfenced_markdown_text
+from tools.workflow_cli.markdown import (
+    heading_bounded_bodies,
+    heading_level,
+    unfenced_markdown_lines,
+    unfenced_markdown_text,
+)
 from tools.workflow_cli.models import STAGE_ARTIFACT_MAP, Stage
+from tools.workflow_cli.stage_schema import PLAN_TASK_FIELD_RE
 
 # REQ-AUTH-001 / RISK-SEC-001 / DES-AUTH-001 / SPEC-AUTH-001 / SCOPE-IN-001 / SCOPE-OUT-001 / PLAN-TASK-001
 _ID_RE = re.compile(r"(?:REQ|RISK|DES|SPEC)-[A-Z]+-\d+|SCOPE-(?:IN|OUT)-\d+|PLAN-TASK-\d+")
 _PLAN_TASK_HEADING_RE = re.compile(r"^###\s+PLAN-TASK-\d+\b")
-_PLAN_TASK_FIELD_RE = re.compile(
-    r"^(Spec References|Change Type|TDD Applicable|Files|Skeleton|Steps|Verification):"
-)
 
 
 @dataclass
 class TraceModel:
     defined: dict = field(default_factory=dict)     # id -> stage value where first defined
-    referenced: dict = field(default_factory=dict)  # id -> set of stage values referencing it
 
 
 def _scope_ids_defined_in_brief(stage: Stage, content: str) -> set[str]:
@@ -31,7 +33,7 @@ def _scope_ids_defined_in_brief(stage: Stage, content: str) -> set[str]:
     capture_level = 0
     for line, _, _ in unfenced_markdown_lines(content):
         stripped = line.strip()
-        level = _heading_level(line)
+        level = heading_level(line)
         if stripped in {"## In-Scope", "## Out-of-Scope"}:
             capture = True
             capture_level = level or 0
@@ -43,38 +45,13 @@ def _scope_ids_defined_in_brief(stage: Stage, content: str) -> set[str]:
     return ids
 
 
-def _heading_level(line: str) -> int | None:
-    stripped = line.lstrip()
-    if not stripped.startswith("#"):
-        return None
-    return len(stripped) - len(stripped.lstrip("#"))
-
-
 def _artifact_text(run_dir: Path, stage: Stage) -> str:
     path = run_dir / STAGE_ARTIFACT_MAP[stage]
     return path.read_text(encoding="utf-8") if path.exists() else ""
 
 
 def _plan_task_bodies(plan_content: str):
-    starts = [
-        (start, _heading_level(line) or 0)
-        for line, start, _ in unfenced_markdown_lines(plan_content)
-        if _PLAN_TASK_HEADING_RE.match(line)
-    ]
-    headings = [
-        (start, level)
-        for line, start, _ in unfenced_markdown_lines(plan_content)
-        if (level := _heading_level(line)) is not None
-    ]
-    for start, level in starts:
-        end = len(plan_content)
-        for heading_start, heading_level in headings:
-            if heading_start <= start:
-                continue
-            if heading_level <= level:
-                end = heading_start
-                break
-        yield plan_content[start:end]
+    return heading_bounded_bodies(plan_content, _PLAN_TASK_HEADING_RE.match)
 
 
 def _find_plan_task_field(body: str, field: str):
@@ -88,7 +65,7 @@ def _find_plan_task_field(body: str, field: str):
 
 def _find_next_plan_task_field_start(body: str, after: int) -> int | None:
     for line, start, _ in unfenced_markdown_lines(body):
-        if start >= after and _PLAN_TASK_FIELD_RE.match(line):
+        if start >= after and PLAN_TASK_FIELD_RE.match(line):
             return start
     return None
 
@@ -191,13 +168,8 @@ def build_trace(run_dir: Path) -> TraceModel:
             if line.lstrip().startswith("#"):
                 heading_ids.update(m.group(0) for m in _ID_RE.finditer(line))
         definition_ids = heading_ids | _scope_ids_defined_in_brief(stage, content)
-        all_ids = {m.group(0) for m in _ID_RE.finditer(unfenced_markdown_text(content))}
         for id_ in definition_ids:
             model.defined.setdefault(id_, stage.value)
-        for id_ in all_ids:
-            if id_ in definition_ids and model.defined.get(id_) == stage.value:
-                continue
-            model.referenced.setdefault(id_, set()).add(stage.value)
     return model
 
 

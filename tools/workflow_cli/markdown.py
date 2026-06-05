@@ -48,3 +48,41 @@ def unfenced_markdown_lines(content: str):
 
 def unfenced_markdown_text(content: str) -> str:
     return "".join(line for line, _, _ in unfenced_markdown_lines(content))
+
+
+def heading_level(line: str) -> int | None:
+    """ATX heading level (count of leading '#'), or None when not a heading."""
+    stripped = line.lstrip()
+    if not stripped.startswith("#"):
+        return None
+    return len(stripped) - len(stripped.lstrip("#"))
+
+
+def heading_bounded_bodies(content: str, is_start):
+    """Yield each section whose heading line satisfies `is_start(line)`.
+
+    A section runs from its heading to the next heading at the same or higher
+    level, so a later sibling section cannot bleed into it. Headings are
+    located outside fenced code; each yielded body is a slice of the original
+    `content` (fences within the body are preserved for the caller to handle).
+    """
+    lines = list(unfenced_markdown_lines(content))
+    starts = [
+        (start, level)
+        for line, start, _ in lines
+        if (level := heading_level(line)) is not None and is_start(line)
+    ]
+    headings = [
+        (start, level)
+        for line, start, _ in lines
+        if (level := heading_level(line)) is not None
+    ]
+    for start, level in starts:
+        end = len(content)
+        for heading_start, heading_level_ in headings:
+            if heading_start <= start:
+                continue
+            if heading_level_ <= level:
+                end = heading_start
+                break
+        yield content[start:end]

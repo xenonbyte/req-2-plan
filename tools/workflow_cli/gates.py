@@ -20,8 +20,13 @@ from tools.workflow_cli.models import (
     TierEstimate,
     TierModifier,
 )
-from tools.workflow_cli.markdown import unfenced_markdown_lines, unfenced_markdown_text
+from tools.workflow_cli.markdown import (
+    heading_bounded_bodies,
+    unfenced_markdown_lines,
+    unfenced_markdown_text,
+)
 from tools.workflow_cli.output import EXIT_GATE_FAIL
+from tools.workflow_cli.stage_schema import PLAN_TASK_FIELD_RE, PLAN_TASK_FIELDS
 
 # ---------------------------------------------------------------------------
 # GateResult
@@ -240,18 +245,6 @@ def _has_external_docs_inventory(content: str) -> bool:
 
 _PLAN_TASK_RE = re.compile(r"^### PLAN-TASK-\d+", re.MULTILINE)
 _CODE_FENCE_LINE_RE = re.compile(r"^[ \t]{0,3}(`{3,}|~{3,})(.*)$")
-_PLAN_TASK_FIELD_RE = re.compile(
-    r"^(Spec References|Change Type|TDD Applicable|Files|Skeleton|Steps|Verification):"
-)
-_PLAN_TASK_REQUIRED_FIELDS = (
-    "Spec References",
-    "Change Type",
-    "TDD Applicable",
-    "Files",
-    "Skeleton",
-    "Steps",
-    "Verification",
-)
 
 
 def _plan_task_starts(content: str) -> list[int]:
@@ -260,13 +253,6 @@ def _plan_task_starts(content: str) -> list[int]:
         for line, start, _ in unfenced_markdown_lines(content)
         if _PLAN_TASK_RE.match(line)
     ]
-
-
-def _markdown_heading_level(line: str) -> int | None:
-    stripped = line.lstrip()
-    if not stripped.startswith("#"):
-        return None
-    return len(stripped) - len(stripped.lstrip("#"))
 
 
 def _plan_task_field_body(task_body: str, field: str) -> str:
@@ -291,7 +277,7 @@ def _find_plan_task_field(task_body: str, field: str):
 
 def _find_next_plan_task_field_start(task_body: str, after: int) -> int | None:
     for line, start, _ in unfenced_markdown_lines(task_body):
-        if start >= after and _PLAN_TASK_FIELD_RE.match(line):
+        if start >= after and PLAN_TASK_FIELD_RE.match(line):
             return start
     return None
 
@@ -305,25 +291,7 @@ def _plan_task_field_value(task_body: str, field: str) -> str:
 
 
 def _iter_plan_task_bodies(content: str):
-    starts = [
-        (start, _markdown_heading_level(line) or 0)
-        for line, start, _ in unfenced_markdown_lines(content)
-        if _PLAN_TASK_RE.match(line)
-    ]
-    headings = [
-        (start, level)
-        for line, start, _ in unfenced_markdown_lines(content)
-        if (level := _markdown_heading_level(line)) is not None
-    ]
-    for start, level in starts:
-        end = len(content)
-        for heading_start, heading_level in headings:
-            if heading_start <= start:
-                continue
-            if heading_level <= level:
-                end = heading_start
-                break
-        yield content[start:end]
+    return heading_bounded_bodies(content, _PLAN_TASK_RE.match)
 
 
 def _plan_task_file_paths(files_field: str) -> list[str]:
@@ -415,7 +383,7 @@ def _check_plan_task_fields(content: str) -> list[str]:
         if num is not None:
             numbers.append(num)
         label = f"PLAN-TASK-{num if num is not None else '?'}"
-        for field in _PLAN_TASK_REQUIRED_FIELDS:
+        for field in PLAN_TASK_FIELDS:
             if not _plan_task_field_body(body, field).strip():
                 issues.append(f"{label} is missing a non-empty '{field}:' field.")
     if numbers:
