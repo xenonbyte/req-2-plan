@@ -2547,3 +2547,47 @@ class TestContextBuildCommand:
         assert exc_info.value.code == 0
         data = json.loads((run_dir / "02-project-context.json").read_text(encoding="utf-8"))
         assert "pip" in data["package_managers"]
+
+
+# ---------------------------------------------------------------------------
+# run-start: Context Pack + link expansion
+# ---------------------------------------------------------------------------
+
+
+class TestRunStartBuildsContextPack:
+    def test_run_start_with_repo_path_writes_context_pack(self, tmp_path):
+        import json
+        from tools.workflow_cli.cli import main
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        (repo / "requirements.txt").write_text("pyyaml>=6.0\n", encoding="utf-8")
+        with pytest.raises(SystemExit) as exc:
+            main([
+                "--base-path", str(tmp_path),
+                "run-start", "--work-id", "WF-20260605-rate-limit",
+                "--requirement", "add rate limiting",
+                "--repo-path", str(repo),
+            ])
+        assert exc.value.code == 0
+        assert (tmp_path / ".req-to-plan" / "WF-20260605-rate-limit" / "02-project-context.json").exists()
+
+    def test_run_start_with_repo_path_persists_local_and_http_link_context(self, tmp_path):
+        from tools.workflow_cli.cli import main
+        repo = tmp_path / "repo"
+        (repo / "docs").mkdir(parents=True)
+        (repo / "requirements.txt").write_text("pyyaml>=6.0\n", encoding="utf-8")
+        (repo / "docs" / "context.md").write_text("local architecture note", encoding="utf-8")
+        requirement = "Use docs/context.md and https://example.com/spec"
+        with pytest.raises(SystemExit) as exc:
+            main([
+                "--base-path", str(tmp_path),
+                "run-start", "--work-id", "WF-20260605-links",
+                "--requirement", requirement,
+                "--repo-path", str(repo),
+            ])
+        assert exc.value.code == 0
+        intake = (tmp_path / ".req-to-plan" / "WF-20260605-links" / "01-intake-brief.md").read_text(encoding="utf-8")
+        assert "docs/context.md" in intake
+        assert "local architecture note" in intake
+        assert "https://example.com/spec" in intake
+        assert "URL fetching disabled" in intake

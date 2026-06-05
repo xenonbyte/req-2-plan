@@ -217,6 +217,21 @@ def _cmd_run_start(args):
     tier_estimate, evidence = estimate_tier(requirement, repo_path=repo_path)
     record.tier_estimate = tier_estimate
 
+    # Context Pack + link expansion (when repo_path is provided)
+    if repo_path is not None and repo_path.exists():
+        from tools.workflow_cli.context_pack import build_context_pack, write_context_pack
+        from tools.workflow_cli.link_expander import expand_links
+        write_context_pack(build_context_pack(repo_path), run_dir)
+        # Local relative links expand; HTTP is recorded as not-expanded (needs confirmation).
+        link_results = expand_links(requirement, base_path=repo_path, fetch_urls=False)
+        if link_results:
+            evidence.linked_context = "\n".join(
+                f"- {r.url}: {r.status.value}"
+                + (f"\n  preview: {r.content_preview}" if r.content_preview else "")
+                + (f"\n  error: {r.error}" if r.error else "")
+                for r in link_results
+            )
+
     # Update active artifacts in record
     artifact_file = STAGE_ARTIFACT_MAP[Stage.RAW_REQUIREMENT]
     upsert_active_artifact(record, Stage.RAW_REQUIREMENT, artifact_file, 1, "draft")

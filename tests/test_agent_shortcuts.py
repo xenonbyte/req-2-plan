@@ -1211,6 +1211,14 @@ class TestSeedForStage:
         assert "REQ-AUTH-001: do X" in seed
         assert "## Upstream Summary (read-only)" in seed
 
+    def test_seed_includes_context_summary_when_present(self):
+        from tools.workflow_cli.agent_shortcuts import _seed_for_stage
+        from tools.workflow_cli.models import Stage, TierBase, TierEstimate
+        tier = TierEstimate(base=TierBase.LIGHT, modifiers=frozenset())
+        seed = _seed_for_stage(Stage.DESIGN, tier, context_summary="languages: {'Python': 100}")
+        assert "Project Context" in seed
+        assert "'Python'" in seed
+
 
 class TestRunStartArgs:
     def test_repo_path_is_forwarded_to_run_start(self):
