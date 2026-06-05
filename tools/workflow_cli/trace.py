@@ -146,7 +146,6 @@ def spec_ids_not_consumed(run_dir: Path) -> list[str]:
 
 
 def check_trace_closure(run_dir: Path) -> list[str]:
-    model = build_trace(run_dir)
     issues: list[str] = []
     for id_ in spec_ids_not_consumed(run_dir):
         issues.append(f"SPEC {id_} is not consumed by any PLAN-TASK (coverage gap).")
