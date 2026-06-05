@@ -566,6 +566,9 @@ class TestEndToEndPipeline:
         marker = _STAGE_NATIVE_ID_MARKERS.get(stage, "")
         if marker and marker not in content:
             content = content + f"\n\n{self._NATIVE_ID_HEADINGS[stage]}"
+        # Inject a PLAN-TASK consuming SPEC-CORE-001 so trace closure passes (R3).
+        if stage == "plan" and "PLAN-TASK-001" not in content:
+            content = content + "\n\n### PLAN-TASK-001 implement\nSpec References: SPEC-CORE-001\nTDD Applicable: no\n"
         invoke(["stage-produce", "--work-id", work_id, "--stage", stage, "--content", content], base_path=tmp)
         invoke(["stage-ready", "--work-id", work_id, "--stage", stage], base_path=tmp)
         invoke(["gate-quality", "--work-id", work_id, "--stage", stage], base_path=tmp)
@@ -640,7 +643,7 @@ _PLAN_WELL_FORMED = """\
 
 ### PLAN-TASK-001: Add rate-limit middleware
 
-Spec References: none
+Spec References: SPEC-CORE-001
 Change Type: new
 TDD Applicable: yes
 Files: src/middleware.py

@@ -470,6 +470,13 @@ def check_quality_gate(
     if not issues:
         # Check 3: upstream reference coverage closure (all tiers)
         unclosed = _find_ids_without_closure(artifact_content)
+        if stage == Stage.PLAN:
+            from tools.workflow_cli.trace import plan_consumed_spec_ids
+            consumed_specs = plan_consumed_spec_ids(run_dir)
+            unclosed = [
+                ref_id for ref_id in unclosed
+                if not (ref_id.startswith("SPEC-") and ref_id in consumed_specs)
+            ]
         for ref_id in unclosed:
             issues.append(
                 f"Upstream reference {ref_id!r} appears in artifact but has no closure status tag "
@@ -496,6 +503,11 @@ def check_quality_gate(
                     "PLAN has a 'TDD Applicable: yes' task with no fenced code block; "
                     "add a Skeleton code block (standard tier requires executable anchors)."
                 )
+
+        # Check 5b (PLAN): trace closure — all upstream SPEC/RISK/SCOPE-IN IDs must be consumed.
+        if stage == Stage.PLAN:
+            from tools.workflow_cli.trace import check_trace_closure
+            issues.extend(check_trace_closure(run_dir))
 
         # Check 6 (SPEC): the External Documentation Checked section must be present and non-empty.
         if stage == Stage.SPEC:

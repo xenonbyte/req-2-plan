@@ -1103,5 +1103,38 @@ class TestSpecExternalDocsGate(unittest.TestCase):
             self.assertTrue(all("External Documentation" not in i for i in r.issues))
 
 
+class TestTraceClosureInPlanGate(unittest.TestCase):
+    def test_plan_gate_fails_when_spec_uncovered(self):
+        import tempfile
+        from pathlib import Path
+        from tools.workflow_cli.gates import check_quality_gate
+        from tools.workflow_cli.models import Stage, TierBase, TierEstimate, STAGE_ARTIFACT_MAP
+        tier = TierEstimate(base=TierBase.STANDARD, modifiers=frozenset())
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            (run_dir / STAGE_ARTIFACT_MAP[Stage.SPEC]).write_text(
+                "## SPEC-AUTH-001 login\nbehavior\n", encoding="utf-8")
+            plan = "## Tasks\n\n### PLAN-TASK-001 do thing\nSpec References: SPEC-NOPE-000\n"
+            (run_dir / STAGE_ARTIFACT_MAP[Stage.PLAN]).write_text(plan, encoding="utf-8")
+            result = check_quality_gate(run_dir, Stage.PLAN, tier, [], plan)
+        self.assertFalse(result.passed)
+        self.assertTrue(any("SPEC-AUTH-001" in i for i in result.issues))
+
+    def test_plan_gate_accepts_structured_spec_reference_without_legacy_closure_tag(self):
+        import tempfile
+        from pathlib import Path
+        from tools.workflow_cli.gates import check_quality_gate
+        from tools.workflow_cli.models import Stage, TierBase, TierEstimate, STAGE_ARTIFACT_MAP
+        tier = TierEstimate(base=TierBase.STANDARD, modifiers=frozenset())
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            (run_dir / STAGE_ARTIFACT_MAP[Stage.SPEC]).write_text(
+                "## SPEC-AUTH-001 login\nbehavior\n", encoding="utf-8")
+            plan = "## Tasks\n\n### PLAN-TASK-001 do thing\nSpec References: SPEC-AUTH-001\nTDD Applicable: no\n"
+            (run_dir / STAGE_ARTIFACT_MAP[Stage.PLAN]).write_text(plan, encoding="utf-8")
+            result = check_quality_gate(run_dir, Stage.PLAN, tier, [], plan)
+        self.assertFalse(any("closure status tag" in i for i in result.issues))
+
+
 if __name__ == "__main__":
     unittest.main()
