@@ -1136,5 +1136,88 @@ class TestTraceClosureInPlanGate(unittest.TestCase):
         self.assertFalse(any("closure status tag" in i for i in result.issues))
 
 
+class TestScopeFreeze(unittest.TestCase):
+    def setUp(self):
+        from tools.workflow_cli.gates import check_quality_gate
+        from tools.workflow_cli.models import Stage, TierBase, TierEstimate
+        self.check = check_quality_gate
+        self.Stage = Stage
+        self.tier = TierEstimate(base=TierBase.STANDARD, modifiers=frozenset())
+
+    def _brief(self, in_scope, out_scope):
+        from tools.workflow_cli.stage_schema import required_headings
+        from tools.workflow_cli.models import TierBase
+        body = ["# Requirement Brief"]
+        for h in required_headings(self.Stage.REQUIREMENT_BRIEF, TierBase.STANDARD):
+            if h == "## In-Scope":
+                body.append(f"{h}\n{in_scope}")
+            elif h == "## Out-of-Scope":
+                body.append(f"{h}\n{out_scope}")
+            else:
+                body.append(f"{h}\n- real content\n")
+        return "\n".join(body)
+
+    def test_in_scope_without_id_fails(self):
+        import tempfile
+        from pathlib import Path
+        content = self._brief("- rate limit per IP (no id)", "- SCOPE-OUT-001 admin UI")
+        with tempfile.TemporaryDirectory() as tmp:
+            r = self.check(Path(tmp), self.Stage.REQUIREMENT_BRIEF, self.tier, [], content)
+        self.assertFalse(r.passed)
+        self.assertTrue(any("SCOPE-IN" in i for i in r.issues))
+
+    def test_scope_with_ids_passes_freeze(self):
+        import tempfile
+        from pathlib import Path
+        content = self._brief("- SCOPE-IN-001 rate limit per IP", "- SCOPE-OUT-001 admin UI")
+        with tempfile.TemporaryDirectory() as tmp:
+            r = self.check(Path(tmp), self.Stage.REQUIREMENT_BRIEF, self.tier, [], content)
+        self.assertFalse(any("SCOPE-IN" in i or "SCOPE-OUT" in i for i in r.issues))
+
+    def test_each_scope_entry_must_have_matching_id(self):
+        import tempfile
+        from pathlib import Path
+        content = self._brief(
+            "- SCOPE-IN-001 rate limit per IP\n- login throttling without id",
+            "- SCOPE-OUT-001 admin UI\n- reporting dashboard without id",
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            r = self.check(Path(tmp), self.Stage.REQUIREMENT_BRIEF, self.tier, [], content)
+        self.assertFalse(r.passed)
+        self.assertTrue(any("In-Scope" in i and "entry" in i for i in r.issues))
+        self.assertTrue(any("Out-of-Scope" in i and "entry" in i for i in r.issues))
+
+    def test_scope_ids_elsewhere_do_not_satisfy_scope_sections(self):
+        import tempfile
+        from pathlib import Path
+        content = self._brief("- rate limit per IP (no id)", "- admin UI (no id)") + "\n\n## Appendix\nSCOPE-IN-001\nSCOPE-OUT-001\n"
+        with tempfile.TemporaryDirectory() as tmp:
+            r = self.check(Path(tmp), self.Stage.REQUIREMENT_BRIEF, self.tier, [], content)
+        self.assertFalse(r.passed)
+        self.assertTrue(any("In-Scope" in i for i in r.issues))
+        self.assertTrue(any("Out-of-Scope" in i for i in r.issues))
+
+    def test_standard_brief_without_assumptions_or_questions_fails(self):
+        import tempfile
+        from pathlib import Path
+        from tools.workflow_cli.stage_schema import required_headings
+        from tools.workflow_cli.models import TierBase
+        parts = ["# Requirement Brief"]
+        for h in required_headings(self.Stage.REQUIREMENT_BRIEF, TierBase.STANDARD):
+            if h == "## In-Scope":
+                parts.append(f"{h}\n- SCOPE-IN-001 x\n")
+            elif h == "## Out-of-Scope":
+                parts.append(f"{h}\n- SCOPE-OUT-001 y\n")
+            elif h in ("## Assumptions", "## Open Questions"):
+                parts.append(f"{h}\n")  # empty
+            else:
+                parts.append(f"{h}\n- content\n")
+        content = "\n".join(parts)
+        with tempfile.TemporaryDirectory() as tmp:
+            r = self.check(Path(tmp), self.Stage.REQUIREMENT_BRIEF, self.tier, [], content)
+        self.assertFalse(r.passed)
+        self.assertTrue(any("assumption" in i.lower() or "open question" in i.lower() for i in r.issues))
+
+
 if __name__ == "__main__":
     unittest.main()

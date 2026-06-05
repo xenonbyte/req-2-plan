@@ -555,6 +555,12 @@ class TestEndToEndPipeline:
                 if heading == "## External Documentation Checked":
                     # Check 6 requires a valid inventory row, not just the heading.
                     content = content + f"\n\n{heading}\n\nN/A — no external dependencies\n"
+                elif heading == "## In-Scope":
+                    # R8: In-Scope must carry at least one SCOPE-IN-* stable ID.
+                    content = content + f"\n\n{heading}\n- SCOPE-IN-001 core feature scope\n"
+                elif heading == "## Out-of-Scope":
+                    # R8: Out-of-Scope must carry at least one SCOPE-OUT-* stable ID.
+                    content = content + f"\n\n{heading}\n- SCOPE-OUT-001 out-of-scope items\n"
                 else:
                     content = content + f"\n\n{heading}\ncontent\n"
         # Inject a native trace-ID heading for stages that require one (R2.3).
@@ -566,9 +572,9 @@ class TestEndToEndPipeline:
         marker = _STAGE_NATIVE_ID_MARKERS.get(stage, "")
         if marker and marker not in content:
             content = content + f"\n\n{self._NATIVE_ID_HEADINGS[stage]}"
-        # Inject a PLAN-TASK consuming SPEC-CORE-001 so trace closure passes (R3).
+        # Inject a PLAN-TASK consuming SPEC-CORE-001 and SCOPE-IN-001 so trace closure passes (R3/R8).
         if stage == "plan" and "PLAN-TASK-001" not in content:
-            content = content + "\n\n### PLAN-TASK-001 implement\nSpec References: SPEC-CORE-001\nTDD Applicable: no\n"
+            content = content + "\n\n### PLAN-TASK-001 implement\nSpec References: SPEC-CORE-001\nTDD Applicable: no\nScope: SCOPE-IN-001\n"
         invoke(["stage-produce", "--work-id", work_id, "--stage", stage, "--content", content], base_path=tmp)
         invoke(["stage-ready", "--work-id", work_id, "--stage", stage], base_path=tmp)
         invoke(["gate-quality", "--work-id", work_id, "--stage", stage], base_path=tmp)
@@ -647,6 +653,7 @@ Spec References: SPEC-CORE-001
 Change Type: new
 TDD Applicable: yes
 Files: src/middleware.py
+Scope: SCOPE-IN-001
 Skeleton:
 ```python
 def rate_limit(request):
@@ -718,7 +725,17 @@ class TestStandardTierArtifactStructure:
         # Inject any missing required STANDARD-tier headings so gate-quality passes.
         for heading in self._STANDARD_REQUIRED.get(stage, []):
             if heading not in content:
-                content = content + f"\n\n{heading}\ncontent\n"
+                if heading == "## In-Scope":
+                    # R8: In-Scope must carry at least one SCOPE-IN-* stable ID.
+                    content = content + f"\n\n{heading}\n- SCOPE-IN-001 core feature scope\n"
+                elif heading == "## Out-of-Scope":
+                    # R8: Out-of-Scope must carry at least one SCOPE-OUT-* stable ID.
+                    content = content + f"\n\n{heading}\n- SCOPE-OUT-001 out-of-scope items\n"
+                elif heading == "## Assumptions":
+                    # R8 elicitation foresight: ensure at least one Assumptions bullet.
+                    content = content + f"\n\n{heading}\n- Assumes standard deployment environment.\n"
+                else:
+                    content = content + f"\n\n{heading}\ncontent\n"
         # Inject a native trace-ID heading for stages that require one (R2.3).
         marker = self._NATIVE_ID_MARKERS.get(stage, "")
         if marker and marker not in content:

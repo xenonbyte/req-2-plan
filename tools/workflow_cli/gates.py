@@ -380,6 +380,36 @@ def _section_body(content: str, heading: str) -> str:
     return "\n".join(out)
 
 
+def _section_entries_missing_id(content: str, heading: str, id_prefix: str) -> list[str]:
+    missing: list[str] = []
+    pattern = re.compile(rf"\b{re.escape(id_prefix)}-\d+\b")
+    for line in _section_body(content, heading).splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("<!--"):
+            continue
+        if not stripped.startswith(("- ", "* ")):
+            continue
+        if not pattern.search(stripped):
+            missing.append(stripped)
+    return missing
+
+
+def _check_scope_freeze(stage: Stage, content: str) -> list[str]:
+    """R8: brief's In/Out-of-Scope must carry stable IDs so trace can anchor them."""
+    if stage != Stage.REQUIREMENT_BRIEF:
+        return []
+    issues: list[str] = []
+    for entry in _section_entries_missing_id(content, "## In-Scope", "SCOPE-IN"):
+        issues.append(f"In-Scope entry must carry a SCOPE-IN-* stable ID (R8): {entry}")
+    for entry in _section_entries_missing_id(content, "## Out-of-Scope", "SCOPE-OUT"):
+        issues.append(f"Out-of-Scope entry must carry a SCOPE-OUT-* stable ID (R8): {entry}")
+    if not re.search(r"\bSCOPE-IN-\d+\b", _section_body(content, "## In-Scope")):
+        issues.append("In-Scope must list at least one stable-ID entry (SCOPE-IN-001, ...); none found (R8).")
+    if not re.search(r"\bSCOPE-OUT-\d+\b", _section_body(content, "## Out-of-Scope")):
+        issues.append("Out-of-Scope must list at least one stable-ID entry (SCOPE-OUT-001, ...); none found (R8).")
+    return issues
+
+
 def _has_meaningful_body(text: str) -> bool:
     """True if `text` has at least one non-empty, non-comment line."""
     for line in text.splitlines():
@@ -521,6 +551,9 @@ def check_quality_gate(
         # Check 7 (R2): tier-aware required-section schema.
         if not issues:
             issues.extend(_check_stage_schema(stage, tier, artifact_content))
+
+        # Check 8 (R8): scope-freeze — In/Out-of-Scope entries must carry stable IDs.
+        issues.extend(_check_scope_freeze(stage, artifact_content))
 
     return GateResult(
         passed=len(issues) == 0,
