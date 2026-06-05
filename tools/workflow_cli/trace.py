@@ -72,7 +72,7 @@ def _spec_blocks(spec_content: str) -> dict[str, str]:
 
 
 def _risk_blocks(content: str) -> dict[str, str]:
-    starts = list(re.finditer(r"(?m)^(#+)\s+(RISK-[A-Z]+-\d+)\b", content))
+    starts = list(re.finditer(r"(?m)^(#+)\s+.*?\b(RISK-[A-Z]+-\d+)\b", content))
     headings = list(re.finditer(r"(?m)^(#+)\s+", content))
     blocks: dict[str, str] = {}
     for match in starts:

@@ -82,6 +82,16 @@ class TestTrace(unittest.TestCase):
                 "## RISK-SEC-001 token leak\nStatus: mitigated\nMitigation: redact tokens\n", encoding="utf-8")
             self.assertFalse(any("RISK-SEC-001" in i for i in check_trace_closure(run_dir)))
 
+    def test_mitigated_risk_closes_when_id_is_not_first_in_heading(self):
+        from tools.workflow_cli.trace import check_trace_closure
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            (run_dir / STAGE_ARTIFACT_MAP[Stage.RISK_DISCOVERY]).write_text(
+                "### Token leak RISK-SEC-001\nStatus: mitigated\nMitigation: redact tokens\n",
+                encoding="utf-8",
+            )
+            self.assertFalse(any("RISK-SEC-001" in i for i in check_trace_closure(run_dir)))
+
     def test_deferred_or_out_of_scope_risk_closes(self):
         from tools.workflow_cli.trace import check_trace_closure
         with tempfile.TemporaryDirectory() as tmp:

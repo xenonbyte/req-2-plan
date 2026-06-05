@@ -212,18 +212,22 @@ def _cmd_run_start(args):
     run_dir.mkdir(parents=True, exist_ok=True)
     write_artifact(run_dir, Stage.RAW_REQUIREMENT, requirement, version=1, status="draft")
 
-    # Tier estimation
+    # Tier estimation inputs
     repo_path = Path(args.repo_path) if args.repo_path else None
-    tier_estimate, evidence = estimate_tier(requirement, repo_path=repo_path)
+    link_results = []
+    if repo_path is not None and repo_path.exists():
+        from tools.workflow_cli.link_expander import expand_links
+        # Local relative links expand; HTTP is recorded as not-expanded (needs confirmation).
+        link_results = expand_links(requirement, base_path=repo_path, fetch_urls=False)
+
+    # Tier estimation
+    tier_estimate, evidence = estimate_tier(requirement, repo_path=repo_path, link_results=link_results)
     record.tier_estimate = tier_estimate
 
     # Context Pack + link expansion (when repo_path is provided)
     if repo_path is not None and repo_path.exists():
         from tools.workflow_cli.context_pack import build_context_pack, write_context_pack
-        from tools.workflow_cli.link_expander import expand_links
         write_context_pack(build_context_pack(repo_path), run_dir)
-        # Local relative links expand; HTTP is recorded as not-expanded (needs confirmation).
-        link_results = expand_links(requirement, base_path=repo_path, fetch_urls=False)
         if link_results:
             evidence.linked_context = "\n".join(
                 f"- {r.url}: {r.status.value}"

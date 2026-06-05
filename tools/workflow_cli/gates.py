@@ -371,8 +371,12 @@ def _check_plan_file_refs(run_dir: Path, content: str) -> list[str]:
 
 
 def _check_spec_refs_valid(run_dir: Path, content: str) -> list[str]:
-    from tools.workflow_cli.trace import build_trace
-    defined_specs = {i for i in build_trace(run_dir).defined if i.startswith("SPEC-")}
+    spec_path = run_dir / STAGE_ARTIFACT_MAP[Stage.SPEC]
+    spec_content = spec_path.read_text(encoding="utf-8") if spec_path.exists() else ""
+    defined_specs: set[str] = set()
+    for line in spec_content.splitlines():
+        if line.lstrip().startswith("#"):
+            defined_specs.update(re.findall(r"\bSPEC-[A-Z]+-\d+\b", line))
     issues: list[str] = []
     for body in _iter_plan_task_bodies(content):
         refs = re.findall(r"SPEC-[A-Z]+-\d+", _plan_task_field_value(body, "Spec References"))

@@ -2632,3 +2632,23 @@ class TestRunStartBuildsContextPack:
         assert "local architecture note" in intake
         assert "https://example.com/spec" in intake
         assert "URL fetching disabled" in intake
+
+    def test_run_start_with_http_link_uses_link_results_for_tier(self, tmp_path):
+        from tools.workflow_cli.cli import main
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        requirement = "Use https://example.com/spec"
+
+        with pytest.raises(SystemExit) as exc:
+            main([
+                "--base-path", str(tmp_path),
+                "run-start", "--work-id", "WF-20260605-http-link-tier",
+                "--requirement", requirement,
+                "--repo-path", str(repo),
+            ])
+
+        assert exc.value.code == 0
+        record = load_record(tmp_path, "WF-20260605-http-link-tier")
+        assert record.tier_estimate.base == TierBase.STANDARD
+        intake = (tmp_path / ".req-to-plan" / "WF-20260605-http-link-tier" / "01-intake-brief.md").read_text(encoding="utf-8")
+        assert "base: standard" in intake

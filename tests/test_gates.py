@@ -1290,6 +1290,23 @@ class TestPlanTaskFields(unittest.TestCase):
         self.assertFalse(r.passed)
         self.assertTrue(any("SPEC-GHOST-999" in i for i in r.issues))
 
+    def test_spec_reference_must_be_defined_in_spec_artifact(self):
+        import tempfile
+        from pathlib import Path
+        from tools.workflow_cli.models import STAGE_ARTIFACT_MAP
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            (run_dir / STAGE_ARTIFACT_MAP[self.Stage.DESIGN]).write_text(
+                "## SPEC Handoff\n### SPEC-AUTH-001 planned login\n", encoding="utf-8")
+            (run_dir / STAGE_ARTIFACT_MAP[self.Stage.SPEC]).write_text(
+                "## Behavior Contracts\nNo native SPEC heading yet.\n", encoding="utf-8")
+            plan = ("## Tasks\n\n### PLAN-TASK-001 a\n"
+                    "Spec References: SPEC-AUTH-001\nVerification: pytest\n")
+            (run_dir / STAGE_ARTIFACT_MAP[self.Stage.PLAN]).write_text(plan, encoding="utf-8")
+            r = self.check(run_dir, self.Stage.PLAN, self.tier, [], plan)
+        self.assertFalse(r.passed)
+        self.assertTrue(any("SPEC-AUTH-001" in i and "SPEC artifact" in i for i in r.issues))
+
     def test_files_referencing_missing_path_fails_unless_create(self):
         import json, tempfile
         from pathlib import Path
