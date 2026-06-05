@@ -16,4 +16,5 @@ venv/
 .codegraph
 .cursor
 .pytest_cache
-docs/
+docs/*
+!docs/requirements/
