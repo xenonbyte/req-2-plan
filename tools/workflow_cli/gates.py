@@ -20,6 +20,7 @@ from tools.workflow_cli.models import (
     TierEstimate,
     TierModifier,
 )
+from tools.workflow_cli.markdown import unfenced_markdown_lines, unfenced_markdown_text
 from tools.workflow_cli.output import EXIT_GATE_FAIL
 
 # ---------------------------------------------------------------------------
@@ -122,7 +123,7 @@ _DEFINED_ID_PATTERN = re.compile(r"\b([A-Z]+-[A-Z]+-\d+)\b")
 def _find_defined_ids(content: str) -> set[str]:
     """Return IDs that are defined in headings (i.e. the current artifact is defining them)."""
     heading_pattern = re.compile(r"^#{1,6}\s+.*\b([A-Z]+-[A-Z]+-\d+)\b", re.MULTILINE)
-    return set(heading_pattern.findall(_unfenced_markdown_text(content)))
+    return set(heading_pattern.findall(unfenced_markdown_text(content)))
 
 
 def _find_ids_without_closure(content: str) -> list[str]:
@@ -131,7 +132,7 @@ def _find_ids_without_closure(content: str) -> list[str]:
     IDs defined in headings of the current artifact are excluded — they are
     being *defined* here, not referencing upstream artifacts that need closure.
     """
-    search_content = _unfenced_markdown_text(content)
+    search_content = unfenced_markdown_text(content)
     all_refs = set(_UPSTREAM_ID_PATTERN.findall(search_content))
     defined_here = _find_defined_ids(content)
     # Only check IDs that are referenced but NOT defined in this artifact
@@ -158,7 +159,7 @@ def _find_ids_without_closure(content: str) -> list[str]:
 def _find_duplicate_ids(content: str) -> list[str]:
     """Return IDs that appear more than once in heading (definition) context."""
     heading_pattern = re.compile(r"^#{1,6}\s+.*\b([A-Z]+-[A-Z]+-\d+)\b", re.MULTILINE)
-    heading_ids = heading_pattern.findall(_unfenced_markdown_text(content))
+    heading_ids = heading_pattern.findall(unfenced_markdown_text(content))
 
     from collections import Counter
     counts = Counter(heading_ids)
@@ -171,43 +172,7 @@ def _find_duplicate_ids(content: str) -> list[str]:
 
 _EXTERNAL_DOCS_RE = re.compile(r"^## External Documentation Checked\s*$", re.MULTILINE)
 _H2_RE = re.compile(r"^##\s+", re.MULTILINE)
-_MARKDOWN_CODE_FENCE_RE = re.compile(r"^[ \t]{0,3}(`{3,}|~{3,})", re.MULTILINE)
-_MARKDOWN_FENCE_MARKER_RE = re.compile(r"^[ \t]{0,3}(`{3,}|~{3,})")
 _ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
-
-
-def _unfenced_markdown_lines(content: str):
-    """Yield (line, start, end) for lines outside Markdown fenced code blocks."""
-    fence_char = ""
-    fence_len = 0
-    offset = 0
-    for line in content.splitlines(keepends=True):
-        marker = _MARKDOWN_FENCE_MARKER_RE.match(line)
-        if fence_char:
-            if (
-                marker
-                and marker.group(1)[0] == fence_char
-                and len(marker.group(1)) >= fence_len
-                and not line[marker.end():].strip()
-            ):
-                fence_char = ""
-                fence_len = 0
-            offset += len(line)
-            continue
-
-        if marker:
-            fence_char = marker.group(1)[0]
-            fence_len = len(marker.group(1))
-            offset += len(line)
-            continue
-
-        start = offset
-        offset += len(line)
-        yield line, start, offset
-
-
-def _unfenced_markdown_text(content: str) -> str:
-    return "".join(line for line, _, _ in _unfenced_markdown_lines(content))
 
 
 def _plain_table_cell(cell: str) -> str:
@@ -248,14 +213,14 @@ def _is_external_docs_inventory_row(line: str) -> bool:
 
 def _has_external_docs_inventory(content: str) -> bool:
     section_start = None
-    for line, _, end in _unfenced_markdown_lines(content):
+    for line, _, end in unfenced_markdown_lines(content):
         if _EXTERNAL_DOCS_RE.match(line):
             section_start = end
             break
     if section_start is None:
         return False
 
-    for line, start, _ in _unfenced_markdown_lines(content):
+    for line, start, _ in unfenced_markdown_lines(content):
         if start < section_start:
             continue
         if _H2_RE.match(line):
@@ -280,7 +245,7 @@ _PLAN_TASK_FIELD_RE = re.compile(
 def _plan_task_starts(content: str) -> list[int]:
     return [
         start
-        for line, start, _ in _unfenced_markdown_lines(content)
+        for line, start, _ in unfenced_markdown_lines(content)
         if _PLAN_TASK_RE.match(line)
     ]
 
@@ -298,7 +263,7 @@ def _plan_task_field_body(task_body: str, field: str) -> str:
 
 def _find_plan_task_field(task_body: str, field: str):
     field_re = re.compile(rf"^{re.escape(field)}:[ \t]*(.*)$")
-    for line, start, _ in _unfenced_markdown_lines(task_body):
+    for line, start, _ in unfenced_markdown_lines(task_body):
         match = field_re.match(line)
         if match:
             return match, start
@@ -306,7 +271,7 @@ def _find_plan_task_field(task_body: str, field: str):
 
 
 def _find_next_plan_task_field_start(task_body: str, after: int) -> int | None:
-    for line, start, _ in _unfenced_markdown_lines(task_body):
+    for line, start, _ in unfenced_markdown_lines(task_body):
         if start >= after and _PLAN_TASK_FIELD_RE.match(line):
             return start
     return None
@@ -329,7 +294,7 @@ def _iter_plan_task_bodies(content: str):
 
 def _plan_task_file_paths(files_field: str) -> list[str]:
     paths: list[str] = []
-    lines = [line for line, _, _ in _unfenced_markdown_lines(files_field)]
+    lines = [line for line, _, _ in unfenced_markdown_lines(files_field)]
     if not lines:
         return paths
 
@@ -397,7 +362,7 @@ def _check_spec_refs_valid(run_dir: Path, content: str) -> list[str]:
     spec_path = run_dir / STAGE_ARTIFACT_MAP[Stage.SPEC]
     spec_content = spec_path.read_text(encoding="utf-8") if spec_path.exists() else ""
     defined_specs: set[str] = set()
-    for line, _, _ in _unfenced_markdown_lines(spec_content):
+    for line, _, _ in unfenced_markdown_lines(spec_content):
         if line.lstrip().startswith("#"):
             defined_specs.update(re.findall(r"\bSPEC-[A-Z]+-\d+\b", line))
     issues: list[str] = []
@@ -481,7 +446,7 @@ def _section_body(content: str, heading: str) -> str:
     """Return the text of the section under `heading`, stopping at the next same-or-higher heading."""
     level = len(heading) - len(heading.lstrip("#"))
     out, capture = [], False
-    for line, _, _ in _unfenced_markdown_lines(content):
+    for line, _, _ in unfenced_markdown_lines(content):
         if line.strip() == heading:
             capture = True
             continue
@@ -578,10 +543,10 @@ def _check_stage_schema(stage: Stage, tier: TierEstimate, content: str) -> list[
     issues: list[str] = []
     headings = required_headings(stage, tier.base)
     native = _STAGE_NATIVE_HEADING_PATTERNS.get(stage)
-    unfenced_content = _unfenced_markdown_text(content)
+    unfenced_content = unfenced_markdown_text(content)
     present_headings = {
         line.strip()
-        for line, _, _ in _unfenced_markdown_lines(content)
+        for line, _, _ in unfenced_markdown_lines(content)
         if line.lstrip().startswith("#")
     }
 
