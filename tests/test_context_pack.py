@@ -1,0 +1,37 @@
+import json
+import tempfile
+import unittest
+from pathlib import Path
+
+
+class TestBuildContextPack(unittest.TestCase):
+    def _make_repo(self, tmp: Path):
+        (tmp / "package.json").write_text(
+            json.dumps({"scripts": {"test": "jest"}, "dependencies": {"react": "^18.0.0"}}),
+            encoding="utf-8",
+        )
+        (tmp / "requirements.txt").write_text("pyyaml>=6.0\n# comment\n", encoding="utf-8")
+        (tmp / "src").mkdir()
+        (tmp / "src" / "main.py").write_text("print('hi')\n", encoding="utf-8")
+
+    def test_detects_managers_test_commands_and_deps(self):
+        from tools.workflow_cli.context_pack import build_context_pack
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            self._make_repo(tmp)
+            pack = build_context_pack(tmp)
+        self.assertIn("npm", pack.package_managers)
+        self.assertIn("pip", pack.package_managers)
+        self.assertIn("jest", pack.test_commands)
+        names = {d["name"] for d in pack.dependencies}
+        self.assertIn("react", names)
+        self.assertTrue(any(d["name"].startswith("pyyaml") for d in pack.dependencies))
+
+    def test_finds_entrypoint_and_source_dir(self):
+        from tools.workflow_cli.context_pack import build_context_pack
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            self._make_repo(tmp)
+            pack = build_context_pack(tmp)
+        self.assertTrue(any(e.endswith("main.py") for e in pack.entrypoints))
+        self.assertIn("src", pack.source_dirs)
