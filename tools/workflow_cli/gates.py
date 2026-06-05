@@ -321,6 +321,18 @@ def _iter_plan_task_bodies(content: str):
         yield content[s:e]
 
 
+def _check_spec_refs_valid(run_dir: Path, content: str) -> list[str]:
+    from tools.workflow_cli.trace import build_trace
+    defined_specs = {i for i in build_trace(run_dir).defined if i.startswith("SPEC-")}
+    issues: list[str] = []
+    for body in _iter_plan_task_bodies(content):
+        refs = re.findall(r"SPEC-[A-Z]+-\d+", _plan_task_field_value(body, "Spec References"))
+        for ref in refs:
+            if ref not in defined_specs:
+                issues.append(f"PLAN-TASK references {ref} which is not defined in the SPEC artifact.")
+    return issues
+
+
 def _check_plan_task_fields(content: str) -> list[str]:
     issues: list[str] = []
     numbers: list[int] = []
@@ -584,6 +596,8 @@ def check_quality_gate(
                 issues.append(f"PLAN references out-of-scope item {sid}; scope overflow (R8).")
             # R5.1: required fields + contiguous numbering
             issues.extend(_check_plan_task_fields(artifact_content))
+            # R5.2: dangling SPEC references
+            issues.extend(_check_spec_refs_valid(run_dir, artifact_content))
 
         # Check 6 (SPEC): the External Documentation Checked section must be present and non-empty.
         if stage == Stage.SPEC:

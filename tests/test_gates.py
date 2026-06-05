@@ -1270,6 +1270,13 @@ class TestPlanTaskFields(unittest.TestCase):
         self.assertFalse(r.passed)
         self.assertTrue(any("contiguous" in i.lower() or "numbering" in i.lower() for i in r.issues))
 
+    def test_dangling_spec_reference_fails(self):
+        plan = ("## Tasks\n\n### PLAN-TASK-001 a\n"
+                "Spec References: SPEC-GHOST-999\nVerification: pytest\n")
+        r = self._gate(plan)
+        self.assertFalse(r.passed)
+        self.assertTrue(any("SPEC-GHOST-999" in i for i in r.issues))
+
 
 if __name__ == "__main__":
     unittest.main()
