@@ -28,7 +28,9 @@ from tools.workflow_cli.state import RunStateManager
 
 # Schema-valid DESIGN LIGHT content (required for gate-quality to pass at LIGHT tier).
 _DESIGN_LIGHT_CONTENT = (
-    "# design v2\n\n## Design Summary\ncontent\n## Chosen Design\ncontent\n## SPEC Handoff\ncontent\n"
+    "# design v2\n\n## Design Summary\ncontent\n"
+    "## Chosen Design\ncontent\n### DES-ARCH-001 Selected design\ncontent\n"
+    "## SPEC Handoff\ncontent\n"
 )
 
 

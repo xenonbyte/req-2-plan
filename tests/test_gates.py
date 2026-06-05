@@ -182,6 +182,7 @@ class TestQualityGate(unittest.TestCase):
                 "## Requirements Coverage\ncontent\n\n"
                 "## Options Considered\ncontent\n\n"
                 "## Chosen Design\ncontent\n\n"
+                "### DES-ARCH-001 Selected architecture\ncontent\n\n"
                 "## Rollback\ncontent\n\n"
                 "## Observability\ncontent\n\n"
                 "## SPEC Handoff\ncontent\n"
@@ -240,6 +241,7 @@ class TestQualityGate(unittest.TestCase):
                 "REQ-ACC-001 [ADDRESSED]: scope handled via new auth flow.\n\n"
                 "## Options Considered\ncontent\n\n"
                 "## Chosen Design\ncontent\n\n"
+                "### DES-ARCH-001 Selected architecture\ncontent\n\n"
                 "## Rollback\ncontent\n\n"
                 "## Observability\ncontent\n\n"
                 "## SPEC Handoff\ncontent\n"
@@ -263,6 +265,7 @@ class TestQualityGate(unittest.TestCase):
                 "## Requirements Coverage\ncontent\n\n"
                 "## Options Considered\ncontent\n\n"
                 "## Chosen Design\ncontent\n\n"
+                "### DES-ARCH-001 Selected architecture\ncontent\n\n"
                 "## Rollback\ncontent\n\n"
                 "## Observability\ncontent\n\n"
                 "## SPEC Handoff\ncontent\n"
@@ -285,6 +288,7 @@ class TestQualityGate(unittest.TestCase):
                 "## Requirements Coverage\ncontent\n\n"
                 "## Options Considered\ncontent\n\n"
                 "## Chosen Design\ncontent\n\n"
+                "### DES-ARCH-001 Selected architecture\ncontent\n\n"
                 "## Rollback\ncontent\n\n"
                 "## Observability\ncontent\n\n"
                 "## SPEC Handoff\ncontent\n"
@@ -307,6 +311,7 @@ class TestQualityGate(unittest.TestCase):
                 "## Requirements Coverage\ncontent\n\n"
                 "## Options Considered\ncontent\n\n"
                 "## Chosen Design\ncontent\n\n"
+                "### DES-ARCH-001 Selected architecture\ncontent\n\n"
                 "## Rollback\ncontent\n\n"
                 "## Observability\ncontent\n\n"
                 "## SPEC Handoff\ncontent\n"
@@ -329,6 +334,7 @@ class TestQualityGate(unittest.TestCase):
                 "## Requirements Coverage\ncontent\n\n"
                 "## Options Considered\ncontent\n\n"
                 "## Chosen Design\ncontent\n\n"
+                "### DES-ARCH-001 Selected architecture\ncontent\n\n"
                 "## Rollback\ncontent\n\n"
                 "## Observability\ncontent\n\n"
                 "## SPEC Handoff\ncontent\n"
@@ -364,8 +370,9 @@ class TestQualityGate(unittest.TestCase):
             content = (
                 "# SPEC\n\n"
                 "## Behavior Contracts\n"
-                "## REQ-ACC-001 First\nContent A.\n\n"
-                "## REQ-ACC-002 Second\nContent B.\n\n"
+                "### SPEC-CORE-001 Core behavior contract\nContent A.\n\n"
+                "### REQ-ACC-001 First\nContent A.\n\n"
+                "### REQ-ACC-002 Second\nContent B.\n\n"
                 "## API / Data / Config Contracts\ncontent\n\n"
                 "## External Documentation Checked\n\n"
                 "N/A — no external dependencies\n\n"
@@ -581,6 +588,101 @@ class TestStageSchemaGate(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             result = self.check_quality_gate(Path(tmp), self.Stage.REQUIREMENT_BRIEF, self.tier, [], body)
         self.assertFalse(result.passed)
+
+    def test_required_section_with_empty_body_fails(self):
+        import tempfile
+        from pathlib import Path
+        from tools.workflow_cli.stage_schema import required_headings
+        from tools.workflow_cli.models import TierBase
+        parts = ["# Requirement Brief"]
+        for h in required_headings(self.Stage.REQUIREMENT_BRIEF, TierBase.STANDARD):
+            body = "" if h == "## Sources" else "real content here"
+            parts.append(f"{h}\n{body}\n")
+        with tempfile.TemporaryDirectory() as tmp:
+            result = self.check_quality_gate(Path(tmp), self.Stage.REQUIREMENT_BRIEF, self.tier, [], "\n".join(parts))
+        self.assertFalse(result.passed)
+        self.assertTrue(any("Sources" in i and "body" in i for i in result.issues))
+
+    def test_spec_without_heading_defined_native_spec_id_fails(self):
+        import tempfile
+        from pathlib import Path
+        from tools.workflow_cli.stage_schema import required_headings
+        from tools.workflow_cli.models import TierBase
+        parts = ["# Spec\n"]
+        for h in required_headings(self.Stage.SPEC, TierBase.STANDARD):
+            if h == "## External Documentation Checked":
+                parts.append(f"{h}\nN/A — no external dependencies\n")
+            else:
+                parts.append(f"{h}\nreal content here\n")
+        body = "\n".join(parts)
+        with tempfile.TemporaryDirectory() as tmp:
+            result = self.check_quality_gate(Path(tmp), self.Stage.SPEC, self.tier, [], body)
+        self.assertFalse(result.passed)
+        self.assertTrue(any("heading" in i and "SPEC-" in i for i in result.issues))
+
+    def test_spec_with_heading_defined_native_spec_id_passes_id_check(self):
+        import tempfile
+        from pathlib import Path
+        from tools.workflow_cli.stage_schema import required_headings
+        from tools.workflow_cli.models import TierBase
+        parts = ["# Spec\n", "## SPEC-AUTH-001 Behavior\nreal content\n"]
+        for h in required_headings(self.Stage.SPEC, TierBase.STANDARD):
+            if h == "## External Documentation Checked":
+                parts.append(f"{h}\nN/A — no external dependencies\n")
+            else:
+                parts.append(f"{h}\nreal content here\n")
+        body = "\n".join(parts)
+        with tempfile.TemporaryDirectory() as tmp:
+            result = self.check_quality_gate(Path(tmp), self.Stage.SPEC, self.tier, [], body)
+        self.assertFalse(any("native trace ID" in i for i in result.issues))
+
+    def test_brief_scope_section_ids_do_not_require_heading_definition(self):
+        import tempfile
+        from pathlib import Path
+        from tools.workflow_cli.stage_schema import required_headings
+        from tools.workflow_cli.models import TierBase
+        parts = ["# Requirement Brief"]
+        for h in required_headings(self.Stage.REQUIREMENT_BRIEF, TierBase.STANDARD):
+            if h == "## In-Scope":
+                parts.append(f"{h}\n- SCOPE-IN-001 rate limit per IP\n")
+            elif h == "## Out-of-Scope":
+                parts.append(f"{h}\n- SCOPE-OUT-001 admin UI\n")
+            else:
+                parts.append(f"{h}\n- real content\n")
+        with tempfile.TemporaryDirectory() as tmp:
+            result = self.check_quality_gate(Path(tmp), self.Stage.REQUIREMENT_BRIEF, self.tier, [], "\n".join(parts))
+        self.assertFalse(any("native trace ID" in i for i in result.issues))
+
+    def test_malformed_trace_id_fails(self):
+        import tempfile
+        from pathlib import Path
+        from tools.workflow_cli.stage_schema import required_headings
+        from tools.workflow_cli.models import TierBase
+        # Build a SPEC with a native heading SPEC-CORE-001 (well-formed) so the native-ID
+        # check passes, but include SPEC-auth-1 (malformed) in a section body.
+        parts = ["# Spec\n", "## SPEC-CORE-001 Core behavior\nreal content\n"]
+        for h in required_headings(self.Stage.SPEC, TierBase.STANDARD):
+            if h == "## External Documentation Checked":
+                parts.append(f"{h}\nN/A — no external dependencies\n")
+            else:
+                # Include a malformed ID in one of the sections
+                parts.append(f"{h}\nSPEC-auth-1 malformed id\n")
+        with tempfile.TemporaryDirectory() as tmp:
+            result = self.check_quality_gate(Path(tmp), self.Stage.SPEC, self.tier, [], "\n".join(parts))
+        self.assertFalse(result.passed)
+        self.assertTrue(any("Malformed trace ID" in i for i in result.issues))
+
+    def test_capitalized_hyphenated_prose_not_flagged_as_malformed(self):
+        import tempfile
+        from pathlib import Path
+        from tools.workflow_cli.stage_schema import required_headings
+        from tools.workflow_cli.models import TierBase
+        parts = ["# Spec", "", "## SPEC-CORE-001 Core\nWe take a RISK-based, SPEC-compliant approach.\n"]
+        for h in required_headings(self.Stage.SPEC, TierBase.STANDARD):
+            parts.append(f"{h}\nreal content here\n")
+        with tempfile.TemporaryDirectory() as tmp:
+            result = self.check_quality_gate(Path(tmp), self.Stage.SPEC, self.tier, [], "\n".join(parts))
+        self.assertFalse(any("Malformed trace ID" in i for i in result.issues))
 
 
 def test_forced_review_version_aware(tmp_path):
@@ -904,6 +1006,7 @@ class TestSpecExternalDocsGate(unittest.TestCase):
             body = (
                 "# SPEC\n\n"
                 "## Behavior Contracts\ncontent\n\n"
+                "### SPEC-CORE-001 Rate-limit contract\ncontent\n\n"
                 "## API / Data / Config Contracts\ncontent\n\n"
                 "## External Documentation Checked\n\n"
                 "| dependency | version | check date | conclusion |\n"
@@ -951,6 +1054,7 @@ class TestSpecExternalDocsGate(unittest.TestCase):
             body = (
                 "# SPEC\n\n"
                 "## Behavior Contracts\ncontent\n\n"
+                "### SPEC-CORE-001 Rate-limit contract\ncontent\n\n"
                 "## API / Data / Config Contracts\ncontent\n\n"
                 "## External Documentation Checked\n\n"
                 "N/A — no external dependencies\n\n"

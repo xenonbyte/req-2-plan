@@ -1518,7 +1518,8 @@ class TestForcedReviewRelocation:
                 "---\nr2p_version: 1\n---\n"
                 "## Design Summary\ncontent\n## Current Code Evidence\ncontent\n"
                 "## Requirements Coverage\ncontent\n## Options Considered\ncontent\n"
-                "## Chosen Design\ncontent\n## Rollback\ncontent\n"
+                "## Chosen Design\ncontent\n### DES-ARCH-001 Selected architecture\ncontent\n"
+                "## Rollback\ncontent\n"
                 "## Observability\ncontent\n## SPEC Handoff\ncontent\n",
                 encoding="utf-8",
             )
@@ -1811,7 +1812,8 @@ class TestCheckpointDecide:
                 "---\nr2p_version: 1\n---\n"
                 "## Design Summary\ncontent\n## Current Code Evidence\ncontent\n"
                 "## Requirements Coverage\ncontent\n## Options Considered\ncontent\n"
-                "## Chosen Design\ncontent\n## Rollback\ncontent\n"
+                "## Chosen Design\ncontent\n### DES-ARCH-001 Selected architecture\ncontent\n"
+                "## Rollback\ncontent\n"
                 "## Observability\ncontent\n## SPEC Handoff\ncontent\n",
                 encoding="utf-8",
             )
@@ -2289,7 +2291,9 @@ def test_gap_resolve_rejects_missing_run():
 
 
 _DESIGN_LIGHT_CONTENT = (
-    "# design v2\n\n## Design Summary\ncontent\n## Chosen Design\ncontent\n## SPEC Handoff\ncontent\n"
+    "# design v2\n\n## Design Summary\ncontent\n"
+    "## Chosen Design\ncontent\n### DES-ARCH-001 Selected design\ncontent\n"
+    "## SPEC Handoff\ncontent\n"
 )
 
 
@@ -2419,6 +2423,7 @@ def test_gap_routing_full_cascade_back_to_plan():
             if stage_value == "spec":
                 return (
                     "# spec v2\n\n## Behavior Contracts\ncontent\n"
+                    "### SPEC-CORE-001 Core behavior\ncontent\n\n"
                     "## External Documentation Checked\n\nN/A — no external dependencies\n\n"
                     "## PLAN Handoff\ncontent\n"
                 )

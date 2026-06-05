@@ -541,6 +541,13 @@ class TestEndToEndPipeline:
         "plan": ["## Tasks"],
     }
 
+    # Minimum native trace-ID headings required by R2.3 for stages that define them.
+    _NATIVE_ID_HEADINGS: dict[str, str] = {
+        "risk_discovery": "### RISK-SEC-001 Security risk\nStatus: mitigated\n",
+        "design": "### DES-ARCH-001 Selected architecture\ncontent\n",
+        "spec": "### SPEC-CORE-001 Core behavior\ncontent\n",
+    }
+
     def _drive_stage(self, invoke, tmp, work_id, stage, content):
         # Inject any missing required LIGHT-tier headings so gate-quality passes.
         for heading in self._LIGHT_REQUIRED.get(stage, []):
@@ -550,6 +557,15 @@ class TestEndToEndPipeline:
                     content = content + f"\n\n{heading}\n\nN/A — no external dependencies\n"
                 else:
                     content = content + f"\n\n{heading}\ncontent\n"
+        # Inject a native trace-ID heading for stages that require one (R2.3).
+        _STAGE_NATIVE_ID_MARKERS = {
+            "risk_discovery": "RISK-SEC-001",
+            "design": "DES-ARCH-001",
+            "spec": "SPEC-CORE-001",
+        }
+        marker = _STAGE_NATIVE_ID_MARKERS.get(stage, "")
+        if marker and marker not in content:
+            content = content + f"\n\n{self._NATIVE_ID_HEADINGS[stage]}"
         invoke(["stage-produce", "--work-id", work_id, "--stage", stage, "--content", content], base_path=tmp)
         invoke(["stage-ready", "--work-id", work_id, "--stage", stage], base_path=tmp)
         invoke(["gate-quality", "--work-id", work_id, "--stage", stage], base_path=tmp)
@@ -583,11 +599,16 @@ class TestEndToEndPipeline:
 # ---------------------------------------------------------------------------
 
 # Well-formed SPEC content: all STANDARD required headings present, plus a
-# real dependency-inventory row in External Documentation Checked (Check 6).
+# real dependency-inventory row in External Documentation Checked (Check 6),
+# and a native SPEC-* heading as required by R2.3.
 _SPEC_WELL_FORMED = """\
 ## Behavior Contracts
 
 This spec covers rate-limiting at the API gateway layer.
+
+### SPEC-CORE-001 Rate-limit behavior contract
+
+Defines the per-IP rate limit contract.
 
 ## API / Data / Config Contracts
 
@@ -678,6 +699,16 @@ class TestStandardTierArtifactStructure:
         ],
     }
 
+    # Native trace-ID headings required by R2.3 for stages that define them.
+    _NATIVE_ID_HEADINGS: dict[str, str] = {
+        "risk_discovery": "### RISK-SEC-001 Security risk\nStatus: mitigated\n",
+        "design": "### DES-ARCH-001 Selected architecture\ncontent\n",
+    }
+    _NATIVE_ID_MARKERS: dict[str, str] = {
+        "risk_discovery": "RISK-SEC-001",
+        "design": "DES-ARCH-001",
+    }
+
     # Re-use the _drive_stage logic from TestEndToEndPipeline as a private helper.
     def _drive_stage(self, invoke_fn, tmp, work_id, stage, content):
         """Produce → ready → gate-quality(0) → review-checkpoint → checkpoint-decide approved."""
@@ -685,6 +716,10 @@ class TestStandardTierArtifactStructure:
         for heading in self._STANDARD_REQUIRED.get(stage, []):
             if heading not in content:
                 content = content + f"\n\n{heading}\ncontent\n"
+        # Inject a native trace-ID heading for stages that require one (R2.3).
+        marker = self._NATIVE_ID_MARKERS.get(stage, "")
+        if marker and marker not in content:
+            content = content + f"\n\n{self._NATIVE_ID_HEADINGS[stage]}"
         invoke_fn(["stage-produce", "--work-id", work_id, "--stage", stage, "--content", content], base_path=tmp)
         invoke_fn(["stage-ready", "--work-id", work_id, "--stage", stage], base_path=tmp)
         invoke_fn(["gate-quality", "--work-id", work_id, "--stage", stage], base_path=tmp)

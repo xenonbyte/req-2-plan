@@ -94,6 +94,23 @@ _UPSTREAM_ID_PATTERN = re.compile(
     r"\b(REQ-[A-Z]+-\d+|RISK-[A-Z]+-\d+|DES-[A-Z]+-\d+|SPEC-[A-Z]+-\d+)\b"
 )
 
+# Trace-ID validation: well-formed vs candidate patterns
+_VALID_TRACE_ID_RE = re.compile(
+    r"^(?:REQ|RISK|DES|SPEC)-[A-Z]+-\d+$|^SCOPE-(?:IN|OUT)-\d+$|^PLAN-TASK-\d+$"
+)
+_TRACE_ID_CANDIDATE_RE = re.compile(
+    r"\b(?:REQ|RISK|DES|SPEC)-[A-Za-z][A-Za-z0-9_-]*\d[A-Za-z0-9_-]*"
+    r"|\bSCOPE-(?:IN|OUT)-[A-Za-z0-9_-]*\d[A-Za-z0-9_-]*"
+    r"|\bPLAN-TASK-[A-Za-z0-9_-]*\d[A-Za-z0-9_-]*"
+)
+
+# Native-ID heading patterns: stages that MUST define at least one native ID in a heading
+_STAGE_NATIVE_HEADING_PATTERNS = {
+    Stage.RISK_DISCOVERY: re.compile(r"(?m)^#+\s+.*\bRISK-[A-Z]+-\d+\b"),
+    Stage.DESIGN: re.compile(r"(?m)^#+\s+.*\bDES-[A-Z]+-\d+\b"),
+    Stage.SPEC: re.compile(r"(?m)^#+\s+.*\bSPEC-[A-Z]+-\d+\b"),
+}
+
 # Closure status tags
 _CLOSURE_TAGS = frozenset(["[ADDRESSED]", "[DEFERRED]", "[N/A]", "[OUT-OF-SCOPE]", "[CLOSED]"])
 
@@ -344,16 +361,76 @@ def _plan_tasks_missing_code(content: str) -> bool:
     return False
 
 
+def _section_body(content: str, heading: str) -> str:
+    """Return the text of the section under `heading`, stopping at the next same-or-higher heading."""
+    level = len(heading) - len(heading.lstrip("#"))
+    out, capture = [], False
+    for line in content.splitlines():
+        if line.strip() == heading:
+            capture = True
+            continue
+        if capture:
+            stripped = line.lstrip()
+            if stripped.startswith("#"):
+                # Count hashes of this line's heading
+                line_level = len(stripped) - len(stripped.lstrip("#"))
+                if line_level <= level:
+                    break
+            out.append(line)
+    return "\n".join(out)
+
+
+def _has_meaningful_body(text: str) -> bool:
+    """True if `text` has at least one non-empty, non-comment line."""
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped and not stripped.startswith("<!--"):
+            return True
+    return False
+
+
 def _check_stage_schema(stage: Stage, tier: TierEstimate, content: str) -> list[str]:
-    """R2: required top-level headings for the stage at this tier base must be present."""
+    """R2 schema gate: required headings present, each required section has a
+    non-placeholder body, trace IDs are well-formed, RISK/DESIGN/SPEC define a
+    native ID heading, and no unresolved placeholders remain."""
     from tools.workflow_cli.stage_schema import required_headings
     issues: list[str] = []
+
+    # R2.1: required headings must be present
     for heading in required_headings(stage, tier.base):
         if heading not in content:
             issues.append(
                 f"Missing required section {heading!r} for stage {stage.value!r} "
                 f"at tier '{tier.base.value}'."
             )
+
+    # R2.3a: each required heading's section must have a non-placeholder body
+    for heading in required_headings(stage, tier.base):
+        if heading not in content:
+            continue  # already reported by the required-heading presence check
+        body = _section_body(content, heading)
+        if not _has_meaningful_body(body):
+            issues.append(
+                f"Required section {heading!r} must contain non-placeholder body content."
+            )
+
+    # R2.3b: any trace-ID-looking token must be well-formed
+    for token in _TRACE_ID_CANDIDATE_RE.findall(content):
+        if not _VALID_TRACE_ID_RE.fullmatch(token):
+            issues.append(
+                f"Malformed trace ID {token!r}; use REQ-AREA-001, SPEC-AREA-001, "
+                "SCOPE-IN-001, or PLAN-TASK-001 style IDs."
+            )
+
+    # R2.3c: RISK_DISCOVERY / DESIGN / SPEC must define at least one native trace ID in a heading
+    native = _STAGE_NATIVE_HEADING_PATTERNS.get(stage)
+    if native is not None and not native.search(content):
+        issues.append(
+            f"Stage {stage.value!r} must define at least one native trace ID in a heading "
+            f"matching {native.pattern!r}."
+        )
+
+    # R2.2: placeholder scan
     for pat in _PLACEHOLDER_PATTERNS:
         if pat.search(content):
             issues.append(
