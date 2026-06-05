@@ -22,6 +22,17 @@ _HEADING_BODY = {
     (Stage.REQUIREMENT_BRIEF, "## Out-of-Scope"): "- SCOPE-OUT-001 <!-- fill in -->\n",
     (Stage.RISK_DISCOVERY, "## Risks"): "### RISK-SEC-001 <!-- fill in -->\nStatus: <!-- fill in -->\n",
     (Stage.DESIGN, "## Chosen Design"): "### DES-ARCH-001 <!-- fill in -->\n",
+    (Stage.DESIGN, "## Decision Requests"): (
+        "<!-- fill in -->\n"
+        "<!-- Write exactly `none` when no human decision is needed; otherwise list one `### DECISION-NNN` block per choice (fenced example below; keep guidance comments single-line). -->\n"
+        "```text\n"
+        "### DECISION-001 <short title>\n"
+        "Question: <what must a human choose?>\n"
+        "Options: A) ... / B) ...\n"
+        "Recommended: A\n"
+        "Status: pending\n"
+        "```\n"
+    ),
     (Stage.SPEC, "## Behavior Contracts"): "### SPEC-BEHAVIOR-001 <!-- fill in -->\n",
     (Stage.PLAN, "## Tasks"): (
         "### PLAN-TASK-001 <!-- fill in -->\n"

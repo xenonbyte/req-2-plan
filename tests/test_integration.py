@@ -714,8 +714,8 @@ class TestStandardTierArtifactStructure:
         "risk_discovery": ["## Risks", "## Boundaries", "## Scope Overflow Risks", "## Mitigations"],
         "design": [
             "## Design Summary", "## Current Code Evidence", "## Requirements Coverage",
-            "## Options Considered", "## Chosen Design", "## Rollback",
-            "## Observability", "## SPEC Handoff",
+            "## Options Considered", "## Chosen Design", "## Decision Requests",
+            "## Rollback", "## Observability", "## SPEC Handoff",
         ],
     }
 
@@ -744,6 +744,9 @@ class TestStandardTierArtifactStructure:
                 elif heading == "## Assumptions":
                     # R8 elicitation foresight: ensure at least one Assumptions bullet.
                     content = content + f"\n\n{heading}\n- Assumes standard deployment environment.\n"
+                elif heading == "## Decision Requests":
+                    # R12: the gate requires exactly `none` or DECISION blocks.
+                    content = content + f"\n\n{heading}\nnone\n"
                 else:
                     content = content + f"\n\n{heading}\ncontent\n"
         # Inject a native trace-ID heading for stages that require one (R2.3).

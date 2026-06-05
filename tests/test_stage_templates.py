@@ -38,3 +38,12 @@ class TestStageTemplates(unittest.TestCase):
         from tools.workflow_cli.stage_templates import template_for
         text = template_for(Stage.RAW_REQUIREMENT, TierBase.LIGHT)
         self.assertIsInstance(text, str)
+
+    def test_standard_design_template_seeds_decision_requests(self):
+        from tools.workflow_cli.models import Stage, TierBase
+        from tools.workflow_cli.stage_templates import template_for
+        standard = template_for(Stage.DESIGN, TierBase.STANDARD)
+        self.assertIn("## Decision Requests", standard)
+        self.assertIn("`none`", standard)          # guidance mentions the none escape
+        self.assertIn("Status: pending", standard)  # fenced example shows the contract
+        self.assertNotIn("## Decision Requests", template_for(Stage.DESIGN, TierBase.LIGHT))

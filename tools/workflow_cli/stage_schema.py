@@ -33,8 +33,8 @@ STAGE_SCHEMA: dict = {
         TierBase.LIGHT: ["## Design Summary", "## Chosen Design", "## SPEC Handoff"],
         TierBase.STANDARD: [
             "## Design Summary", "## Current Code Evidence", "## Requirements Coverage",
-            "## Options Considered", "## Chosen Design", "## Rollback",
-            "## Observability", "## SPEC Handoff",
+            "## Options Considered", "## Chosen Design", "## Decision Requests",
+            "## Rollback", "## Observability", "## SPEC Handoff",
         ],
     },
     Stage.SPEC: {

@@ -1550,6 +1550,7 @@ class TestForcedReviewRelocation:
                 "## Design Summary\ncontent\n## Current Code Evidence\ncontent\n"
                 "## Requirements Coverage\ncontent\n## Options Considered\ncontent\n"
                 "## Chosen Design\ncontent\n### DES-ARCH-001 Selected architecture\ncontent\n"
+                "## Decision Requests\nnone\n"
                 "## Rollback\ncontent\n"
                 "## Observability\ncontent\n## SPEC Handoff\ncontent\n",
                 encoding="utf-8",
@@ -1844,6 +1845,7 @@ class TestCheckpointDecide:
                 "## Design Summary\ncontent\n## Current Code Evidence\ncontent\n"
                 "## Requirements Coverage\ncontent\n## Options Considered\ncontent\n"
                 "## Chosen Design\ncontent\n### DES-ARCH-001 Selected architecture\ncontent\n"
+                "## Decision Requests\nnone\n"
                 "## Rollback\ncontent\n"
                 "## Observability\ncontent\n## SPEC Handoff\ncontent\n",
                 encoding="utf-8",

@@ -22,6 +22,7 @@ from tools.workflow_cli.models import (
 )
 from tools.workflow_cli.markdown import (
     heading_bounded_bodies,
+    heading_level,
     strip_readonly_sections,
     unfenced_markdown_lines,
     unfenced_markdown_text,
@@ -642,6 +643,128 @@ def _check_elicitation(stage: Stage, tier: TierEstimate, content: str) -> list[s
     return ["Standard-tier brief must record at least one assumption or open question (R8 elicitation)."]
 
 
+# R12: decision-request lifecycle vocabulary. The gate owns ONLY the Status
+# lifecycle (enum, line presence, section non-emptiness, Selected/Rationale
+# when selected); Question/Options/Recommended are template guidance enforced
+# at checkpoint, not here (Agent/CLI boundary).
+_DECISION_SECTION = "## Decision Requests"
+_DECISION_BLOCK_RE = re.compile(r"^###\s+(DECISION-\d+)\b")
+_DECISION_NESTED_MARKER_RE = re.compile(r"^(?:#{1,6}\s+|[-*]\s+)DECISION-\d+\b")
+_DECISION_STATUS_VALUES = frozenset({"pending", "selected"})
+
+
+def _decision_field_value(block_lines: list[str], field: str) -> str | None:
+    """Value of a `Field:` line within a DECISION block; None when absent."""
+    field_re = re.compile(rf"^{re.escape(field)}:\s*(.*)$")
+    for line in block_lines:
+        m = field_re.match(line.strip())
+        if m:
+            return m.group(1).strip()
+    return None
+
+
+def _decision_field_count(block_lines: list[str], field: str) -> int:
+    field_re = re.compile(rf"^{re.escape(field)}:")
+    return sum(1 for line in block_lines if field_re.match(line.strip()))
+
+
+def _check_decision_requests(stage: Stage, tier: TierEstimate, content: str) -> list[str]:
+    """R12: standard DESIGN must list pending human decisions or state `none`."""
+    from tools.workflow_cli.models import TierBase
+    if stage != Stage.DESIGN or tier.base != TierBase.STANDARD:
+        return []
+    lines = _section_body(content, _DECISION_SECTION).splitlines()
+    starts = [
+        (i, m)
+        for i, line in enumerate(lines)
+        if (m := _DECISION_BLOCK_RE.match(line.strip()))
+    ]
+    blocks: list[tuple[str, list[str]]] = []
+    covered: set[int] = set()
+    for start, match in starts:
+        end = len(lines)
+        for j in range(start + 1, len(lines)):
+            if heading_level(lines[j]) is not None:
+                end = j
+                break
+        decision_id = match.group(1)
+        blocks.append((decision_id, lines[start + 1:end]))
+        covered.update(range(start, end))
+    stray = [
+        line.strip()
+        for i, line in enumerate(lines)
+        if i not in covered and line.strip() and not line.strip().startswith("<!--")
+    ]
+
+    issues: list[str] = []
+    if not blocks:
+        if stray == ["none"]:
+            return []
+        if not stray:
+            issues.append(
+                "## Decision Requests is empty; state exactly `none` or list "
+                "`### DECISION-NNN` blocks (R12)."
+            )
+        else:
+            issues.append(
+                "## Decision Requests must be exactly `none` (sole non-comment "
+                "content) or `### DECISION-NNN` blocks (R12)."
+            )
+        return issues
+    if stray:
+        if "none" in stray:
+            issues.append(
+                "## Decision Requests mixes `none` with DECISION blocks; keep one (R12)."
+            )
+        else:
+            issues.append(
+                "## Decision Requests contains non-comment prose outside DECISION blocks; "
+                "use exactly `none` or `### DECISION-NNN` blocks (R12)."
+            )
+    for dup_id, count in Counter(decision_id for decision_id, _ in blocks).items():
+        if count > 1:
+            issues.append(
+                f"Duplicate decision id {dup_id}; each DECISION-NNN must be unique (R12)."
+            )
+    for decision_id, body in blocks:
+        for line in body:
+            if _DECISION_NESTED_MARKER_RE.match(line.strip()):
+                issues.append(
+                    f"{decision_id} body contains a nested 'DECISION-NNN' marker; "
+                    "each decision must be its own '### DECISION-NNN' block (R12)."
+                )
+                break
+        if _decision_field_count(body, "Status") > 1:
+            issues.append(
+                f"{decision_id} has multiple 'Status:' lines; keep exactly one (R12)."
+            )
+            continue
+        status = _decision_field_value(body, "Status")
+        if status is None:
+            issues.append(
+                f"{decision_id} is missing a 'Status:' line; allowed: pending|selected (R12)."
+            )
+            continue
+        if status.lower() not in _DECISION_STATUS_VALUES:
+            issues.append(
+                f"{decision_id} has invalid 'Status: {status}'; allowed: pending|selected (R12)."
+            )
+            continue
+        if status.lower() == "pending":
+            issues.append(
+                f"Unresolved decision request {decision_id} (Status: pending); "
+                "a human must choose before this gate can pass (R12)."
+            )
+            continue
+        for field in ("Selected", "Rationale"):
+            if not (_decision_field_value(body, field) or "").strip():
+                issues.append(
+                    f"{decision_id} is 'Status: selected' but missing a non-empty "
+                    f"'{field}:' line (R12)."
+                )
+    return issues
+
+
 def _check_scope_freeze(stage: Stage, content: str) -> list[str]:
     """R8: brief's In/Out-of-Scope must carry stable IDs so trace can anchor them."""
     if stage != Stage.REQUIREMENT_BRIEF:
@@ -834,6 +957,9 @@ def check_quality_gate(
 
         # Check 9 (R8): elicitation — standard-tier brief must record at least one assumption or open question.
         issues.extend(_check_elicitation(stage, tier, gate_content))
+
+        # Check 10 (R12): standard DESIGN must resolve decision requests.
+        issues.extend(_check_decision_requests(stage, tier, gate_content))
 
     return GateResult(
         passed=len(issues) == 0,

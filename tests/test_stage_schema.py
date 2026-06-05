@@ -19,3 +19,9 @@ class TestStageSchema(unittest.TestCase):
     def test_unschemaed_stage_returns_empty(self):
         from tools.workflow_cli.stage_schema import required_headings
         self.assertEqual(required_headings(Stage.RAW_REQUIREMENT, TierBase.LIGHT), [])
+
+    def test_standard_design_requires_decision_requests(self):
+        from tools.workflow_cli.models import Stage, TierBase
+        from tools.workflow_cli.stage_schema import required_headings
+        self.assertIn("## Decision Requests", required_headings(Stage.DESIGN, TierBase.STANDARD))
+        self.assertNotIn("## Decision Requests", required_headings(Stage.DESIGN, TierBase.LIGHT))

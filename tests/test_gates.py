@@ -183,6 +183,7 @@ class TestQualityGate(unittest.TestCase):
                 "## Options Considered\ncontent\n\n"
                 "## Chosen Design\ncontent\n\n"
                 "### DES-ARCH-001 Selected architecture\ncontent\n\n"
+                "## Decision Requests\nnone\n\n"
                 "## Rollback\ncontent\n\n"
                 "## Observability\ncontent\n\n"
                 "## SPEC Handoff\ncontent\n"
@@ -277,6 +278,7 @@ class TestQualityGate(unittest.TestCase):
                 "## Options Considered\ncontent\n\n"
                 "## Chosen Design\ncontent\n\n"
                 "### DES-ARCH-001 Selected architecture\ncontent\n\n"
+                "## Decision Requests\nnone\n\n"
                 "## Rollback\ncontent\n\n"
                 "## Observability\ncontent\n\n"
                 "## SPEC Handoff\ncontent\n"
@@ -301,6 +303,7 @@ class TestQualityGate(unittest.TestCase):
                 "## Options Considered\ncontent\n\n"
                 "## Chosen Design\ncontent\n\n"
                 "### DES-ARCH-001 Selected architecture\ncontent\n\n"
+                "## Decision Requests\nnone\n\n"
                 "## Rollback\ncontent\n\n"
                 "## Observability\ncontent\n\n"
                 "## SPEC Handoff\ncontent\n"
@@ -324,6 +327,7 @@ class TestQualityGate(unittest.TestCase):
                 "## Options Considered\ncontent\n\n"
                 "## Chosen Design\ncontent\n\n"
                 "### DES-ARCH-001 Selected architecture\ncontent\n\n"
+                "## Decision Requests\nnone\n\n"
                 "## Rollback\ncontent\n\n"
                 "## Observability\ncontent\n\n"
                 "## SPEC Handoff\ncontent\n"
@@ -347,6 +351,7 @@ class TestQualityGate(unittest.TestCase):
                 "## Options Considered\ncontent\n\n"
                 "## Chosen Design\ncontent\n\n"
                 "### DES-ARCH-001 Selected architecture\ncontent\n\n"
+                "## Decision Requests\nnone\n\n"
                 "## Rollback\ncontent\n\n"
                 "## Observability\ncontent\n\n"
                 "## SPEC Handoff\ncontent\n"
@@ -370,6 +375,7 @@ class TestQualityGate(unittest.TestCase):
                 "## Options Considered\ncontent\n\n"
                 "## Chosen Design\ncontent\n\n"
                 "### DES-ARCH-001 Selected architecture\ncontent\n\n"
+                "## Decision Requests\nnone\n\n"
                 "## Rollback\ncontent\n\n"
                 "## Observability\ncontent\n\n"
                 "## SPEC Handoff\ncontent\n"
@@ -2096,6 +2102,147 @@ class TestPlanContextPackGate(unittest.TestCase):
         self.assertTrue(
             any("--base-path" in i and str(base) in i for i in r.issues),
             f"expected non-default base-path remediation in issues, got: {r.issues}")
+
+
+class TestDecisionRequestsGate(unittest.TestCase):
+    """R12: standard DESIGN must explicitly resolve decision requests."""
+
+    def setUp(self):
+        from tools.workflow_cli.gates import check_quality_gate
+        from tools.workflow_cli.models import Stage, TierBase, TierEstimate
+        self.check = check_quality_gate
+        self.Stage = Stage
+        self.standard = TierEstimate(base=TierBase.STANDARD, modifiers=frozenset())
+        self.light = TierEstimate(base=TierBase.LIGHT, modifiers=frozenset())
+
+    def _design(self, decision_section: str) -> str:
+        return (
+            "# Design\n\n"
+            "## Design Summary\ncontent\n\n"
+            "## Current Code Evidence\ncontent\n\n"
+            "## Requirements Coverage\ncontent\n\n"
+            "## Options Considered\ncontent\n\n"
+            "## Chosen Design\n### DES-ARCH-001 selected architecture\ncontent\n\n"
+            f"## Decision Requests\n{decision_section}\n"
+            "## Rollback\ncontent\n\n"
+            "## Observability\ncontent\n\n"
+            "## SPEC Handoff\ncontent\n"
+        )
+
+    def _issues(self, content, tier=None):
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as tmp:
+            return self.check(Path(tmp), self.Stage.DESIGN, tier or self.standard, [], content).issues
+
+    def test_none_is_a_valid_explicit_statement(self):
+        self.assertEqual(self._issues(self._design("none\n")), [])
+
+    def test_pending_decision_fails_and_lists_id(self):
+        section = ("### DECISION-001 limiter backend\n"
+                   "Question: Redis or in-process?\nOptions: A / B\n"
+                   "Recommended: A\nStatus: pending\n")
+        issues = self._issues(self._design(section))
+        self.assertTrue(any("DECISION-001" in i and "pending" in i for i in issues))
+
+    def test_selected_with_fields_passes(self):
+        section = ("### DECISION-001 limiter backend\n"
+                   "Question: Redis or in-process?\nOptions: A / B\n"
+                   "Recommended: A\nStatus: selected\n"
+                   "Selected: A\nRationale: multi-instance deployment\n")
+        self.assertEqual(self._issues(self._design(section)), [])
+
+    def test_selected_missing_rationale_fails(self):
+        section = ("### DECISION-001 limiter backend\n"
+                   "Question: q\nOptions: A / B\nRecommended: A\n"
+                   "Status: selected\nSelected: A\n")
+        issues = self._issues(self._design(section))
+        self.assertTrue(any("DECISION-001" in i and "Rationale" in i for i in issues))
+
+    def test_selected_missing_selected_fails(self):
+        section = ("### DECISION-001 limiter backend\n"
+                   "Question: q\nOptions: A / B\nRecommended: A\n"
+                   "Status: selected\nRationale: needs human confirmation\n")
+        issues = self._issues(self._design(section))
+        self.assertTrue(any("DECISION-001" in i and "Selected" in i for i in issues))
+
+    def test_status_outside_enum_fails(self):
+        section = ("### DECISION-001 limiter backend\n"
+                   "Question: q\nOptions: A / B\nRecommended: A\nStatus: chosen\n")
+        issues = self._issues(self._design(section))
+        self.assertTrue(any("invalid 'Status: chosen'" in i for i in issues))
+
+    def test_block_missing_status_line_fails(self):
+        section = ("### DECISION-001 limiter backend\n"
+                   "Question: q\nOptions: A / B\nRecommended: A\n")
+        issues = self._issues(self._design(section))
+        self.assertTrue(any("DECISION-001" in i and "missing a 'Status:'" in i for i in issues))
+
+    def test_none_mixed_with_blocks_fails(self):
+        section = ("none\n\n### DECISION-001 limiter backend\n"
+                   "Question: q\nOptions: A / B\nRecommended: A\nStatus: pending\n")
+        issues = self._issues(self._design(section))
+        self.assertTrue(any("mixes" in i for i in issues))
+
+    def test_stray_prose_mixed_with_blocks_fails(self):
+        section = ("Please decide deployment backend.\n\n"
+                   "### DECISION-001 limiter backend\n"
+                   "Question: q\nOptions: A / B\nRecommended: A\n"
+                   "Status: selected\nSelected: A\nRationale: already approved\n")
+        issues = self._issues(self._design(section))
+        self.assertTrue(any("outside DECISION blocks" in i for i in issues))
+
+    def test_empty_section_fails(self):
+        issues = self._issues(self._design("<!-- a comment only -->\n"))
+        self.assertTrue(any("Decision Requests" in i and "empty" in i for i in issues))
+
+    def test_light_design_is_exempt(self):
+        content = ("# Design\n\n## Design Summary\ncontent\n\n"
+                   "## Chosen Design\n### DES-ARCH-001 arch\ncontent\n\n"
+                   "## SPEC Handoff\ncontent\n")
+        issues = self._issues(content, tier=self.light)
+        self.assertEqual([i for i in issues if "Decision Requests" in i], [])
+
+    def test_pending_pseudo_block_after_valid_block_fails(self):
+        """A level-4 'DECISION' pseudo-heading after a valid block must not be absorbed."""
+        section = ("### DECISION-001 limiter backend\n"
+                   "Question: q\nOptions: A / B\nRecommended: A\n"
+                   "Status: selected\nSelected: A\nRationale: approved\n\n"
+                   "#### DECISION-002 region choice\n"
+                   "Status: pending\n")
+        issues = self._issues(self._design(section))
+        self.assertTrue(any("R12" in i for i in issues),
+                        f"pseudo-block must fail loud: {issues}")
+
+    def test_pending_bullet_inside_block_body_fails(self):
+        """A bullet DECISION marker inside a block body must fail loud."""
+        section = ("### DECISION-001 limiter backend\n"
+                   "Question: q\nOptions: A / B\nRecommended: A\n"
+                   "Status: selected\nSelected: A\nRationale: approved\n"
+                   "- DECISION-002: choose region. Status: pending\n")
+        issues = self._issues(self._design(section))
+        self.assertTrue(any("nested 'DECISION-NNN' marker" in i for i in issues),
+                        f"bullet marker must fail loud: {issues}")
+
+    def test_duplicate_decision_ids_fail(self):
+        section = ("### DECISION-001 limiter backend\n"
+                   "Question: q\nOptions: A / B\nRecommended: A\n"
+                   "Status: selected\nSelected: A\nRationale: approved\n\n"
+                   "### DECISION-001 region choice\n"
+                   "Question: q\nOptions: A / B\nRecommended: A\n"
+                   "Status: selected\nSelected: B\nRationale: latency\n")
+        issues = self._issues(self._design(section))
+        self.assertTrue(any("Duplicate decision id DECISION-001" in i for i in issues),
+                        f"duplicate ids must fail: {issues}")
+
+    def test_multiple_status_lines_fail(self):
+        section = ("### DECISION-001 limiter backend\n"
+                   "Question: q\nOptions: A / B\nRecommended: A\n"
+                   "Status: selected\nSelected: A\nRationale: approved\n"
+                   "Status: pending\n")
+        issues = self._issues(self._design(section))
+        self.assertTrue(any("multiple 'Status:' lines" in i for i in issues),
+                        f"multiple Status lines must fail: {issues}")
 
 
 if __name__ == "__main__":
