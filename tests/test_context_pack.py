@@ -1,4 +1,5 @@
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -36,6 +37,21 @@ class TestBuildContextPack(unittest.TestCase):
         self.assertTrue(any(e.endswith("main.py") for e in pack.entrypoints))
         self.assertIn("src", pack.source_dirs)
 
+    def test_repo_root_is_absolute_when_repo_path_is_relative(self):
+        from tools.workflow_cli.context_pack import build_context_pack
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            repo = tmp / "repo"
+            repo.mkdir()
+            self._make_repo(repo)
+            cwd = Path.cwd()
+            try:
+                os.chdir(tmp)
+                pack = build_context_pack(Path("repo"))
+            finally:
+                os.chdir(cwd)
+        self.assertEqual(pack.repo_root, str(repo.resolve()))
+
 
 class TestContextPackWriters(unittest.TestCase):
     def test_write_produces_both_files_and_valid_json(self):
@@ -50,5 +66,5 @@ class TestContextPackWriters(unittest.TestCase):
             self.assertTrue(md_path.exists())
             self.assertTrue(json_path.exists())
             data = json.loads(json_path.read_text(encoding="utf-8"))
-            self.assertEqual(data["repo_root"], str(tmp))
+            self.assertEqual(data["repo_root"], str(tmp.resolve()))
             self.assertIn("dependencies", data)

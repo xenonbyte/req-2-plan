@@ -9,6 +9,8 @@ from tools.workflow_cli.models import STAGE_ARTIFACT_MAP, Stage
 
 # REQ-AUTH-001 / RISK-SEC-001 / DES-AUTH-001 / SPEC-AUTH-001 / SCOPE-IN-001 / SCOPE-OUT-001 / PLAN-TASK-001
 _ID_RE = re.compile(r"(?:REQ|RISK|DES|SPEC)-[A-Z]+-\d+|SCOPE-(?:IN|OUT)-\d+|PLAN-TASK-\d+")
+_PLAN_TASK_HEADING_RE = re.compile(r"^###\s+PLAN-TASK-\d+\b")
+_MARKDOWN_FENCE_MARKER_RE = re.compile(r"^[ \t]{0,3}(`{3,}|~{3,})")
 
 
 @dataclass
@@ -23,7 +25,7 @@ def _scope_ids_defined_in_brief(stage: Stage, content: str) -> set[str]:
         return set()
     ids: set[str] = set()
     capture = False
-    for line in content.splitlines():
+    for line, _, _ in _unfenced_markdown_lines(content):
         stripped = line.strip()
         if stripped in {"## In-Scope", "## Out-of-Scope"}:
             capture = True
@@ -40,16 +42,58 @@ def _artifact_text(run_dir: Path, stage: Stage) -> str:
     return path.read_text(encoding="utf-8") if path.exists() else ""
 
 
+def _unfenced_markdown_lines(content: str):
+    """Yield (line, start, end) for lines outside Markdown fenced code blocks."""
+    fence_char = ""
+    fence_len = 0
+    offset = 0
+    for line in content.splitlines(keepends=True):
+        marker = _MARKDOWN_FENCE_MARKER_RE.match(line)
+        if fence_char:
+            if (
+                marker
+                and marker.group(1)[0] == fence_char
+                and len(marker.group(1)) >= fence_len
+                and not line[marker.end():].strip()
+            ):
+                fence_char = ""
+                fence_len = 0
+            offset += len(line)
+            continue
+
+        if marker:
+            fence_char = marker.group(1)[0]
+            fence_len = len(marker.group(1))
+            offset += len(line)
+            continue
+
+        start = offset
+        offset += len(line)
+        yield line, start, offset
+
+
+def _unfenced_markdown_text(content: str) -> str:
+    return "".join(line for line, _, _ in _unfenced_markdown_lines(content))
+
+
 def _plan_task_bodies(plan_content: str):
-    starts = [m.start() for m in re.finditer(r"(?m)^###\s+PLAN-TASK-\d+\b", plan_content)]
+    starts = [
+        start
+        for line, start, _ in _unfenced_markdown_lines(plan_content)
+        if _PLAN_TASK_HEADING_RE.match(line)
+    ]
     for index, start in enumerate(starts):
         end = starts[index + 1] if index + 1 < len(starts) else len(plan_content)
         yield plan_content[start:end]
 
 
 def _plan_task_field_value(body: str, field: str) -> str:
-    m = re.search(rf"(?m)^{re.escape(field)}:\s*(.*)$", body)
-    return m.group(1).strip() if m else ""
+    field_re = re.compile(rf"^{re.escape(field)}:\s*(.*)$")
+    for line, _, _ in _unfenced_markdown_lines(body):
+        m = field_re.match(line)
+        if m:
+            return m.group(1).strip()
+    return ""
 
 
 def plan_consumed_spec_ids(run_dir: Path) -> set[str]:
@@ -63,7 +107,8 @@ def plan_consumed_spec_ids(run_dir: Path) -> set[str]:
 
 
 def _spec_blocks(spec_content: str) -> dict[str, str]:
-    starts = list(re.finditer(r"(?m)^#+\s+(SPEC-[A-Z]+-\d+)\b", spec_content))
+    spec_content = _unfenced_markdown_text(spec_content)
+    starts = list(re.finditer(r"(?m)^#+\s+.*?\b(SPEC-[A-Z]+-\d+)\b", spec_content))
     blocks: dict[str, str] = {}
     for index, match in enumerate(starts):
         end = starts[index + 1].start() if index + 1 < len(starts) else len(spec_content)
@@ -72,6 +117,7 @@ def _spec_blocks(spec_content: str) -> dict[str, str]:
 
 
 def _risk_blocks(content: str) -> dict[str, str]:
+    content = _unfenced_markdown_text(content)
     starts = list(re.finditer(r"(?m)^(#+)\s+.*?\b(RISK-[A-Z]+-\d+)\b", content))
     headings = list(re.finditer(r"(?m)^(#+)\s+", content))
     blocks: dict[str, str] = {}
@@ -92,7 +138,7 @@ def scope_in_not_closed(run_dir: Path) -> list[str]:
     """SCOPE-IN closes only when a PLAN-TASK carries it or consumes a SPEC carrying it."""
     model = build_trace(run_dir)
     plan_text = _artifact_text(run_dir, Stage.PLAN)
-    plan_task_text = "\n".join(_plan_task_bodies(plan_text))
+    plan_task_text = "\n".join(_unfenced_markdown_text(body) for body in _plan_task_bodies(plan_text))
     spec_blocks = _spec_blocks(_artifact_text(run_dir, Stage.SPEC))
     consumed_specs = plan_consumed_spec_ids(run_dir)
     issues: list[str] = []
@@ -129,11 +175,11 @@ def build_trace(run_dir: Path) -> TraceModel:
             continue
         content = path.read_text(encoding="utf-8")
         heading_ids: set[str] = set()
-        for line in content.splitlines():
+        for line, _, _ in _unfenced_markdown_lines(content):
             if line.lstrip().startswith("#"):
                 heading_ids.update(m.group(0) for m in _ID_RE.finditer(line))
         definition_ids = heading_ids | _scope_ids_defined_in_brief(stage, content)
-        all_ids = {m.group(0) for m in _ID_RE.finditer(content)}
+        all_ids = {m.group(0) for m in _ID_RE.finditer(_unfenced_markdown_text(content))}
         for id_ in definition_ids:
             model.defined.setdefault(id_, stage.value)
         for id_ in all_ids:

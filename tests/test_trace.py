@@ -54,6 +54,18 @@ class TestTrace(unittest.TestCase):
                 "## Tasks\n### PLAN-TASK-001\nSpec References: SPEC-RATE-001\n", encoding="utf-8")
             self.assertFalse(any("SCOPE-IN-001" in i for i in check_trace_closure(run_dir)))
 
+    def test_scope_in_carried_into_consumed_spec_closes_when_spec_id_is_later_in_heading(self):
+        from tools.workflow_cli.trace import check_trace_closure
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            (run_dir / STAGE_ARTIFACT_MAP[Stage.REQUIREMENT_BRIEF]).write_text(
+                "## In-Scope\n- SCOPE-IN-001 login behavior\n", encoding="utf-8")
+            (run_dir / STAGE_ARTIFACT_MAP[Stage.SPEC]).write_text(
+                "### Login behavior SPEC-AUTH-001\nimplements SCOPE-IN-001\n", encoding="utf-8")
+            (run_dir / STAGE_ARTIFACT_MAP[Stage.PLAN]).write_text(
+                "## Tasks\n### PLAN-TASK-001\nSpec References: SPEC-AUTH-001\n", encoding="utf-8")
+            self.assertFalse(any("SCOPE-IN-001" in i for i in check_trace_closure(run_dir)))
+
     def test_scope_in_carried_only_to_unconsumed_spec_is_a_gap(self):
         from tools.workflow_cli.trace import check_trace_closure
         with tempfile.TemporaryDirectory() as tmp:
@@ -64,6 +76,55 @@ class TestTrace(unittest.TestCase):
                 "## SPEC-RATE-001\nimplements SCOPE-IN-001\n", encoding="utf-8")
             (run_dir / STAGE_ARTIFACT_MAP[Stage.PLAN]).write_text(
                 "## Tasks\n### PLAN-TASK-001\nSpec References: SPEC-OTHER-999\n", encoding="utf-8")
+            self.assertTrue(any("SCOPE-IN-001" in i for i in check_trace_closure(run_dir)))
+
+    def test_fenced_plan_task_heading_does_not_consume_spec(self):
+        from tools.workflow_cli.trace import spec_ids_not_consumed
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = self._run_dir(
+                tmp,
+                "## SPEC-AUTH-001 login\nbehavior\n\n## SPEC-OTHER-001 other\nbehavior\n",
+                (
+                    "## Tasks\n"
+                    "### PLAN-TASK-001\n"
+                    "Spec References: SPEC-AUTH-001\n"
+                    "Skeleton:\n"
+                    "```md\n"
+                    "### PLAN-TASK-002\n"
+                    "Spec References: SPEC-OTHER-001\n"
+                    "```\n"
+                ),
+            )
+            self.assertEqual(spec_ids_not_consumed(run_dir), ["SPEC-OTHER-001"])
+
+    def test_fenced_spec_heading_is_not_a_defined_spec(self):
+        from tools.workflow_cli.trace import spec_ids_not_consumed
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = self._run_dir(
+                tmp,
+                (
+                    "## SPEC-AUTH-001 login\n"
+                    "behavior\n\n"
+                    "```md\n"
+                    "## SPEC-FAKE-001 template only\n"
+                    "```\n"
+                ),
+                "### PLAN-TASK-001\nSpec References: SPEC-AUTH-001\n",
+            )
+            self.assertEqual(spec_ids_not_consumed(run_dir), [])
+
+    def test_fenced_scope_ref_in_consumed_spec_does_not_close_scope(self):
+        from tools.workflow_cli.trace import check_trace_closure
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            (run_dir / STAGE_ARTIFACT_MAP[Stage.REQUIREMENT_BRIEF]).write_text(
+                "## In-Scope\n- SCOPE-IN-001 login behavior\n", encoding="utf-8")
+            (run_dir / STAGE_ARTIFACT_MAP[Stage.SPEC]).write_text(
+                "## SPEC-AUTH-001 login\n```md\nimplements SCOPE-IN-001\n```\n",
+                encoding="utf-8",
+            )
+            (run_dir / STAGE_ARTIFACT_MAP[Stage.PLAN]).write_text(
+                "## Tasks\n### PLAN-TASK-001\nSpec References: SPEC-AUTH-001\n", encoding="utf-8")
             self.assertTrue(any("SCOPE-IN-001" in i for i in check_trace_closure(run_dir)))
 
     def test_unclosed_risk_is_a_gap(self):
@@ -130,3 +191,20 @@ class TestTrace(unittest.TestCase):
             (run_dir / STAGE_ARTIFACT_MAP[Stage.PLAN]).write_text(
                 "## Tasks\n### PLAN-TASK-001 build admin UI per SCOPE-OUT-001\n", encoding="utf-8")
             self.assertEqual(scope_out_violations(run_dir), ["SCOPE-OUT-001"])
+
+    def test_fenced_plan_scope_out_reference_is_not_a_violation(self):
+        from tools.workflow_cli.trace import scope_out_violations
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            (run_dir / STAGE_ARTIFACT_MAP[Stage.REQUIREMENT_BRIEF]).write_text(
+                "## Out-of-Scope\n- SCOPE-OUT-001 admin UI\n", encoding="utf-8")
+            (run_dir / STAGE_ARTIFACT_MAP[Stage.PLAN]).write_text(
+                "## Tasks\n"
+                "### PLAN-TASK-001 build auth\n"
+                "Skeleton:\n"
+                "```md\n"
+                "Do not implement SCOPE-OUT-001 here.\n"
+                "```\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(scope_out_violations(run_dir), [])

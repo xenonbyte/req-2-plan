@@ -28,7 +28,7 @@ class ProjectContextPack:
 
 
 def build_context_pack(repo_path: Path) -> ProjectContextPack:
-    repo_path = Path(repo_path)
+    repo_path = Path(repo_path).resolve()
     baseline = scan_repo_baseline(repo_path)
     pack = ProjectContextPack(repo_root=str(repo_path), languages=dict(baseline.language_breakdown))
 

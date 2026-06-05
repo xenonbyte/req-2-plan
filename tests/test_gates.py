@@ -577,6 +577,14 @@ class TestStageSchemaGate(unittest.TestCase):
         self.assertFalse(result.passed)
         self.assertTrue(any("placeholder" in i.lower() for i in result.issues))
 
+    def test_raw_requirement_allows_user_text_that_looks_like_placeholder(self):
+        import tempfile
+        from pathlib import Path
+        body = "Fix the FIXME comment in tools/foo.py"
+        with tempfile.TemporaryDirectory() as tmp:
+            result = self.check_quality_gate(Path(tmp), self.Stage.RAW_REQUIREMENT, self.tier, [], body)
+        self.assertTrue(result.passed, result.issues)
+
     def test_tbd_as_final_content_fails(self):
         import tempfile
         from pathlib import Path
@@ -635,6 +643,59 @@ class TestStageSchemaGate(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             result = self.check_quality_gate(Path(tmp), self.Stage.SPEC, self.tier, [], body)
         self.assertFalse(any("native trace ID" in i for i in result.issues))
+
+    def test_spec_schema_ignores_fenced_required_headings_and_native_id(self):
+        import tempfile
+        from pathlib import Path
+        body = (
+            "# Spec\n\n"
+            "## External Documentation Checked\n\n"
+            "N/A — no external dependencies\n\n"
+            "```md\n"
+            "## Behavior Contracts\n"
+            "### SPEC-FAKE-001 Example only\n"
+            "content\n\n"
+            "## API / Data / Config Contracts\n"
+            "content\n\n"
+            "## Test Matrix\n"
+            "content\n\n"
+            "## Non-goals\n"
+            "content\n\n"
+            "## PLAN Handoff\n"
+            "content\n"
+            "```\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            result = self.check_quality_gate(Path(tmp), self.Stage.SPEC, self.tier, [], body)
+        self.assertFalse(result.passed)
+        self.assertTrue(any("Behavior Contracts" in i and "Missing" in i for i in result.issues))
+        self.assertTrue(any("native trace ID" in i for i in result.issues))
+
+    def test_schema_section_body_ignores_fenced_template_content(self):
+        import tempfile
+        from pathlib import Path
+        body = (
+            "# Spec\n\n"
+            "## Behavior Contracts\n"
+            "### SPEC-CORE-001 Real contract\n"
+            "content\n\n"
+            "## API / Data / Config Contracts\n"
+            "content\n\n"
+            "## External Documentation Checked\n\n"
+            "N/A — no external dependencies\n\n"
+            "## Test Matrix\n"
+            "```md\n"
+            "content in a template only\n"
+            "```\n\n"
+            "## Non-goals\n"
+            "content\n\n"
+            "## PLAN Handoff\n"
+            "content\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            result = self.check_quality_gate(Path(tmp), self.Stage.SPEC, self.tier, [], body)
+        self.assertFalse(result.passed)
+        self.assertTrue(any("Test Matrix" in i and "body" in i for i in result.issues))
 
     def test_brief_scope_section_ids_do_not_require_heading_definition(self):
         import tempfile
@@ -1307,6 +1368,26 @@ class TestPlanTaskFields(unittest.TestCase):
         self.assertFalse(r.passed)
         self.assertTrue(any("SPEC-AUTH-001" in i and "SPEC artifact" in i for i in r.issues))
 
+    def test_spec_reference_ignores_fenced_spec_headings(self):
+        import tempfile
+        from pathlib import Path
+        from tools.workflow_cli.models import STAGE_ARTIFACT_MAP
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            (run_dir / STAGE_ARTIFACT_MAP[self.Stage.SPEC]).write_text(
+                "## Behavior Contracts\n"
+                "```md\n"
+                "### SPEC-FAKE-001 template only\n"
+                "```\n",
+                encoding="utf-8",
+            )
+            plan = ("## Tasks\n\n### PLAN-TASK-001 a\n"
+                    "Spec References: SPEC-FAKE-001\nVerification: pytest\n")
+            (run_dir / STAGE_ARTIFACT_MAP[self.Stage.PLAN]).write_text(plan, encoding="utf-8")
+            r = self.check(run_dir, self.Stage.PLAN, self.tier, [], plan)
+        self.assertFalse(r.passed)
+        self.assertTrue(any("SPEC-FAKE-001" in i and "SPEC artifact" in i for i in r.issues))
+
     def test_files_referencing_missing_path_fails_unless_create(self):
         import json, tempfile
         from pathlib import Path
@@ -1351,6 +1432,50 @@ class TestPlanTaskFields(unittest.TestCase):
             r = self.check(run_dir, self.Stage.PLAN, self.tier, [], plan)
         self.assertFalse(r.passed)
         self.assertTrue(any("../outside.py" in i and "outside repo_root" in i for i in r.issues))
+
+    def test_inline_files_parent_path_outside_repo_fails_even_if_file_exists(self):
+        import json, tempfile
+        from pathlib import Path
+        from tools.workflow_cli.models import STAGE_ARTIFACT_MAP
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_dir = root / "run"
+            run_dir.mkdir()
+            repo = root / "repo"
+            repo.mkdir()
+            (root / "outside.py").write_text("x=1\n", encoding="utf-8")
+            (run_dir / "02-project-context.json").write_text(
+                json.dumps({"repo_root": str(repo)}), encoding="utf-8")
+            (run_dir / STAGE_ARTIFACT_MAP[self.Stage.SPEC]).write_text(
+                "## SPEC-AUTH-001 login\n", encoding="utf-8")
+            plan = ("## Tasks\n\n### PLAN-TASK-001 a\n"
+                    "Spec References: SPEC-AUTH-001\nChange Type: modify\n"
+                    "Files: ../outside.py\nVerification: pytest\n")
+            (run_dir / STAGE_ARTIFACT_MAP[self.Stage.PLAN]).write_text(plan, encoding="utf-8")
+            r = self.check(run_dir, self.Stage.PLAN, self.tier, [], plan)
+        self.assertFalse(r.passed)
+        self.assertTrue(any("../outside.py" in i and "outside repo_root" in i for i in r.issues))
+
+    def test_inline_files_existing_repo_path_passes(self):
+        import json, tempfile
+        from pathlib import Path
+        from tools.workflow_cli.models import STAGE_ARTIFACT_MAP
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "run"
+            run_dir.mkdir()
+            repo = Path(tmp) / "repo"
+            (repo / "src").mkdir(parents=True)
+            (repo / "src" / "real.py").write_text("x=1\n", encoding="utf-8")
+            (run_dir / "02-project-context.json").write_text(
+                json.dumps({"repo_root": str(repo)}), encoding="utf-8")
+            (run_dir / STAGE_ARTIFACT_MAP[self.Stage.SPEC]).write_text(
+                "## SPEC-AUTH-001 login\n", encoding="utf-8")
+            plan = ("## Tasks\n\n### PLAN-TASK-001 a\n"
+                    "Spec References: SPEC-AUTH-001\nChange Type: modify\n"
+                    "Files: src/real.py :: f\nVerification: pytest\n")
+            (run_dir / STAGE_ARTIFACT_MAP[self.Stage.PLAN]).write_text(plan, encoding="utf-8")
+            r = self.check(run_dir, self.Stage.PLAN, self.tier, [], plan)
+        self.assertTrue(r.passed, r.issues)
 
     def test_files_referencing_absolute_path_outside_repo_fails_even_if_file_exists(self):
         import json, tempfile

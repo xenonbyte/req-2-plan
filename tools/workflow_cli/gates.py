@@ -122,7 +122,7 @@ _DEFINED_ID_PATTERN = re.compile(r"\b([A-Z]+-[A-Z]+-\d+)\b")
 def _find_defined_ids(content: str) -> set[str]:
     """Return IDs that are defined in headings (i.e. the current artifact is defining them)."""
     heading_pattern = re.compile(r"^#{1,6}\s+.*\b([A-Z]+-[A-Z]+-\d+)\b", re.MULTILINE)
-    return set(heading_pattern.findall(content))
+    return set(heading_pattern.findall(_unfenced_markdown_text(content)))
 
 
 def _find_ids_without_closure(content: str) -> list[str]:
@@ -131,7 +131,8 @@ def _find_ids_without_closure(content: str) -> list[str]:
     IDs defined in headings of the current artifact are excluded — they are
     being *defined* here, not referencing upstream artifacts that need closure.
     """
-    all_refs = set(_UPSTREAM_ID_PATTERN.findall(content))
+    search_content = _unfenced_markdown_text(content)
+    all_refs = set(_UPSTREAM_ID_PATTERN.findall(search_content))
     defined_here = _find_defined_ids(content)
     # Only check IDs that are referenced but NOT defined in this artifact
     refs_to_check = all_refs - defined_here
@@ -146,7 +147,7 @@ def _find_ids_without_closure(content: str) -> list[str]:
                 re.escape(ref_id) + r"[^\n]*" + re.escape(tag),
                 re.IGNORECASE,
             )
-            if pattern.search(content):
+            if pattern.search(search_content):
                 has_closure = True
                 break
         if not has_closure:
@@ -157,7 +158,7 @@ def _find_ids_without_closure(content: str) -> list[str]:
 def _find_duplicate_ids(content: str) -> list[str]:
     """Return IDs that appear more than once in heading (definition) context."""
     heading_pattern = re.compile(r"^#{1,6}\s+.*\b([A-Z]+-[A-Z]+-\d+)\b", re.MULTILINE)
-    heading_ids = heading_pattern.findall(content)
+    heading_ids = heading_pattern.findall(_unfenced_markdown_text(content))
 
     from collections import Counter
     counts = Counter(heading_ids)
@@ -203,6 +204,10 @@ def _unfenced_markdown_lines(content: str):
         start = offset
         offset += len(line)
         yield line, start, offset
+
+
+def _unfenced_markdown_text(content: str) -> str:
+    return "".join(line for line, _, _ in _unfenced_markdown_lines(content))
 
 
 def _plain_table_cell(cell: str) -> str:
@@ -322,6 +327,29 @@ def _iter_plan_task_bodies(content: str):
         yield content[s:e]
 
 
+def _plan_task_file_paths(files_field: str) -> list[str]:
+    paths: list[str] = []
+    lines = [line for line, _, _ in _unfenced_markdown_lines(files_field)]
+    if not lines:
+        return paths
+
+    first = lines[0].strip()
+    if first:
+        path_part = first[2:].strip() if first.startswith(("- ", "* ")) else first
+        path_part = path_part.split("::")[0].strip()
+        if path_part:
+            paths.append(path_part)
+
+    for line in lines[1:]:
+        stripped = line.strip()
+        if not stripped.startswith(("- ", "* ")):
+            continue
+        path_part = stripped[2:].split("::")[0].strip()
+        if path_part:
+            paths.append(path_part)
+    return paths
+
+
 def _check_plan_file_refs(run_dir: Path, content: str) -> list[str]:
     """Hard-check Files paths against the Context Pack repo_root. create-type tasks
     are exempt; the part after '::' (a symbol) is advisory and not checked (no AST pack yet)."""
@@ -341,13 +369,7 @@ def _check_plan_file_refs(run_dir: Path, content: str) -> list[str]:
         if "create" in _plan_task_field_value(body, "Change Type").lower():
             continue
         files_field = _plan_task_field_body(body, "Files")
-        for line in files_field.splitlines():
-            stripped = line.strip()
-            if not stripped.startswith(("- ", "* ")):
-                continue
-            path_part = stripped[2:].split("::")[0].strip()
-            if not path_part:
-                continue
+        for path_part in _plan_task_file_paths(files_field):
             path = Path(path_part)
             if path.is_absolute():
                 issues.append(
@@ -374,7 +396,7 @@ def _check_spec_refs_valid(run_dir: Path, content: str) -> list[str]:
     spec_path = run_dir / STAGE_ARTIFACT_MAP[Stage.SPEC]
     spec_content = spec_path.read_text(encoding="utf-8") if spec_path.exists() else ""
     defined_specs: set[str] = set()
-    for line in spec_content.splitlines():
+    for line, _, _ in _unfenced_markdown_lines(spec_content):
         if line.lstrip().startswith("#"):
             defined_specs.update(re.findall(r"\bSPEC-[A-Z]+-\d+\b", line))
     issues: list[str] = []
@@ -458,7 +480,7 @@ def _section_body(content: str, heading: str) -> str:
     """Return the text of the section under `heading`, stopping at the next same-or-higher heading."""
     level = len(heading) - len(heading.lstrip("#"))
     out, capture = [], False
-    for line in content.splitlines():
+    for line, _, _ in _unfenced_markdown_lines(content):
         if line.strip() == heading:
             capture = True
             continue
@@ -469,7 +491,7 @@ def _section_body(content: str, heading: str) -> str:
                 line_level = len(stripped) - len(stripped.lstrip("#"))
                 if line_level <= level:
                     break
-            out.append(line)
+            out.append(line.rstrip("\r\n"))
     return "\n".join(out)
 
 
@@ -553,18 +575,29 @@ def _check_stage_schema(stage: Stage, tier: TierEstimate, content: str) -> list[
     native ID heading, and no unresolved placeholders remain."""
     from tools.workflow_cli.stage_schema import required_headings
     issues: list[str] = []
+    headings = required_headings(stage, tier.base)
+    native = _STAGE_NATIVE_HEADING_PATTERNS.get(stage)
+    unfenced_content = _unfenced_markdown_text(content)
+    present_headings = {
+        line.strip()
+        for line, _, _ in _unfenced_markdown_lines(content)
+        if line.lstrip().startswith("#")
+    }
+
+    if not headings and native is None:
+        return issues
 
     # R2.1: required headings must be present
-    for heading in required_headings(stage, tier.base):
-        if heading not in content:
+    for heading in headings:
+        if heading not in present_headings:
             issues.append(
                 f"Missing required section {heading!r} for stage {stage.value!r} "
                 f"at tier '{tier.base.value}'."
             )
 
     # R2.3a: each required heading's section must have a non-placeholder body
-    for heading in required_headings(stage, tier.base):
-        if heading not in content:
+    for heading in headings:
+        if heading not in present_headings:
             continue  # already reported by the required-heading presence check
         body = _section_body(content, heading)
         if not _has_meaningful_body(body):
@@ -573,7 +606,7 @@ def _check_stage_schema(stage: Stage, tier: TierEstimate, content: str) -> list[
             )
 
     # R2.3b: any trace-ID-looking token must be well-formed
-    for token in _TRACE_ID_CANDIDATE_RE.findall(content):
+    for token in _TRACE_ID_CANDIDATE_RE.findall(unfenced_content):
         if not _VALID_TRACE_ID_RE.fullmatch(token):
             issues.append(
                 f"Malformed trace ID {token!r}; use REQ-AREA-001, SPEC-AREA-001, "
@@ -581,8 +614,7 @@ def _check_stage_schema(stage: Stage, tier: TierEstimate, content: str) -> list[
             )
 
     # R2.3c: RISK_DISCOVERY / DESIGN / SPEC must define at least one native trace ID in a heading
-    native = _STAGE_NATIVE_HEADING_PATTERNS.get(stage)
-    if native is not None and not native.search(content):
+    if native is not None and not native.search(unfenced_content):
         issues.append(
             f"Stage {stage.value!r} must define at least one native trace ID in a heading "
             f"matching {native.pattern!r}."
@@ -590,7 +622,7 @@ def _check_stage_schema(stage: Stage, tier: TierEstimate, content: str) -> list[
 
     # R2.2: placeholder scan
     for pat in _PLACEHOLDER_PATTERNS:
-        if pat.search(content):
+        if pat.search(unfenced_content):
             issues.append(
                 "Artifact contains an unresolved placeholder "
                 f"(pattern {pat.pattern!r}); fill it before passing the gate."
