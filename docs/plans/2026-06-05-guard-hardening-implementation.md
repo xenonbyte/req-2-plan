@@ -49,7 +49,7 @@
 | 文件 | 批次 | 变更 |
 |---|---|---|
 | `tools/workflow_cli/trace.py` | 1 | `_strip_nested_non_goals()` 新增；`scope_out_violations()` 增查 consumed SPEC block |
-| `tools/workflow_cli/gates.py` | 1 | `_CHANGE_TYPE_*` 枚举 + `_normalized_change_type()`；`_context_pack_repo_root()` 抽取；`_check_plan_context_pack()` 新增并接线 |
+| `tools/workflow_cli/gates.py` | 1 | `_CHANGE_TYPE_*` 枚举 + `_normalized_change_type()`；`Files: n/a` sentinel；context-pack/remediation helpers；`_check_plan_context_pack()` 新增并接线 |
 | `tools/workflow_cli/gates.py` | 2 | `_check_decision_requests()` 新增并接线（Check 10）；imports 加 `heading_level` |
 | `tools/workflow_cli/stage_schema.py` | 2 | DESIGN STANDARD 加 `## Decision Requests` |
 | `tools/workflow_cli/stage_templates.py` | 2 | `## Decision Requests` 预置体（单行注释 + fenced 示例） |
@@ -429,6 +429,24 @@ class TestPlanContextPackGate(unittest.TestCase):
             r = self.check(run_dir, self.Stage.PLAN, self.standard, [], self._VALID_PLAN)
         self._assert_pack_issue(r)
 
+    def test_standard_plan_with_pack_array_shape_fails(self):
+        import json, tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = self._run_dir_with_spec(tmp)
+            (run_dir / "02-project-context.json").write_text(
+                json.dumps([{"repo_root": str(run_dir)}]), encoding="utf-8")
+            r = self.check(run_dir, self.Stage.PLAN, self.standard, [], self._VALID_PLAN)
+        self._assert_pack_issue(r)
+
+    def test_standard_plan_with_pack_scalar_shape_fails(self):
+        import json, tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = self._run_dir_with_spec(tmp)
+            (run_dir / "02-project-context.json").write_text(
+                json.dumps("not an object"), encoding="utf-8")
+            r = self.check(run_dir, self.Stage.PLAN, self.standard, [], self._VALID_PLAN)
+        self._assert_pack_issue(r)
+
     def test_standard_plan_with_nonexistent_repo_root_fails(self):
         import json, tempfile
         from pathlib import Path
@@ -458,19 +476,58 @@ class TestPlanContextPackGate(unittest.TestCase):
             content = "## Tasks\n- [ ] do the small thing\n"
             r = self.check(Path(tmp), self.Stage.PLAN, self.light, [], content)
         self.assertTrue(r.passed, f"unexpected issues: {r.issues}")
+
+    def test_standard_plan_under_nondefault_base_includes_base_path_remediation(self):
+        import tempfile
+        from pathlib import Path
+        from tools.workflow_cli.models import STAGE_ARTIFACT_MAP
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp) / "base"
+            run_dir = base / ".req-to-plan" / "work-123"
+            run_dir.mkdir(parents=True)
+            (run_dir / STAGE_ARTIFACT_MAP[self.Stage.SPEC]).write_text(
+                "## SPEC-AUTH-001 login\n", encoding="utf-8")
+            (run_dir / STAGE_ARTIFACT_MAP[self.Stage.PLAN]).write_text(
+                self._VALID_PLAN, encoding="utf-8")
+            r = self.check(run_dir, self.Stage.PLAN, self.standard, [], self._VALID_PLAN)
+        self._assert_pack_issue(r)
+        self.assertTrue(
+            any("--base-path" in i and str(base) in i for i in r.issues),
+            f"expected non-default base-path remediation in issues, got: {r.issues}")
 ```
 
 - [ ] **Step 2: 跑测试确认红**
 
 Run: `.venv/bin/python -m pytest tests/test_gates.py::TestPlanContextPackGate -v`
-Expected: 4 个 unusable 变体 FAIL（gate 静默通过，无补救消息）；`usable_pack_passes` 与 `light` PASS。
+Expected: context-pack 缺失/不可用/非默认 base-path 变体 FAIL 或 ERROR（无补救消息或 JSON shape 崩溃）；`usable_pack_passes` 也先红（`Files: n/a` 当前被当成缺失路径）；`light` PASS。这是预期红，Task 6 会同时补 pack 可用性、`n/a` sentinel、非默认 base-path 三条路径。
 
 ### Task 6: R11 实现
 
 **Files:**
-- Modify: `tools/workflow_cli/gates.py:368-381`（抽取 helper）+ `check_quality_gate` Check 5 区接线
+- Modify: `tools/workflow_cli/gates.py:345-381`（`Files: n/a` sentinel + context-pack / remediation helpers）+ `check_quality_gate` Check 5 区接线
 
-- [ ] **Step 1: 抽取 `_context_pack_repo_root` 并新增 `_check_plan_context_pack`（放在 `_check_plan_file_refs` 之前）**
+- [ ] **Step 1: 先让 `_plan_task_file_paths` 忽略显式无文件 sentinel**
+
+在 `_plan_task_path_part` 后新增：
+
+```python
+_NO_FILE_SENTINELS = frozenset({"n/a"})
+
+
+def _is_no_file_sentinel(path_part: str) -> bool:
+    return path_part.strip().lower() in _NO_FILE_SENTINELS
+```
+
+然后在 `_plan_task_file_paths` 中两处 append 前都加 sentinel 过滤：
+
+```python
+        if path_part and not _is_no_file_sentinel(path_part):
+            paths.append(path_part)
+```
+
+`Files: n/a` 仍然不能绕过 R11 context-pack 必须存在的检查；它只表示该 PLAN-TASK 没有可校验文件路径。其他 inline `Files:` 值照常解析和校验。
+
+- [ ] **Step 2: 抽取 `_context_pack_repo_root`、新增 `_context_pack_remediation_command` 与 `_check_plan_context_pack`（放在 `_check_plan_file_refs` 之前）**
 
 ```python
 def _context_pack_repo_root(run_dir: Path) -> Path | None:
@@ -481,15 +538,30 @@ def _context_pack_repo_root(run_dir: Path) -> Path | None:
     if not pack_json.exists():
         return None
     try:
-        raw = json.loads(pack_json.read_text(encoding="utf-8")).get("repo_root", "")
+        decoded = json.loads(pack_json.read_text(encoding="utf-8"))
     except (ValueError, OSError):
         return None
-    if not raw:
+    if not isinstance(decoded, dict):
+        return None
+    raw = decoded.get("repo_root", "")
+    if not isinstance(raw, str) or not raw.strip():
         return None
     repo_root = Path(raw)
     if not repo_root.exists():
         return None
     return repo_root.resolve()
+
+
+def _context_pack_remediation_command(run_dir: Path) -> str:
+    command = f"python3 -m tools.workflow_cli context-build --work-id {run_dir.name}"
+    if run_dir.parent.name == ".req-to-plan":
+        base_dir = run_dir.parent.parent
+        try:
+            if base_dir.resolve() != Path.cwd().resolve():
+                command += f" --base-path {base_dir}"
+        except OSError:
+            command += " --base-path <base-dir>"
+    return command + " --repo-path <repo-dir>"
 
 
 def _check_plan_context_pack(run_dir: Path) -> list[str]:
@@ -504,13 +576,11 @@ def _check_plan_context_pack(run_dir: Path) -> list[str]:
         "Standard-tier PLAN requires a usable Project Context Pack: "
         "02-project-context.json is missing, unreadable, invalid, or its "
         "repo_root is unavailable. Build it with: "
-        f"python3 -m tools.workflow_cli context-build --work-id {run_dir.name} "
-        "--repo-path <repo-dir> (add --base-path <base-dir> when the run uses "
-        "a non-default base path)."
+        f"{_context_pack_remediation_command(run_dir)}."
     ]
 ```
 
-- [ ] **Step 2: `_check_plan_file_refs` 头部改用 helper**
+- [ ] **Step 3: `_check_plan_file_refs` 头部改用 helper**
 
 把 gates.py:368-381 的开头（从 `import json` 到 `repo_root = repo_root.resolve()`）替换为：
 
@@ -526,7 +596,7 @@ def _check_plan_file_refs(run_dir: Path, content: str) -> list[str]:
 
 （函数其余部分不动。）
 
-- [ ] **Step 3: 接线到 quality gate 的 standard-PLAN 分支（gates.py:719）**
+- [ ] **Step 4: 接线到 quality gate 的 standard-PLAN 分支（gates.py:719）**
 
 ```python
         if stage == Stage.PLAN and tier.base == TierBase.STANDARD:
@@ -535,10 +605,10 @@ def _check_plan_file_refs(run_dir: Path, content: str) -> list[str]:
             if not _plan_task_starts(gate_content):
 ```
 
-- [ ] **Step 4: 跑 R11 测试确认绿**
+- [ ] **Step 5: 跑 R11 测试确认绿**
 
 Run: `.venv/bin/python -m pytest tests/test_gates.py::TestPlanContextPackGate -v`
-Expected: 7 个全 PASS。
+Expected: 9 个全 PASS。
 
 ### Task 7: R11 涟漪清扫 + 第一批收口
 
@@ -551,6 +621,7 @@ R11 会打红所有"standard tier 走到 PLAN gate 且无 pack 仍断言通过"�
 | e2e 流水线（`test_integration.py` `_setup_run_through_design` 驱动的用例）PLAN gate 退出码非 0 | `run-start` 调用加 repo-path（Step 2） |
 | `test_gates.py` 直接调 `check_quality_gate(..., Stage.PLAN, STANDARD)` 且断言 `passed`/无某 issue | fixture 开头写入可用 pack（Step 3 的两行） |
 | 上述 fixture 的 `Files:` 列了 bullet 真实路径且 `Change Type: modify` | 在 pack 的 `repo_root` 下创建该文件，或将任务改 `Change Type: create` |
+| 上述 fixture 的 inline `Files: <path>` 且 `Change Type: modify` | inline 值也会被解析；在 `repo_root` 下创建该文件，或将任务改 `Change Type: create` |
 | `test_agent_shortcuts.py`/`test_cli.py` standard run 走到 PLAN gate | 同上两类，按调用形态选 |
 | 断言 fail 的测试多出一条 R11 issue | 不用动（断言是子串匹配，多余 issue 无害） |
 
@@ -574,7 +645,7 @@ Expected: 数个 FAIL，全部命中上表形态。任何不符合上表的失�
                    "--repo-path", str(tmp)], base_path=tmp)
 ```
 
-（`run-start --repo-path` 会生成真实 pack，`repo_root=tmp` 存在 → 可用。PLAN fixture 的 `Files: src/middleware.py` 是 inline 非 bullet，file-ref 不解析它，无需建文件。）
+（`run-start --repo-path` 会生成真实 pack，`repo_root=tmp` 存在 → 可用。PLAN fixture 的 inline `Files: src/middleware.py` 也会被 file-ref 解析；若该文件尚不存在，在 fixture setup 中创建 `tmp/src/middleware.py`，或把对应任务改为 `Change Type: create`。）
 
 - [ ] **Step 3: 修直接 gate 调用——对每个失败的 pass-断言 fixture，在写 PLAN artifact 之前加**
 
@@ -584,7 +655,7 @@ Expected: 数个 FAIL，全部命中上表形态。任何不符合上表的失�
                 json.dumps({"repo_root": str(run_dir)}), encoding="utf-8")
 ```
 
-（`repo_root=run_dir` 永远存在 → pack 可用；`Files: n/a` 类 inline 值不会被 file-ref 解析。若该 fixture 用 `Path(tmp)` 直接当 run_dir，替换变量名一致即可。）
+（`repo_root=run_dir` 永远存在 → pack 可用；`Files: n/a` 是 Task 6 显式忽略的无文件 sentinel，其他 inline `Files:` 值都会被 file-ref 解析。若该 fixture 用 `Path(tmp)` 直接当 run_dir，替换变量名一致即可。）
 
 - [ ] **Step 4: 复跑全量到绿**
 
@@ -739,6 +810,13 @@ class TestDecisionRequestsGate(unittest.TestCase):
         issues = self._issues(self._design(section))
         self.assertTrue(any("DECISION-001" in i and "Rationale" in i for i in issues))
 
+    def test_selected_missing_selected_fails(self):
+        section = ("### DECISION-001 limiter backend\n"
+                   "Question: q\nOptions: A / B\nRecommended: A\n"
+                   "Status: selected\nRationale: needs human confirmation\n")
+        issues = self._issues(self._design(section))
+        self.assertTrue(any("DECISION-001" in i and "Selected" in i for i in issues))
+
     def test_status_outside_enum_fails(self):
         section = ("### DECISION-001 limiter backend\n"
                    "Question: q\nOptions: A / B\nRecommended: A\nStatus: chosen\n")
@@ -757,6 +835,14 @@ class TestDecisionRequestsGate(unittest.TestCase):
         issues = self._issues(self._design(section))
         self.assertTrue(any("mixes" in i for i in issues))
 
+    def test_stray_prose_mixed_with_blocks_fails(self):
+        section = ("Please decide deployment backend.\n\n"
+                   "### DECISION-001 limiter backend\n"
+                   "Question: q\nOptions: A / B\nRecommended: A\n"
+                   "Status: selected\nSelected: A\nRationale: already approved\n")
+        issues = self._issues(self._design(section))
+        self.assertTrue(any("outside DECISION blocks" in i for i in issues))
+
     def test_empty_section_fails(self):
         issues = self._issues(self._design("<!-- a comment only -->\n"))
         self.assertTrue(any("Decision Requests" in i and "empty" in i for i in issues))
@@ -772,7 +858,7 @@ class TestDecisionRequestsGate(unittest.TestCase):
 - [ ] **Step 2: 确认红**
 
 Run: `.venv/bin/python -m pytest tests/test_gates.py::TestDecisionRequestsGate -v`
-Expected: `none_is_valid`、`selected_with_fields`、`light_design` 3 个 PASS（gate 还不存在 → 无 R12 issue），其余 6 个 FAIL。
+Expected: `none_is_valid`、`selected_with_fields`、`light_design` 3 个 PASS（gate 还不存在 → 无 R12 issue），其余 8 个 FAIL。
 
 ### Task 11: R12 decision gate 实现
 
@@ -845,10 +931,16 @@ def _check_decision_requests(stage: Stage, tier: TierEstimate, content: str) -> 
                 "content) or `### DECISION-NNN` blocks (R12)."
             )
         return issues
-    if "none" in stray:
-        issues.append(
-            "## Decision Requests mixes `none` with DECISION blocks; keep one (R12)."
-        )
+    if stray:
+        if "none" in stray:
+            issues.append(
+                "## Decision Requests mixes `none` with DECISION blocks; keep one (R12)."
+            )
+        else:
+            issues.append(
+                "## Decision Requests contains non-comment prose outside DECISION blocks; "
+                "use exactly `none` or `### DECISION-NNN` blocks (R12)."
+            )
     for decision_id, body in blocks:
         status = _decision_field_value(body, "Status")
         if status is None:
@@ -886,7 +978,7 @@ def _check_decision_requests(stage: Stage, tier: TierEstimate, content: str) -> 
 - [ ] **Step 4: 确认绿**
 
 Run: `.venv/bin/python -m pytest tests/test_gates.py::TestDecisionRequestsGate -v`
-Expected: 10 个全 PASS。
+Expected: 11 个全 PASS。
 
 ### Task 12: R12 涟漪清扫 + 第二批收口
 

@@ -111,7 +111,7 @@ R12 有一个不同性质的脆弱点：**仅加 gate 是死代码**——会擅
 - 优化（三处缺一不可，见最脆弱前提）：
   1. standard DESIGN 模板预置 `## Decision Requests` 章节，预置说明允许填 `none`，否则按约定列出 `DECISION-NNN` heading 条目。条目语法固定为 `### DECISION-NNN <title>`，block 截止到下一个同级或更高级 heading；block 内字段契约为 `Question:` / `Options:` / `Recommended:` / `Status:`，且 `Status: selected` 时另须 `Selected:` 与 `Rationale:`（仅此状态必填）。`none` 必须是章节内唯一非空、非注释正文；
   2. `stage_schema.py` 将该章节登记为 standard DESIGN required heading；
-  3. quality gate 只扫描 `## Decision Requests` 章节内的 `### DECISION-NNN` blocks，存在 `Status: pending` 时 fail，消息列出未决 `DECISION-*` ID；`Status: selected` 但缺 `Selected:` 或 `Rationale:` 同样 fail；DECISION-* block 缺 `Status:` 视同枚举外 fail-loud；章节为空、`none` 与 DECISION 条目混用、或既无 `none` 也无条目同样 fail。gate 兜底范围**仅限 Status 生命周期**（枚举值、Status 行存在性、章节非空 + selected 时 `Selected:`/`Rationale:` 的存在性）；Question/Options/Recommended 为模板引导字段，语义完整性由 checkpoint 把关，CLI 不验（Agent/CLI 分界原则）。
+  3. quality gate 只扫描 `## Decision Requests` 章节内的 `### DECISION-NNN` blocks，存在 `Status: pending` 时 fail，消息列出未决 `DECISION-*` ID；`Status: selected` 但缺 `Selected:` 或 `Rationale:` 同样 fail；DECISION-* block 缺 `Status:` 视同枚举外 fail-loud；章节为空、`none` 与 DECISION 条目混用、或既无 `none` 也无条目同样 fail；DECISION blocks 之外出现非 `none`、非注释的杂散正文同样 fail（章节内容只允许 `none` 或 block 两种形态）。gate 兜底范围**仅限 Status 生命周期**（枚举值、Status 行存在性、章节非空 + selected 时 `Selected:`/`Rationale:` 的存在性）；Question/Options/Recommended 为模板引导字段，语义完整性由 checkpoint 把关，CLI 不验（Agent/CLI 分界原则）。
 - 边界：**无新 CLI 命令、无新状态机、无新 RunStatus**。决策放行复用既有 repair flow（agent 改 `Status: selected` + `Selected:`/`Rationale:` → `stage-update → stage-ready → gate-quality`）。`Status` 词汇只认 `pending|selected`，枚举外 fail-loud（与 R10 同原则）。
 - 旧 run：升级前已 seeded 的在途 standard DESIGN 会因新增 required heading 在 schema gate 以 missing-heading 消息失败，经既有 repair flow 补 `## Decision Requests` 章节即可；不做迁移（与 R11 同理由：run 生命周期短）。
 - 收益（G9）：选型从"checkpoint 事后发现"变为"gate 前置拦截"；agent 必须显式表态（none 或列决策）。
@@ -140,7 +140,7 @@ R12 有一个不同性质的脆弱点：**仅加 gate 是死代码**——会擅
 - R9：「SPEC 承载 SCOPE-OUT + PLAN 消费」fail；「SCOPE-OUT 位于被消费 SPEC block **内部的 Non-goals 子标题**下 + PLAN 消费」pass（fixture 必须用 block 内子标题，确保排除路径被真实执行，而非借文档级 `## Non-goals` 空洞通过）；「Non-goals 子章节之后的 sibling section 含 `SCOPE-OUT-*` + PLAN 消费」fail；「PLAN-TASK 直接引用」维持 fail（既有行为回归）。
 - R10：`new` 等价 `create`（有 pack、新文件路径不报 missing）；枚举外值（如 `Change Type: refactor`）fail。
 - R11：standard + 无 pack + PLAN gate → fail 且消息含 `python3 -m tools.workflow_cli context-build`；standard + pack JSON 解析失败 / 缺 `repo_root` / `repo_root` 不存在 → fail 且不静默跳过；light + 无 pack → pass；standard + 有可用 pack → 走既有 file-ref 校验。
-- R12：standard DESIGN 含 `Status: pending` → fail 并列出 ID；全部 `selected`（含 `Selected:` 与 `Rationale:`）或章节内仅显式 `none` → pass；`Status: selected` 但缺 `Selected:` 或 `Rationale:` → fail；`Status` 枚举外值 → fail；`### DECISION-NNN` block 缺 `Status:` → fail；`none` 与 DECISION 条目混用 → fail；章节为空（无 `none` 无条目）→ fail。
+- R12：standard DESIGN 含 `Status: pending` → fail 并列出 ID；全部 `selected`（含 `Selected:` 与 `Rationale:`）或章节内仅显式 `none` → pass；`Status: selected` 但缺 `Selected:` 或 `Rationale:` → fail；`Status` 枚举外值 → fail；`### DECISION-NNN` block 缺 `Status:` → fail；`none` 与 DECISION 条目混用 → fail；blocks 之外的杂散非注释正文 → fail；章节为空（无 `none` 无条目）→ fail。
 - R13：无可执行断言，人工核对清单五项；如 SKILL 模板有渲染测试则同步更新。
 
 完成口径：全量测试绿（`.venv/bin/python -m pytest tests/ -v`）+ 新增 fixture 全绿 + CI（3.11/3.12 matrix）在 PR 跑通。不钉死精确测试数（R6 原则）。
