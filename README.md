@@ -67,11 +67,20 @@ existed beforehand.
 
 ### Quick start
 
+Install the platform skills, then check what landed (terminal, lifecycle CLI):
+
 ```bash
-r2p install                                   # install all platforms (default)
-r2p-start "Add rate limiting" --repo-path .   # start a run grounded in this repo's facts
-r2p-continue                                  # advance it stage by stage
-r2p status                                    # see what is installed
+r2p install   # install all platforms (default)
+r2p status    # see what is installed
+```
+
+Then drive the workflow from your agent — the installed skills call the `r2p-*`
+wrappers (to run them in a terminal instead, add `~/.req-to-plan/bin` to `PATH`,
+see the tip below):
+
+```text
+/r2p-start "Add rate limiting" --repo-path .   # start a run grounded in this repo's facts
+/r2p-continue                                  # advance it stage by stage
 ```
 
 Pass `--repo-path .` whenever the requirement targets the current project (use the

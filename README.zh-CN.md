@@ -61,11 +61,19 @@ r2p help
 
 ### Quick start
 
+先在终端用生命周期 CLI 安装平台技能并确认安装结果：
+
 ```bash
-r2p install                                   # 安装全部平台（默认）
-r2p-start "Add rate limiting" --repo-path .   # 启动一次以当前仓库事实为锚点的工作流
-r2p-continue                                  # 逐阶段推进
-r2p status                                    # 查看已安装情况
+r2p install   # 安装全部平台（默认）
+r2p status    # 查看已安装情况
+```
+
+然后在 agent 里驱动工作流——已安装的平台技能会调用 `r2p-*` 包装器
+（如需在终端手动执行，先把 `~/.req-to-plan/bin` 加入 `PATH`，见下方 tip）：
+
+```text
+/r2p-start "Add rate limiting" --repo-path .   # 启动一次以当前仓库事实为锚点的工作流
+/r2p-continue                                  # 逐阶段推进
 ```
 
 需求针对当前项目时必传 `--repo-path .`（跨仓库需求传目标仓库路径）；它生成的
