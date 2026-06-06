@@ -1657,6 +1657,101 @@ class TestTierEscalationInvalidatesPlanGate:
             assert record.tier_locked.base.value == "light"
 
 
+class TestTierEscalationInvalidatesEarlierStageGates:
+    """R15a: the light->standard revert must cover DESIGN/SPEC, not only PLAN."""
+
+    _DESIGN_BODY = (
+        "---\nr2p_version: 1\n---\n# DESIGN\n\n"
+        "## Design Summary\nsummary text\n\n"
+        "## Chosen Design\n### DES-ARCH-001 chosen approach\ndetails\n\n"
+        "## SPEC Handoff\nhandoff notes\n"
+    )
+    _SPEC_BODY = (
+        "---\nr2p_version: 1\n---\n# SPEC\n\n"
+        "## Behavior Contracts\n### SPEC-AUTH-001 login behavior\ncontract text\n\n"
+        "## External Documentation Checked\nN/A — no external dependencies\n\n"
+        "## PLAN Handoff\nhandoff notes\n"
+    )
+    _PLAN_BODY = (
+        "---\nr2p_version: 1\n---\n# PLAN\n\n"
+        "## Tasks\n\nProse-only plan.\n"
+    )
+
+    def _ready_stage_under_light_tier(self, tmp, work_id, stage, artifact, body):
+        from tools.workflow_cli.models import ActiveArtifact
+
+        invoke(["run-start", "--work-id", work_id, "--requirement", "foo"], base_path=tmp)
+        invoke(["tier-lock", "--work-id", work_id, "--base", "light", "--confirm"], base_path=tmp)
+        record = load_record(tmp, work_id)
+        record.current_stage = stage
+        record.status = RunStatus.ACTIVE_STAGE_DRAFT
+        record.active_artifacts = [
+            ActiveArtifact(stage=stage, artifact=artifact, version=1, status="ready")
+        ]
+        save_record(tmp, record)
+        run_dir = Path(tmp) / ".req-to-plan" / work_id
+        (run_dir / artifact).write_text(body, encoding="utf-8")
+        invoke(["gate-quality", "--work-id", work_id, "--stage", stage.value], base_path=tmp)
+        record = load_record(tmp, work_id)
+        assert record.status == RunStatus.READY_FOR_CHECKPOINT_REVIEW, (
+            f"fixture must pass the light {stage.value} quality gate first"
+        )
+
+    def test_scope_expanding_escalation_invalidates_ready_design_gate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work_id = "WF-20260606-dgready"
+            self._ready_stage_under_light_tier(
+                tmp, work_id, Stage.DESIGN, "05-design.md", self._DESIGN_BODY)
+
+            invoke(["tier-escalate", "--work-id", work_id, "--modifier", "scope_expanding"], base_path=tmp)
+
+            record = load_record(tmp, work_id)
+            assert record.status == RunStatus.ACTIVE_STAGE_DRAFT
+            assert record.tier_locked.base.value == "standard"
+            assert record.resume_context.active_item == "design"
+            invoke(["gate-quality", "--work-id", work_id, "--stage", "design"], base_path=tmp, expect_exit=3)
+
+    def test_scope_expanding_escalation_invalidates_open_design_review(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work_id = "WF-20260606-dgreview"
+            self._ready_stage_under_light_tier(
+                tmp, work_id, Stage.DESIGN, "05-design.md", self._DESIGN_BODY)
+            invoke(["review-checkpoint", "--work-id", work_id, "--stage", "design"], base_path=tmp)
+
+            invoke(["tier-escalate", "--work-id", work_id, "--modifier", "scope_expanding"], base_path=tmp)
+
+            record = load_record(tmp, work_id)
+            assert record.status == RunStatus.ACTIVE_STAGE_DRAFT
+            invoke(["gate-quality", "--work-id", work_id, "--stage", "design"], base_path=tmp, expect_exit=3)
+
+    def test_scope_expanding_escalation_invalidates_ready_spec_gate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work_id = "WF-20260606-sgready"
+            self._ready_stage_under_light_tier(
+                tmp, work_id, Stage.SPEC, "06-spec.md", self._SPEC_BODY)
+
+            invoke(["tier-escalate", "--work-id", work_id, "--modifier", "scope_expanding"], base_path=tmp)
+
+            record = load_record(tmp, work_id)
+            assert record.status == RunStatus.ACTIVE_STAGE_DRAFT
+            assert record.tier_locked.base.value == "standard"
+            assert record.resume_context.active_item == "spec"
+            invoke(["gate-quality", "--work-id", work_id, "--stage", "spec"], base_path=tmp, expect_exit=3)
+
+    def test_non_base_changing_escalation_keeps_ready_design_gate(self):
+        """Modifier-only escalation (base does not flip to standard) must NOT revert."""
+        with tempfile.TemporaryDirectory() as tmp:
+            work_id = "WF-20260606-dgdep"
+            self._ready_stage_under_light_tier(
+                tmp, work_id, Stage.DESIGN, "05-design.md", self._DESIGN_BODY)
+
+            invoke(["tier-escalate", "--work-id", work_id, "--modifier", "dependency"], base_path=tmp)
+
+            record = load_record(tmp, work_id)
+            assert record.status == RunStatus.READY_FOR_CHECKPOINT_REVIEW
+            assert record.tier_locked.base.value == "light"
+
+
 # ---------------------------------------------------------------------------
 # review-checkpoint
 # ---------------------------------------------------------------------------

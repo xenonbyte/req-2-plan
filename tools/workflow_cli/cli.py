@@ -790,23 +790,22 @@ def _cmd_tier_escalate(args):
     previous_tier = record.tier_locked
     record.tier_locked = record.tier_locked.escalate(modifier)
 
-    plan_gate_passed_statuses = {
+    gate_passed_statuses = {
         RunStatus.READY_FOR_CHECKPOINT_REVIEW,
         RunStatus.CHECKPOINT_REVIEW,
     }
-    standard_plan_gate_became_applicable = (
-        record.current_stage == Stage.PLAN
-        and previous_tier.base != TierBase.STANDARD
+    standard_gate_became_applicable = (
+        previous_tier.base != TierBase.STANDARD
         and record.tier_locked.base == TierBase.STANDARD
-        and record.status in plan_gate_passed_statuses
+        and record.status in gate_passed_statuses
     )
-    if standard_plan_gate_became_applicable:
+    if standard_gate_became_applicable:
         record = update_run_status(record, RunStatus.ACTIVE_STAGE_DRAFT)
         update_resume_context(
             record,
             last_operation=f"tier_escalated_{modifier.value}",
             next_operation="gate_quality",
-            active_item=Stage.PLAN.value,
+            active_item=record.current_stage.value,
         )
 
     # Revoke affected bundle authorizations that cover high-tier stages
