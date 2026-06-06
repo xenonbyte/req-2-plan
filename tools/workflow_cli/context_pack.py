@@ -22,7 +22,7 @@ class ProjectContextPack:
     package_managers: list = field(default_factory=list)
     test_commands: list = field(default_factory=list)
     entrypoints: list = field(default_factory=list)
-    dependencies: list = field(default_factory=list)  # [{name, version, ecosystem}]
+    dependencies: list = field(default_factory=list)  # [{name, version, ecosystem, dev?}]
     config_files: list = field(default_factory=list)
     source_dirs: list = field(default_factory=list)
 
@@ -35,13 +35,21 @@ def build_context_pack(repo_path: Path) -> ProjectContextPack:
     pkg = repo_path / "package.json"
     if pkg.exists():
         try:
-            data = json.loads(pkg.read_text(encoding="utf-8"))
+            raw_data = json.loads(pkg.read_text(encoding="utf-8"))
             pack.package_managers.append("npm")
-            test = (data.get("scripts") or {}).get("test")
-            if test:
-                pack.test_commands.append(test)
-            for name, ver in (data.get("dependencies") or {}).items():
-                pack.dependencies.append({"name": name, "version": ver, "ecosystem": "npm"})
+            data = raw_data if isinstance(raw_data, dict) else {}
+            scripts = data.get("scripts")
+            if isinstance(scripts, dict) and scripts.get("test"):
+                pack.test_commands.append("npm test")
+            dependencies = data.get("dependencies")
+            if isinstance(dependencies, dict):
+                for name, ver in dependencies.items():
+                    pack.dependencies.append({"name": name, "version": ver, "ecosystem": "npm"})
+            dev_dependencies = data.get("devDependencies")
+            if isinstance(dev_dependencies, dict):
+                for name, ver in dev_dependencies.items():
+                    pack.dependencies.append(
+                        {"name": name, "version": ver, "ecosystem": "npm", "dev": True})
         except (ValueError, OSError):
             pass
 
