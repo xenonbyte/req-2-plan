@@ -821,14 +821,24 @@ def _cmd_tier_escalate(args):
                 ba.revoked_at = revoke_ts
 
     mgr.save(record)
+    data = {
+        "work_id": str(record.work_id),
+        "tier_base": record.tier_locked.base.value,
+        "modifiers": sorted(m.value for m in record.tier_locked.modifiers),
+        "added_modifier": modifier.value,
+    }
+    if (
+        previous_tier.base != TierBase.STANDARD
+        and record.tier_locked.base == TierBase.STANDARD
+        and STAGE_ORDER.index(record.current_stage) > STAGE_ORDER.index(Stage.DESIGN)
+    ):
+        data["note"] = (
+            "DESIGN was approved under light tier; if this escalation "
+            "changes design decisions, run gap-open --owner-stage design"
+        )
     print_and_exit(
         format_success(
-            {
-                "work_id": str(record.work_id),
-                "tier_base": record.tier_locked.base.value,
-                "modifiers": sorted(m.value for m in record.tier_locked.modifiers),
-                "added_modifier": modifier.value,
-            },
+            data,
             message=f"Tier escalated with modifier: {modifier.value}",
         ),
         EXIT_OK,

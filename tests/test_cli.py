@@ -1697,6 +1697,42 @@ class TestTierEscalationInvalidatesEarlierStageGates:
             f"fixture must pass the light {stage.value} quality gate first"
         )
 
+    def test_escalation_to_standard_past_design_prints_gap_open_note(self, capsys):
+        with tempfile.TemporaryDirectory() as tmp:
+            work_id = "WF-20260606-note1"
+            self._ready_stage_under_light_tier(
+                tmp, work_id, Stage.SPEC, "06-spec.md", self._SPEC_BODY)
+            capsys.readouterr()
+
+            invoke(["tier-escalate", "--work-id", work_id, "--modifier", "scope_expanding"], base_path=tmp)
+
+            out = capsys.readouterr().out
+            assert "gap-open --owner-stage design" in out
+
+    def test_escalation_to_standard_at_plan_prints_gap_open_note(self, capsys):
+        with tempfile.TemporaryDirectory() as tmp:
+            work_id = "WF-20260606-note3"
+            self._ready_stage_under_light_tier(
+                tmp, work_id, Stage.PLAN, "07-plan.md", self._PLAN_BODY)
+            capsys.readouterr()
+
+            invoke(["tier-escalate", "--work-id", work_id, "--modifier", "scope_expanding"], base_path=tmp)
+
+            out = capsys.readouterr().out
+            assert "gap-open --owner-stage design" in out
+
+    def test_escalation_to_standard_at_design_prints_no_note(self, capsys):
+        with tempfile.TemporaryDirectory() as tmp:
+            work_id = "WF-20260606-note2"
+            self._ready_stage_under_light_tier(
+                tmp, work_id, Stage.DESIGN, "05-design.md", self._DESIGN_BODY)
+            capsys.readouterr()
+
+            invoke(["tier-escalate", "--work-id", work_id, "--modifier", "scope_expanding"], base_path=tmp)
+
+            out = capsys.readouterr().out
+            assert "gap-open --owner-stage design" not in out
+
     def test_scope_expanding_escalation_invalidates_ready_design_gate(self):
         with tempfile.TemporaryDirectory() as tmp:
             work_id = "WF-20260606-dgready"
