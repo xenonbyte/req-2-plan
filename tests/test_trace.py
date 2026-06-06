@@ -164,6 +164,51 @@ class TestTrace(unittest.TestCase):
                 "## Tasks\n### PLAN-TASK-001\nSpec References: SPEC-AUTH-001\n", encoding="utf-8")
             self.assertTrue(any("SCOPE-IN-001" in i for i in check_trace_closure(run_dir)))
 
+    def test_scope_in_only_in_consumed_spec_non_goals_is_a_gap(self):
+        """R14 red-team: a SPEC that says 'SCOPE-IN-001 is NOT implemented here'
+        in its nested Non-goals must not close that scope item."""
+        from tools.workflow_cli.trace import check_trace_closure
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            (run_dir / STAGE_ARTIFACT_MAP[Stage.REQUIREMENT_BRIEF]).write_text(
+                "## In-Scope\n- SCOPE-IN-001 export audit logs\n", encoding="utf-8")
+            (run_dir / STAGE_ARTIFACT_MAP[Stage.SPEC]).write_text(
+                (
+                    "## SPEC-AUDIT-001 audit behavior\n"
+                    "No scope reference in the contract body.\n\n"
+                    "### Non-goals\n"
+                    "- SCOPE-IN-001 is not implemented here\n"
+                ),
+                encoding="utf-8",
+            )
+            (run_dir / STAGE_ARTIFACT_MAP[Stage.PLAN]).write_text(
+                "## Tasks\n### PLAN-TASK-001\nSpec References: SPEC-AUDIT-001\n",
+                encoding="utf-8")
+            self.assertTrue(any("SCOPE-IN-001" in i for i in check_trace_closure(run_dir)))
+
+    def test_scope_in_in_sibling_section_after_non_goals_still_closes(self):
+        """R14 guard: the Non-goals strip must end at the next same-or-higher
+        heading; a sibling subsection carrying the SCOPE-IN still closes it."""
+        from tools.workflow_cli.trace import check_trace_closure
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            (run_dir / STAGE_ARTIFACT_MAP[Stage.REQUIREMENT_BRIEF]).write_text(
+                "## In-Scope\n- SCOPE-IN-001 export audit logs\n", encoding="utf-8")
+            (run_dir / STAGE_ARTIFACT_MAP[Stage.SPEC]).write_text(
+                (
+                    "## SPEC-AUDIT-001 audit behavior\n"
+                    "### Non-goals\n"
+                    "- other exclusions\n\n"
+                    "### Implementation notes\n"
+                    "implements SCOPE-IN-001\n"
+                ),
+                encoding="utf-8",
+            )
+            (run_dir / STAGE_ARTIFACT_MAP[Stage.PLAN]).write_text(
+                "## Tasks\n### PLAN-TASK-001\nSpec References: SPEC-AUDIT-001\n",
+                encoding="utf-8")
+            self.assertFalse(any("SCOPE-IN-001" in i for i in check_trace_closure(run_dir)))
+
     def test_fenced_plan_task_heading_does_not_consume_spec(self):
         from tools.workflow_cli.trace import spec_ids_not_consumed
         with tempfile.TemporaryDirectory() as tmp:

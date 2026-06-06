@@ -146,7 +146,9 @@ def _risk_blocks(content: str) -> dict[str, str]:
 
 
 def scope_in_not_closed(run_dir: Path) -> list[str]:
-    """SCOPE-IN closes only when a PLAN-TASK carries it or consumes a SPEC carrying it."""
+    """SCOPE-IN closes only when a PLAN-TASK carries it or consumes a SPEC
+    carrying it outside the SPEC block's nested Non-goals subsections (R14:
+    'explicitly not implemented here' must not close the scope item)."""
     model = build_trace(run_dir)
     plan_text = _artifact_text(run_dir, Stage.PLAN)
     plan_task_text = "\n".join(unfenced_markdown_text(body) for body in _plan_task_bodies(plan_text))
@@ -156,7 +158,8 @@ def scope_in_not_closed(run_dir: Path) -> list[str]:
     for id_ in sorted(i for i in model.defined if i.startswith("SCOPE-IN-")):
         if id_ in plan_task_text:
             continue
-        if any(id_ in spec_blocks.get(spec_id, "") for spec_id in consumed_specs):
+        if any(id_ in _strip_nested_non_goals(spec_blocks.get(spec_id, ""))
+               for spec_id in consumed_specs):
             continue
         issues.append(id_)
     return issues
