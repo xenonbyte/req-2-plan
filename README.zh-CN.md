@@ -159,6 +159,15 @@ r2p-gap-resolve --work-id <id> --route-id R-1
 > reopen 针对**已关闭**的 run；gap 路由针对**开着**的 run。`r2p-continue` 会用
 > `needs_repair` 和 `needs_gap_resolve` 停点带你走完这两种修复流程。
 
+> [!NOTE]
+> **人工决策点（standard DESIGN）。** 当 standard tier 的 DESIGN 涉及必须由人
+> 决定的选择（引入新依赖、迁移策略、API 兼容性）时，agent 会在 `## Decision
+> Requests` 章节写入 `### DECISION-NNN` block（含 `Question:`/`Options:`/
+> `Recommended:`）并标记 `Status: pending` ——存在 pending 决策时
+> `gate-quality` 会失败，直到人选定方案、block 改为 `Status: selected`
+> 并补上 `Selected:` 与 `Rationale:` 行。
+> 无需人工决策时，该章节须恰好写 `none`。
+
 ## License
 
 [MIT](./LICENSE) © xenonbyte

@@ -33,4 +33,5 @@ Run each via Bash using the scripts in `{{R2P_BIN_DIR}}`:
    - Auto-advances: moves to the next stage after non-PLAN checkpoint approval, then runs that stage's entry gate
    - Auto-closes: closes the run when the PLAN checkpoint is approved and no open routes remain
    - Does NOT auto-mark artifacts ready and does NOT auto-approve checkpoints — those are human steps
+   - Standard-tier DESIGN: record any human technical choice in `## Decision Requests` as a `### DECISION-NNN` block (`Question:`/`Options:`/`Recommended:`/`Status: pending`); pending blocks `gate-quality` until a human selects (`Status: selected` + `Selected:`/`Rationale:`), or write exactly `none` when no decision is needed
 3. When the run closes, hand the approved PLAN at `07-plan.md` directly to your executor — the PLAN is executor-neutral and needs no adaptation step.

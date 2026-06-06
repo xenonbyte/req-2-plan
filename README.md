@@ -174,6 +174,16 @@ r2p-gap-resolve --work-id <id> --route-id R-1
 > walks you through both repair flows with `needs_repair` and `needs_gap_resolve`
 > stops.
 
+> [!NOTE]
+> **Human decision points (standard DESIGN).** When a standard-tier DESIGN
+> involves a choice a human must make (new dependency, migration strategy,
+> API compatibility), the agent records it in the `## Decision Requests`
+> section as a `### DECISION-NNN` block with `Question:`, `Options:`,
+> `Recommended:`, and `Status: pending` — and a pending decision fails
+> `gate-quality` until a human chooses and the block becomes
+> `Status: selected` with `Selected:` and `Rationale:` lines.
+> Write exactly `none` in that section when no human decision is needed.
+
 ## License
 
 [MIT](./LICENSE) © xenonbyte
