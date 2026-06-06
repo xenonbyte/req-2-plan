@@ -185,6 +185,10 @@ class TestTierEscalationInvalidatesEarlierStageGates:
         "## External Documentation Checked\nN/A — no external dependencies\n\n"
         "## PLAN Handoff\nhandoff notes\n"
     )
+    _PLAN_BODY = (
+        "---\nr2p_version: 1\n---\n# PLAN\n\n"
+        "## Tasks\n\nProse-only plan.\n"
+    )
 
     def _ready_stage_under_light_tier(self, tmp, work_id, stage, artifact, body):
         from tools.workflow_cli.models import ActiveArtifact
@@ -358,6 +362,18 @@ Add to `TestTierEscalationInvalidatesEarlierStageGates` (note `capsys.readouterr
             out = capsys.readouterr().out
             assert "gap-open --owner-stage design" in out
 
+    def test_escalation_to_standard_at_plan_prints_gap_open_note(self, capsys):
+        with tempfile.TemporaryDirectory() as tmp:
+            work_id = "WF-20260606-note3"
+            self._ready_stage_under_light_tier(
+                tmp, work_id, Stage.PLAN, "07-plan.md", self._PLAN_BODY)
+            capsys.readouterr()
+
+            invoke(["tier-escalate", "--work-id", work_id, "--modifier", "scope_expanding"], base_path=tmp)
+
+            out = capsys.readouterr().out
+            assert "gap-open --owner-stage design" in out
+
     def test_escalation_to_standard_at_design_prints_no_note(self, capsys):
         with tempfile.TemporaryDirectory() as tmp:
             work_id = "WF-20260606-note2"
@@ -374,7 +390,7 @@ Add to `TestTierEscalationInvalidatesEarlierStageGates` (note `capsys.readouterr
 - [ ] **Step 2: Run to verify the first fails**
 
 Run: `.venv/bin/python -m pytest tests/test_cli.py -k "prints_gap_open_note or prints_no_note" -v`
-Expected: `..._prints_gap_open_note` FAILS (no note in output yet); `..._prints_no_note` PASSES (guard).
+Expected: the SPEC and PLAN `..._prints_gap_open_note` tests FAIL (no note in output yet); `..._prints_no_note` PASSES (guard).
 
 - [ ] **Step 3: Add the conditional note to the success payload**
 
@@ -579,9 +595,10 @@ Insert immediately before the `## License` heading, separated by a blank line on
 > **Human decision points (standard DESIGN).** When a standard-tier DESIGN
 > involves a choice a human must make (new dependency, migration strategy,
 > API compatibility), the agent records it in the `## Decision Requests`
-> section as a `### DECISION-NNN` block with `Status: pending` — and a
-> pending decision fails `gate-quality` until a human chooses and the block
-> becomes `Status: selected` with `Selected:` and `Rationale:` lines.
+> section as a `### DECISION-NNN` block with `Question:`, `Options:`,
+> `Recommended:`, and `Status: pending` — and a pending decision fails
+> `gate-quality` until a human chooses and the block becomes
+> `Status: selected` with `Selected:` and `Rationale:` lines.
 > Write exactly `none` in that section when no human decision is needed.
 ```
 
@@ -593,9 +610,10 @@ Insert immediately before its `## License` heading:
 > [!NOTE]
 > **人工决策点（standard DESIGN）。** 当 standard tier 的 DESIGN 涉及必须由人
 > 决定的选择（引入新依赖、迁移策略、API 兼容性）时，agent 会在 `## Decision
-> Requests` 章节写入 `### DECISION-NNN` block 并标记 `Status: pending` ——
-> 存在 pending 决策时 `gate-quality` 会失败，直到人选定方案、block 改为
-> `Status: selected` 并补上 `Selected:` 与 `Rationale:` 行。
+> Requests` 章节写入 `### DECISION-NNN` block（含 `Question:`/`Options:`/
+> `Recommended:`）并标记 `Status: pending` ——存在 pending 决策时
+> `gate-quality` 会失败，直到人选定方案、block 改为 `Status: selected`
+> 并补上 `Selected:` 与 `Rationale:` 行。
 > 无需人工决策时，该章节须恰好写 `none`。
 ```
 
@@ -662,7 +680,7 @@ Expected: empty output (the requirement/plan docs under `docs/` are gitignored a
 | R15 | modifier-only (base unchanged) → no revert | Task 2 test 4 |
 | R15 | PLAN existing behavior regression | existing `TestTierEscalationInvalidatesPlanGate` (Task 2 Step 4 runs them) |
 | R15 | `CHECKPOINT_APPROVED` escalate still refused | existing `test_cli.py:1618` |
-| R15 | stage ∈ {SPEC, PLAN} + light→standard → note; DESIGN → no note | Task 3 tests 1-2 |
+| R15 | SPEC + light→standard → note; PLAN + light→standard → note; DESIGN → no note | Task 3 tests 1-3 |
 | R17 | `scripts.test` present → `test_commands == ["npm test"]`; existing jest assertion flipped | Task 4 Step 1 |
 | R17 | no `scripts.test` → no npm entry | Task 4 new test 2 |
 | R17 | devDependencies collected with `"dev": true`, existing key shape unchanged | Task 4 new test 1 |
