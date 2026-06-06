@@ -79,14 +79,19 @@ wrappers (to run them in a terminal instead, add `~/.req-to-plan/bin` to `PATH`,
 see the tip below):
 
 ```text
-/r2p-start "Add rate limiting" --repo-path .   # start a run grounded in this repo's facts
-/r2p-continue                                  # advance it stage by stage
+/r2p-start --repo-path . "Add rate limiting"    # requirement as inline text
+/r2p-start --repo-path . --file change-req.md   # requirement as a document
+/r2p-continue                                   # advance it stage by stage
 ```
 
-Pass `--repo-path .` whenever the requirement targets the current project (use the
-target repo's path for cross-repo work); it generates the Project Context Pack that
-grounds tier estimation and PLAN file-reference checks. If a standard-tier PLAN gate
-later reports a missing or unusable Context Pack, build it mid-run with
+A requirement can be inline text or a document passed with `--file <path>`
+(the two are mutually exclusive). **Whenever a code repository is the
+requirement's context, pass `--repo-path`** — `.` for the current project,
+the target repo's path for cross-repo work; it generates the Project Context
+Pack that grounds tier estimation and PLAN file-reference checks. Keep options
+before the requirement text (as above) so a quoting slip in free-form text can
+never swallow an option. If a standard-tier PLAN gate later reports a missing
+or unusable Context Pack, build it mid-run with
 the `PYTHONPATH=... <python> -m tools.workflow_cli context-build ...` command printed
 by the gate (there is no standalone `context-build` executable).
 

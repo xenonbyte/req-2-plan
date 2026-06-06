@@ -72,13 +72,17 @@ r2p status    # 查看已安装情况
 （如需在终端手动执行，先把 `~/.req-to-plan/bin` 加入 `PATH`，见下方 tip）：
 
 ```text
-/r2p-start "Add rate limiting" --repo-path .   # 启动一次以当前仓库事实为锚点的工作流
-/r2p-continue                                  # 逐阶段推进
+/r2p-start --repo-path . "Add rate limiting"    # 需求为内联文本
+/r2p-start --repo-path . --file change-req.md   # 需求为文档文件
+/r2p-continue                                   # 逐阶段推进
 ```
 
-需求针对当前项目时必传 `--repo-path .`（跨仓库需求传目标仓库路径）；它生成的
-Project Context Pack 是 tier 估算与 PLAN 文件引用校验的真值锚点。若 standard tier
-的 PLAN gate 提示 Context Pack 缺失/不可用，直接执行 gate 打印的
+需求可以是内联文本，也可以用 `--file <path>` 传入文档（两者互斥）。
+**只要需求以某个代码仓库为上下文，就必须传 `--repo-path`**——当前项目传 `.`，
+跨仓库需求传目标仓库路径；它生成的 Project Context Pack 是 tier 估算与 PLAN
+文件引用校验的真值锚点。选项写在需求文本之前（如上例），这样即使自由文本
+引号写错也不会吞掉选项。若 standard tier 的 PLAN gate 提示 Context Pack
+缺失/不可用，直接执行 gate 打印的
 `PYTHONPATH=... <python> -m tools.workflow_cli context-build ...` 命令中途补建
 （不存在独立的 `context-build` 可执行文件）。
 
