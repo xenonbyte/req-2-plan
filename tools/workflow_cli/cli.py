@@ -834,7 +834,9 @@ def _cmd_tier_escalate(args):
     ):
         data["note"] = (
             "DESIGN was approved under light tier; if this escalation "
-            "changes design decisions, run gap-open --owner-stage design"
+            "changes design decisions, run r2p-gap-open --work-id "
+            f"{record.work_id} --owner-stage design "
+            '--required-action "<describe the design impact>"'
         )
     print_and_exit(
         format_success(

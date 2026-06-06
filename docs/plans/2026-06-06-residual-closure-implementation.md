@@ -53,7 +53,7 @@ A SCOPE-IN id that appears **only** inside a `Non-goals` subsection of a consume
 - Modify: `tools/workflow_cli/trace.py:148-162`
 - Test: `tests/test_trace.py` (add to `TestTrace` class, after `test_scope_ref_after_consumed_spec_block_does_not_close_scope` at line 148-165)
 
-- [ ] **Step 1: Write the two failing/guard tests**
+- [x] **Step 1: Write the two failing/guard tests**
 
 Add to the `TestTrace` class in `tests/test_trace.py` (unittest style, mirroring `test_scope_in_carried_into_consumed_spec_closes` at line 112):
 
@@ -104,12 +104,12 @@ Add to the `TestTrace` class in `tests/test_trace.py` (unittest style, mirroring
             self.assertFalse(any("SCOPE-IN-001" in i for i in check_trace_closure(run_dir)))
 ```
 
-- [ ] **Step 2: Run new tests, verify red/green split**
+- [x] **Step 2: Run new tests, verify red/green split**
 
 Run: `.venv/bin/python -m pytest tests/test_trace.py -k "non_goals_is_a_gap or sibling_section_after_non_goals" -v`
 Expected: `test_scope_in_only_in_consumed_spec_non_goals_is_a_gap` **FAILS** (assertTrue on empty issues — current code treats the Non-goals mention as closing). `test_scope_in_in_sibling_section_after_non_goals_still_closes` **PASSES** (guard for current behavior that must survive the fix).
 
-- [ ] **Step 3: Apply the one-line fix**
+- [x] **Step 3: Apply the one-line fix**
 
 In `tools/workflow_cli/trace.py`, change `scope_in_not_closed()`:
 
@@ -136,17 +136,17 @@ def scope_in_not_closed(run_dir: Path) -> list[str]:
 
 (The only functional change is wrapping `spec_blocks.get(spec_id, "")` with `_strip_nested_non_goals(...)` plus the docstring. Do NOT modify `_strip_nested_non_goals` itself.)
 
-- [ ] **Step 4: Run the full trace test module**
+- [x] **Step 4: Run the full trace test module**
 
 Run: `.venv/bin/python -m pytest tests/test_trace.py -v`
 Expected: ALL PASS, including the prior R9 fixtures (`test_scope_out_*`) and the existing scope-in regressions (`test_scope_in_carried_into_consumed_spec_closes`, `test_scope_ref_after_consumed_spec_block_does_not_close_scope`).
 
-- [ ] **Step 5: Run the full suite**
+- [x] **Step 5: Run the full suite**
 
 Run: `.venv/bin/python -m pytest tests/ -q`
 Expected: all pass (R14 tightens closure; no shipped fixture relies on Non-goals-only closure — if anything fails here, read the failure: it means an integration fixture closes a SCOPE-IN via Non-goals text and that fixture must be corrected to carry the id in the SPEC body, not the check weakened).
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add tools/workflow_cli/trace.py tests/test_trace.py
@@ -165,7 +165,7 @@ When a light→standard escalation happens while the **current stage's** gate ha
 - Modify: `tools/workflow_cli/cli.py:793-810` (inside `_cmd_tier_escalate`)
 - Test: `tests/test_cli.py` (new class, place directly after `TestTierEscalationInvalidatesPlanGate` which ends at line 1657)
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Add to `tests/test_cli.py` after the `TestTierEscalationInvalidatesPlanGate` class (pytest style; `invoke`/`load_record`/`save_record` are module-level helpers already imported at the top of the file; `Stage`, `RunStatus` are already imported there too — check the file's import block and reuse):
 
@@ -267,12 +267,12 @@ class TestTierEscalationInvalidatesEarlierStageGates:
 
 Fixture-validity note for the executor: the helper self-asserts that the light gate passes (`READY_FOR_CHECKPOINT_REVIEW`). If that inner assert trips, run the gate manually (`gate-quality` without `expect_exit`) and read the printed issues — extend `_DESIGN_BODY`/`_SPEC_BODY` minimally to satisfy the named light-tier rule, never by switching tier or weakening the test.
 
-- [ ] **Step 2: Run new tests to verify they fail for the right reason**
+- [x] **Step 2: Run new tests to verify they fail for the right reason**
 
 Run: `.venv/bin/python -m pytest tests/test_cli.py -k "TestTierEscalationInvalidatesEarlierStageGates" -v`
 Expected: the three `scope_expanding` tests FAIL at `assert record.status == RunStatus.ACTIVE_STAGE_DRAFT` (status stays `READY_FOR_CHECKPOINT_REVIEW`/`CHECKPOINT_REVIEW` because current code only reverts at PLAN). `test_non_base_changing_escalation_keeps_ready_design_gate` PASSES (guard).
 
-- [ ] **Step 3: Generalize the revert in `_cmd_tier_escalate`**
+- [x] **Step 3: Generalize the revert in `_cmd_tier_escalate`**
 
 In `tools/workflow_cli/cli.py`, replace this block (currently lines 793-810):
 
@@ -321,12 +321,12 @@ with:
 
 (Three changes only: drop the `record.current_stage == Stage.PLAN` conjunct, rename the two locals, and use `record.current_stage.value` as `active_item`.)
 
-- [ ] **Step 4: Run the new class and the existing PLAN escalation regressions**
+- [x] **Step 4: Run the new class and the existing PLAN escalation regressions**
 
 Run: `.venv/bin/python -m pytest tests/test_cli.py -k "TierEscalation" -v`
 Expected: ALL PASS — the new class, plus all four existing `TestTierEscalationInvalidatesPlanGate` tests (PLAN revert at ready and at open review; refusal at `CHECKPOINT_APPROVED`; refusal on closed run).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add tools/workflow_cli/cli.py tests/test_cli.py
@@ -345,7 +345,7 @@ When base flips to standard and the run is already **past** DESIGN, print a note
 - Modify: `tools/workflow_cli/cli.py` (the `print_and_exit(format_success(...))` tail of `_cmd_tier_escalate`, currently lines 824-836)
 - Test: `tests/test_cli.py` (same class as Task 2)
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Add to `TestTierEscalationInvalidatesEarlierStageGates` (note `capsys.readouterr()` is called once before the escalate to discard fixture output):
 
@@ -387,12 +387,12 @@ Add to `TestTierEscalationInvalidatesEarlierStageGates` (note `capsys.readouterr
             assert "gap-open --owner-stage design" not in out
 ```
 
-- [ ] **Step 2: Run to verify the first fails**
+- [x] **Step 2: Run to verify the first fails**
 
 Run: `.venv/bin/python -m pytest tests/test_cli.py -k "prints_gap_open_note or prints_no_note" -v`
 Expected: the SPEC and PLAN `..._prints_gap_open_note` tests FAIL (no note in output yet); `..._prints_no_note` PASSES (guard).
 
-- [ ] **Step 3: Add the conditional note to the success payload**
+- [x] **Step 3: Add the conditional note to the success payload**
 
 In `tools/workflow_cli/cli.py` `_cmd_tier_escalate`, replace the final block (after the bundle-revocation code, currently lines 824-836):
 
@@ -442,12 +442,12 @@ with:
 
 (`STAGE_ORDER` and `Stage` are already imported at `cli.py:15-25`. `format_success` renders scalar payload keys as `  key: value` lines in text mode and as JSON keys in `R2P_JSON=1` mode — both carry the note.)
 
-- [ ] **Step 4: Run the escalation tests**
+- [x] **Step 4: Run the escalation tests**
 
 Run: `.venv/bin/python -m pytest tests/test_cli.py -k "TierEscalation" -v`
 Expected: ALL PASS (both note tests, all revert tests, all regressions).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add tools/workflow_cli/cli.py tests/test_cli.py
@@ -466,7 +466,7 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 - Modify: `tools/workflow_cli/context_pack.py:35-46`
 - Test: `tests/test_context_pack.py`
 
-- [ ] **Step 1: Update the fixture and assertions; add the two new tests**
+- [x] **Step 1: Update the fixture and assertions; add the two new tests**
 
 In `tests/test_context_pack.py`, change `_make_repo` (line 9-16) so package.json gains devDependencies:
 
@@ -530,12 +530,12 @@ Add two new tests to `TestBuildContextPack`:
         self.assertIn("npm", pack.package_managers)
 ```
 
-- [ ] **Step 2: Run to verify the red set**
+- [x] **Step 2: Run to verify the red set**
 
 Run: `.venv/bin/python -m pytest tests/test_context_pack.py -v`
 Expected: `test_detects_managers_test_commands_and_deps` FAILS (`"npm test"` not in `test_commands` — code stores `"jest"`); `test_dev_dependencies_are_collected_with_dev_marker` FAILS (no jest entry); `test_no_npm_test_script_yields_no_npm_test_command` PASSES (guard); the writer/repo-root tests PASS.
 
-- [ ] **Step 3: Implement in `context_pack.py`**
+- [x] **Step 3: Implement in `context_pack.py`**
 
 Replace the npm branch in `build_context_pack` (currently lines 35-46):
 
@@ -558,7 +558,7 @@ Replace the npm branch in `build_context_pack` (currently lines 35-46):
 
 (Leave the requirements.txt branch and everything else untouched — pip's `python -m pytest` is already invokable.)
 
-- [ ] **Step 4: Run module then full suite**
+- [x] **Step 4: Run module then full suite**
 
 Run: `.venv/bin/python -m pytest tests/test_context_pack.py -v`
 Expected: ALL PASS.
@@ -566,7 +566,7 @@ Expected: ALL PASS.
 Run: `.venv/bin/python -m pytest tests/ -q`
 Expected: all pass. If any other module fails on `test_commands` content (e.g. an agent-shortcuts or gates fixture asserting the script body), update that assertion to the invokable form `npm test` — the requirement doc (核验细节 3) records this as the intended behavior flip.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add tools/workflow_cli/context_pack.py tests/test_context_pack.py
@@ -586,7 +586,7 @@ Add 3-5 lines to README.md, README.zh-CN.md, and the claude SKILL template. **No
 - Modify: `README.zh-CN.md` (insert before its `## License` heading — locate with `grep -n "^## License" README.zh-CN.md`)
 - Modify: `tools/workflow_cli/agent_templates/claude/SKILL.md` (Usage Pattern, after the bullet list under item 2)
 
-- [ ] **Step 1: Add the EN paragraph to README.md**
+- [x] **Step 1: Add the EN paragraph to README.md**
 
 Insert immediately before the `## License` heading, separated by a blank line on each side:
 
@@ -602,7 +602,7 @@ Insert immediately before the `## License` heading, separated by a blank line on
 > Write exactly `none` in that section when no human decision is needed.
 ```
 
-- [ ] **Step 2: Add the zh paragraph to README.zh-CN.md**
+- [x] **Step 2: Add the zh paragraph to README.zh-CN.md**
 
 Insert immediately before its `## License` heading:
 
@@ -617,7 +617,7 @@ Insert immediately before its `## License` heading:
 > 无需人工决策时，该章节须恰好写 `none`。
 ```
 
-- [ ] **Step 3: Add one bullet to the claude SKILL template**
+- [x] **Step 3: Add one bullet to the claude SKILL template**
 
 In `tools/workflow_cli/agent_templates/claude/SKILL.md`, inside Usage Pattern item 2's bullet list (after the line `   - Does NOT auto-mark artifacts ready and does NOT auto-approve checkpoints — those are human steps`), add:
 
@@ -625,17 +625,17 @@ In `tools/workflow_cli/agent_templates/claude/SKILL.md`, inside Usage Pattern it
    - Standard-tier DESIGN: record any human technical choice in `## Decision Requests` as a `### DECISION-NNN` block (`Question:`/`Options:`/`Recommended:`/`Status: pending`); pending blocks `gate-quality` until a human selects (`Status: selected` + `Selected:`/`Rationale:`), or write exactly `none` when no decision is needed
 ```
 
-- [ ] **Step 4: Run the README and docs-consistency guards**
+- [x] **Step 4: Run the README and docs-consistency guards**
 
 Run: `.venv/bin/python -m pytest tests/test_readme.py tests/test_docs_consistency.py tests/test_install.py -v`
 Expected: ALL PASS (no new headings → heading parity holds; no test counts added; install templates still render).
 
-- [ ] **Step 5: Run the full suite**
+- [x] **Step 5: Run the full suite**
 
 Run: `.venv/bin/python -m pytest tests/ -q`
 Expected: all pass.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add README.md README.zh-CN.md tools/workflow_cli/agent_templates/claude/SKILL.md
@@ -650,20 +650,20 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 
 **Files:** none modified.
 
-- [ ] **Step 1: Full suite, verbose count check**
+- [x] **Step 1: Full suite, verbose count check**
 
 Run: `.venv/bin/python -m pytest tests/ -q`
 Expected: 0 failures; total count strictly greater than the 826 baseline (new tests added; do not pin the exact number anywhere).
 
-- [ ] **Step 2: Verify the four behaviors end-to-end via git log**
+- [x] **Step 2: Verify the four behaviors end-to-end via git log**
 
 Run: `git log --oneline main..HEAD`
-Expected: exactly 5 commits, one per task, in order — R14 fix (Task 1), R15a fix (Task 2), R15b feat (Task 3), R17 fix (Task 4), R16 docs (Task 5).
+Expected: the 5 implementation commits in order — R14 fix (Task 1), R15a fix (Task 2), R15b feat (Task 3), R17 fix (Task 4), R16 docs (Task 5) — plus the plan-document commits (plan add, plan review fixes, and post-review amendments), which sit outside the one-commit-per-task contract.
 
-- [ ] **Step 3: Confirm working tree clean**
+- [x] **Step 3: Confirm working tree clean**
 
 Run: `git status --short`
-Expected: empty output (the requirement/plan docs under `docs/` are gitignored and never staged).
+Expected: empty output. The requirement doc under `docs/requirements/` stays gitignored and unstaged; this plan document itself was force-added to the branch by explicit owner decision (see its commit message) as a deliberate exception to the docs/ local-only convention.
 
 ---
 
@@ -687,3 +687,12 @@ Expected: empty output (the requirement/plan docs under `docs/` are gitignored a
 | R17 | requirements.txt path regression | existing writer/pip assertions (Task 4 Step 4) |
 | R16 | README + README.zh-CN + claude SKILL each gain the note; codex/gemini unchanged | Task 5 |
 | 完成口径 | full suite green, no pinned counts | Tasks 1-6 final steps |
+
+---
+
+## Post-review amendments (2026-06-07, PR review)
+
+Applied after the branch passed `/review-fix-pr base=main` (two accepted low findings):
+
+1. **Advisory note made executable** — the R15b note text quoted in Task 3 Step 3 and its test assertions are superseded: `_cmd_tier_escalate` now emits `run r2p-gap-open --work-id <actual-work-id> --owner-stage design --required-action "<describe the design impact>"` (a copy-pasteable command, consistent with the codebase's executable-remediation convention), and the three note tests assert the `r2p-gap-open --work-id <id> --owner-stage design` form.
+2. **Task 6 expectations refreshed** — commit-count wording now accounts for the plan-document commits; step checkboxes marked complete; the working-tree note records the owner's explicit force-add exception for this file.

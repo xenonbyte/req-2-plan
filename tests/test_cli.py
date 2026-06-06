@@ -1707,7 +1707,8 @@ class TestTierEscalationInvalidatesEarlierStageGates:
             invoke(["tier-escalate", "--work-id", work_id, "--modifier", "scope_expanding"], base_path=tmp)
 
             out = capsys.readouterr().out
-            assert "gap-open --owner-stage design" in out
+            assert f"r2p-gap-open --work-id {work_id} --owner-stage design" in out
+            assert "--required-action" in out
 
     def test_escalation_to_standard_at_plan_prints_gap_open_note(self, capsys):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1719,7 +1720,8 @@ class TestTierEscalationInvalidatesEarlierStageGates:
             invoke(["tier-escalate", "--work-id", work_id, "--modifier", "scope_expanding"], base_path=tmp)
 
             out = capsys.readouterr().out
-            assert "gap-open --owner-stage design" in out
+            assert f"r2p-gap-open --work-id {work_id} --owner-stage design" in out
+            assert "--required-action" in out
 
     def test_escalation_to_standard_at_design_prints_no_note(self, capsys):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1731,7 +1733,7 @@ class TestTierEscalationInvalidatesEarlierStageGates:
             invoke(["tier-escalate", "--work-id", work_id, "--modifier", "scope_expanding"], base_path=tmp)
 
             out = capsys.readouterr().out
-            assert "gap-open --owner-stage design" not in out
+            assert "r2p-gap-open" not in out
 
     def test_scope_expanding_escalation_invalidates_ready_design_gate(self):
         with tempfile.TemporaryDirectory() as tmp:
