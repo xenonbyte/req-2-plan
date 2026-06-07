@@ -1905,7 +1905,7 @@ class TestPlanTaskFields(unittest.TestCase):
         self.assertTrue(any("invalid 'Change Type: refactor'" in i for i in r.issues))
 
     def test_tdd_applicable_outside_enum_fails_loud(self):
-        """R15: values outside yes|no must not silently skip the Skeleton code gate."""
+        """R18: values outside yes|no must not silently skip the Skeleton code gate."""
         import tempfile
         from pathlib import Path
         for value in ("maybe", "unclear"):
@@ -1922,7 +1922,7 @@ class TestPlanTaskFields(unittest.TestCase):
                     f"expected invalid TDD Applicable issue; got {r.issues}")
 
     def test_tdd_applicable_on_continuation_line_is_still_validated(self):
-        """R15: a TDD Applicable value on a continuation line must not bypass the enum."""
+        """R18: a TDD Applicable value on a continuation line must not bypass the enum."""
         import tempfile
         from pathlib import Path
         with tempfile.TemporaryDirectory() as tmp:
@@ -1935,7 +1935,7 @@ class TestPlanTaskFields(unittest.TestCase):
         self.assertTrue(any("invalid 'TDD Applicable: maybe'" in i for i in r.issues))
 
     def test_tdd_applicable_yes_no_are_case_insensitive(self):
-        """R15: Yes/NO pass the enum; capital Yes still requires a fenced Skeleton."""
+        """R18: Yes/NO pass the enum; capital Yes still requires a fenced Skeleton."""
         plan = ("## Tasks\n\n### PLAN-TASK-001 a\n"
                 "Spec References: SPEC-AUTH-001\nChange Type: modify\n"
                 "TDD Applicable: NO\nFiles: tools/a.py\n"
@@ -1952,7 +1952,7 @@ class TestPlanTaskFields(unittest.TestCase):
         self.assertFalse(any("no fenced code block" in i for i in r.issues))
 
     def test_tdd_applicable_yes_on_continuation_line_still_requires_code_fence(self):
-        """R15: 'yes' on a continuation line must not skip the fenced-Skeleton check."""
+        """R18: 'yes' on a continuation line must not skip the fenced-Skeleton check."""
         import tempfile
         from pathlib import Path
         with tempfile.TemporaryDirectory() as tmp:
