@@ -1855,6 +1855,90 @@ class TestPlanTaskFields(unittest.TestCase):
         self.assertFalse(r.passed)
         self.assertTrue(any(str(outside) in i and "outside repo_root" in i for i in r.issues))
 
+    def test_files_create_type_existing_path_fails(self):
+        """R19: 'Change Type: create' must not target a path that already exists."""
+        import json, tempfile
+        from pathlib import Path
+        from tools.workflow_cli.models import STAGE_ARTIFACT_MAP
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "run"
+            run_dir.mkdir()
+            repo = Path(tmp) / "repo"
+            (repo / "src").mkdir(parents=True)
+            (repo / "src" / "existing.py").write_text("x=1\n", encoding="utf-8")
+            (run_dir / "02-project-context.json").write_text(
+                json.dumps({"repo_root": str(repo)}), encoding="utf-8")
+            (run_dir / STAGE_ARTIFACT_MAP[self.Stage.SPEC]).write_text(
+                "## SPEC-AUTH-001 login\n", encoding="utf-8")
+            plan = ("## Tasks\n\n### PLAN-TASK-001 a\n"
+                    "Spec References: SPEC-AUTH-001\nChange Type: create\n"
+                    "TDD Applicable: no\n"
+                    "Files:\n- src/existing.py\n"
+                    "Skeleton: outline\nSteps:\n- [ ] build it\nVerification: pytest\n")
+            (run_dir / STAGE_ARTIFACT_MAP[self.Stage.PLAN]).write_text(plan, encoding="utf-8")
+            r = self.check(run_dir, self.Stage.PLAN, self.tier, [], plan)
+        self.assertFalse(r.passed)
+        self.assertTrue(
+            any("src/existing.py" in i and "already exists" in i and "modify" in i
+                for i in r.issues),
+            r.issues,
+        )
+
+    def test_files_new_alias_existing_path_fails(self):
+        """R19: the 'new' alias gets the same existing-path check as 'create'."""
+        import json, tempfile
+        from pathlib import Path
+        from tools.workflow_cli.models import STAGE_ARTIFACT_MAP
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "run"
+            run_dir.mkdir()
+            repo = Path(tmp) / "repo"
+            repo.mkdir()
+            (repo / "existing.py").write_text("x=1\n", encoding="utf-8")
+            (run_dir / "02-project-context.json").write_text(
+                json.dumps({"repo_root": str(repo)}), encoding="utf-8")
+            (run_dir / STAGE_ARTIFACT_MAP[self.Stage.SPEC]).write_text(
+                "## SPEC-AUTH-001 login\n", encoding="utf-8")
+            plan = ("## Tasks\n\n### PLAN-TASK-001 a\n"
+                    "Spec References: SPEC-AUTH-001\nChange Type: new\n"
+                    "TDD Applicable: no\n"
+                    "Files: existing.py\n"
+                    "Skeleton: outline\nSteps:\n- [ ] build it\nVerification: pytest\n")
+            (run_dir / STAGE_ARTIFACT_MAP[self.Stage.PLAN]).write_text(plan, encoding="utf-8")
+            r = self.check(run_dir, self.Stage.PLAN, self.tier, [], plan)
+        self.assertFalse(r.passed)
+        self.assertTrue(
+            any("existing.py" in i and "already exists" in i for i in r.issues),
+            r.issues,
+        )
+
+    def test_files_create_type_flags_only_existing_paths(self):
+        """R19 is per-path: a create task mixing a new and an existing file flags
+        only the existing one; the missing path stays exempt."""
+        import json, tempfile
+        from pathlib import Path
+        from tools.workflow_cli.models import STAGE_ARTIFACT_MAP
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "run"
+            run_dir.mkdir()
+            repo = Path(tmp) / "repo"
+            (repo / "src").mkdir(parents=True)
+            (repo / "src" / "existing.py").write_text("x=1\n", encoding="utf-8")
+            (run_dir / "02-project-context.json").write_text(
+                json.dumps({"repo_root": str(repo)}), encoding="utf-8")
+            (run_dir / STAGE_ARTIFACT_MAP[self.Stage.SPEC]).write_text(
+                "## SPEC-AUTH-001 login\n", encoding="utf-8")
+            plan = ("## Tasks\n\n### PLAN-TASK-001 a\n"
+                    "Spec References: SPEC-AUTH-001\nChange Type: create\n"
+                    "TDD Applicable: no\n"
+                    "Files:\n- src/brand_new.py\n- src/existing.py\n"
+                    "Skeleton: outline\nSteps:\n- [ ] build it\nVerification: pytest\n")
+            (run_dir / STAGE_ARTIFACT_MAP[self.Stage.PLAN]).write_text(plan, encoding="utf-8")
+            r = self.check(run_dir, self.Stage.PLAN, self.tier, [], plan)
+        self.assertFalse(r.passed)
+        self.assertTrue(any("src/existing.py" in i and "already exists" in i for i in r.issues))
+        self.assertFalse(any("brand_new.py" in i for i in r.issues), r.issues)
+
     def test_change_type_new_is_accepted_as_create_alias(self):
         """R10: 'new' aliases 'create' — a missing path under it is exempt."""
         import json, tempfile

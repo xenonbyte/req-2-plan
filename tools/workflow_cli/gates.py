@@ -431,13 +431,14 @@ def _check_plan_context_pack(run_dir: Path) -> list[str]:
 
 def _check_plan_file_refs(run_dir: Path, content: str) -> list[str]:
     """Hard-check Files paths against the Context Pack repo_root. create-type tasks
-    are exempt; the part after '::' (a symbol) is advisory and not checked (no AST pack yet)."""
+    must target paths that do not exist yet (R19); the part after '::' (a symbol) is
+    advisory and not checked (no AST pack yet)."""
     repo_root = _context_pack_repo_root(run_dir)
     if repo_root is None:
         return []  # no usable ground truth; standard tier blocks via _check_plan_context_pack
     issues: list[str] = []
     for body in _iter_plan_task_bodies(content):
-        skip_missing_path = _normalized_change_type(_task_change_type(body)) == "create"
+        is_create = _normalized_change_type(_task_change_type(body)) == "create"
         files_field = _plan_task_field_body(body, "Files")
         for path_part in _plan_task_file_paths(files_field):
             path = Path(path_part)
@@ -453,11 +454,18 @@ def _check_plan_file_refs(run_dir: Path, content: str) -> list[str]:
                 )
                 continue
             if not resolved.exists():
-                if not skip_missing_path:
+                if not is_create:
                     issues.append(
                         f"PLAN-TASK Files references missing path {path_part!r} "
                         "(mark the task 'Change Type: create' if it is a new file)."
                     )
+            elif is_create:
+                # R19: create must not silently mean "overwrite an existing file".
+                issues.append(
+                    f"PLAN-TASK Files references path {path_part!r} that already exists "
+                    "under 'Change Type: create'; use 'modify' for existing files or "
+                    "split the task."
+                )
     return issues
 
 
