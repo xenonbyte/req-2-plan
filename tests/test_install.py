@@ -122,6 +122,180 @@ class TestInstallService:
         assert backup_path.exists(), "backup file should exist on disk"
         assert backup_path.read_text() == "old content"
 
+    def test_install_rejects_symlinked_managed_target(self, tmp_path):
+        svc, manifest_root, ph_root = make_service(tmp_path)
+        skill_dest = ph_root / "claude" / "skills" / "r2p" / "SKILL.md"
+        skill_dest.parent.mkdir(parents=True, exist_ok=True)
+        victim = tmp_path / "victim.txt"
+        victim.write_text("do not overwrite", encoding="utf-8")
+        skill_dest.symlink_to(victim)
+
+        with pytest.raises(ValueError, match="unsafe_install"):
+            svc.install("claude")
+
+        assert victim.read_text(encoding="utf-8") == "do not overwrite"
+        assert not (manifest_root / "install" / "claude.yaml").exists()
+
+    def test_install_rejects_symlink_below_platform_home(self, tmp_path):
+        svc, manifest_root, ph_root = make_service(tmp_path)
+        platform_home = ph_root / "claude"
+        platform_home.mkdir(parents=True)
+        escaped = tmp_path / "escaped-skills"
+        escaped.mkdir()
+        (platform_home / "skills").symlink_to(escaped, target_is_directory=True)
+
+        with pytest.raises(ValueError, match="unsafe_install"):
+            svc.install("claude")
+
+        assert not (escaped / "r2p" / "SKILL.md").exists()
+        assert not (manifest_root / "install" / "claude.yaml").exists()
+
+    def test_install_rejects_symlinked_manifest_root_before_mkdir(self, tmp_path):
+        manifest_link = tmp_path / "manifest"
+        escaped_manifest = tmp_path / "escaped-manifest"
+        escaped_manifest.mkdir()
+        manifest_link.symlink_to(escaped_manifest, target_is_directory=True)
+        ph_root = tmp_path / "platforms"
+        svc = InstallService(
+            repo_root=REPO_ROOT,
+            manifest_root=manifest_link,
+            platform_homes={
+                "claude": ph_root / "claude",
+                "codex": ph_root / "codex",
+                "gemini": ph_root / "gemini",
+            },
+        )
+
+        with pytest.raises(ValueError, match="unsafe_install"):
+            svc.install("claude")
+
+        assert not (escaped_manifest / "bin").exists()
+        assert not (escaped_manifest / "install").exists()
+        assert not (ph_root / "claude" / "skills" / "r2p" / "SKILL.md").exists()
+
+    def test_install_removes_manifest_when_post_manifest_cleanup_fails(self, tmp_path):
+        svc, manifest_root, ph_root = make_service(tmp_path)
+        manifest_path = manifest_root / "install" / "claude.yaml"
+
+        with patch.object(
+            svc,
+            "_cleanup_obsolete_managed_wrappers",
+            side_effect=RuntimeError("cleanup failed"),
+        ):
+            with pytest.raises(RuntimeError, match="cleanup failed"):
+                svc.install("claude")
+
+        assert not manifest_path.exists()
+        assert not (manifest_root / "bin" / "r2p-start").exists()
+        assert not (ph_root / "claude" / "skills" / "r2p" / "SKILL.md").exists()
+
+    def test_install_restores_prior_install_when_reinstall_cleanup_fails(
+        self, tmp_path
+    ):
+        svc, manifest_root, ph_root = make_service(tmp_path)
+        from tools.workflow_cli import install as install_mod
+
+        manifest_path = manifest_root / "install" / "claude.yaml"
+        skill_dest = ph_root / "claude" / "skills" / "r2p" / "SKILL.md"
+        skill_dest.parent.mkdir(parents=True, exist_ok=True)
+        skill_dest.write_text("original user skill", encoding="utf-8")
+        svc.install("claude")
+        manifest_before = manifest_path.read_text(encoding="utf-8")
+        skill_before = skill_dest.read_text(encoding="utf-8")
+        cleanup_calls = [0]
+
+        def fail_after_reinstall_uninstall(*args, **kwargs):
+            cleanup_calls[0] += 1
+            if cleanup_calls[0] > 1:
+                raise RuntimeError("cleanup failed")
+
+        with patch.object(
+            svc,
+            "_cleanup_obsolete_managed_wrappers",
+            side_effect=fail_after_reinstall_uninstall,
+        ), patch.object(install_mod, "R2P_VERSION", "v-reinstall"):
+            with pytest.raises(RuntimeError, match="cleanup failed"):
+                svc.install("claude")
+
+        assert cleanup_calls[0] == 2
+        assert manifest_path.read_text(encoding="utf-8") == manifest_before
+        assert skill_dest.read_text(encoding="utf-8") == skill_before
+
+        svc.uninstall("claude")
+
+        assert skill_dest.read_text(encoding="utf-8") == "original user skill"
+
+    def test_failed_reinstall_removes_new_backups_before_restoring_manifest(
+        self, tmp_path
+    ):
+        svc, manifest_root, ph_root = make_service(tmp_path)
+        from tools.workflow_cli import install as install_mod
+
+        manifest_path = manifest_root / "install" / "claude.yaml"
+        backup_dir = manifest_root / "install" / "backups" / "claude"
+        skill_dest = ph_root / "claude" / "skills" / "r2p" / "SKILL.md"
+        skill_dest.parent.mkdir(parents=True, exist_ok=True)
+        skill_dest.write_text("original user skill", encoding="utf-8")
+        cleanup_calls = [0]
+
+        def fail_after_reinstall_uninstall(*args, **kwargs):
+            cleanup_calls[0] += 1
+            if cleanup_calls[0] > 1:
+                raise RuntimeError("cleanup failed")
+
+        with patch.object(
+            install_mod,
+            "_now_ts",
+            side_effect=["20260601T000000", "20260602T000000"],
+        ):
+            svc.install("claude")
+            prior_manifest = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+            prior_backups = {Path(bk["backup"]) for bk in prior_manifest["backups"]}
+
+            with patch.object(
+                svc,
+                "_cleanup_obsolete_managed_wrappers",
+                side_effect=fail_after_reinstall_uninstall,
+            ), patch.object(install_mod, "R2P_VERSION", "v-reinstall"):
+                with pytest.raises(RuntimeError, match="cleanup failed"):
+                    svc.install("claude")
+
+        assert cleanup_calls[0] == 2
+        assert {
+            path for path in backup_dir.iterdir() if path.is_file()
+        } == prior_backups
+        assert all("20260602T000000" not in path.name for path in backup_dir.iterdir())
+        assert (
+            yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+            == prior_manifest
+        )
+
+        svc.uninstall("claude")
+
+        assert skill_dest.read_text(encoding="utf-8") == "original user skill"
+        assert not backup_dir.exists()
+
+    def test_reinstall_rejects_symlinked_backup_dir_before_uninstall(
+        self, tmp_path
+    ):
+        svc, manifest_root, ph_root = make_service(tmp_path)
+        svc.install("claude")
+        manifest_path = manifest_root / "install" / "claude.yaml"
+        manifest_before = manifest_path.read_text(encoding="utf-8")
+        skill_dest = ph_root / "claude" / "skills" / "r2p" / "SKILL.md"
+        skill_before = skill_dest.read_text(encoding="utf-8")
+        backup_dir = manifest_root / "install" / "backups" / "claude"
+        outside_backups = tmp_path / "outside-backups"
+        outside_backups.mkdir()
+        backup_dir.parent.mkdir(parents=True, exist_ok=True)
+        backup_dir.symlink_to(outside_backups, target_is_directory=True)
+
+        with pytest.raises(ValueError, match="unsafe_install"):
+            svc.install("claude")
+
+        assert manifest_path.read_text(encoding="utf-8") == manifest_before
+        assert skill_dest.read_text(encoding="utf-8") == skill_before
+
     def test_install_keeps_backups_unique_for_same_named_targets(self, tmp_path):
         svc, manifest_root, ph_root = make_service(tmp_path)
         first = ph_root / "codex" / "skills" / "r2p-start" / "SKILL.md"

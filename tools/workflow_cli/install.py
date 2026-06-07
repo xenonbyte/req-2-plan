@@ -10,6 +10,8 @@ import json
 import hashlib
 import shutil
 import shlex
+import stat
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -38,6 +40,21 @@ KNOWN_OBSOLETE_PLATFORM_TARGETS = {
     "codex": (("skills", "r2p-adapt", "SKILL.md"),),
     "gemini": (("commands", "r2p-adapt.toml"),),
 }
+
+
+@dataclass
+class _FileSnapshot:
+    path: Path
+    content: bytes
+    mode: int
+
+
+@dataclass
+class _InstallSnapshot:
+    manifest_path: Path
+    manifest_text: str
+    files: list[_FileSnapshot]
+    backup_files: list[_FileSnapshot]
 
 
 def _now_ts() -> str:
@@ -84,17 +101,24 @@ class InstallService:
             )
 
         manifest_path = self._manifest_path(platform)
-        if manifest_path.exists():
-            self.uninstall(platform)
+        backup_dir = self.manifest_root / "install" / "backups" / platform
+        self._validate_install_plan(platform, manifest_path, backup_dir)
+        prior_install = (
+            self._capture_install_snapshot(platform, manifest_path)
+            if manifest_path.exists()
+            else None
+        )
 
         installed_paths: list[str] = []
         backups: list[dict[str, str]] = []
         written: list[Path] = []
-        backup_dir = self.manifest_root / "install" / "backups" / platform
+        manifest_written = False
 
         try:
+            if prior_install is not None:
+                self.uninstall(platform)
+
             bin_dir = self.manifest_root / "bin"
-            bin_dir.mkdir(parents=True, exist_ok=True)
 
             # Copy bin scripts
             for src in sorted(self.repo_root.glob("tools/r2p-*")):
@@ -104,7 +128,7 @@ class InstallService:
                         src.read_text(encoding="utf-8"),
                         self.repo_root,
                     )
-                    _safe_write(
+                    self._write_managed_file(
                         dest, content, backups, installed_paths, written, backup_dir
                     )
                     shutil.copymode(str(src), str(dest))
@@ -120,7 +144,7 @@ class InstallService:
                 skill_src = template_dir / "SKILL.md"
                 skill_dest = platform_home / "skills" / "r2p" / "SKILL.md"
                 content = _render(skill_src.read_text(), R2P_VERSION, str(bin_dir))
-                _safe_write(
+                self._write_managed_file(
                     skill_dest, content, backups, installed_paths, written, backup_dir
                 )
 
@@ -129,7 +153,7 @@ class InstallService:
                 for src in sorted(cmd_dir.glob("r2p-*.md")):
                     dest = platform_home / "commands" / src.name
                     content = _render(src.read_text(), R2P_VERSION, str(bin_dir))
-                    _safe_write(
+                    self._write_managed_file(
                         dest, content, backups, installed_paths, written, backup_dir
                     )
 
@@ -139,7 +163,7 @@ class InstallService:
                 for src in sorted(skills_dir.glob("r2p-*/SKILL.md")):
                     dest = platform_home / "skills" / src.parent.name / "SKILL.md"
                     content = _render(src.read_text(), R2P_VERSION, str(bin_dir))
-                    _safe_write(
+                    self._write_managed_file(
                         dest, content, backups, installed_paths, written, backup_dir
                     )
 
@@ -149,7 +173,7 @@ class InstallService:
                 for src in sorted(cmd_dir.glob("r2p-*.toml")):
                     dest = platform_home / "commands" / src.name
                     content = _render(src.read_text(), R2P_VERSION, str(bin_dir))
-                    _safe_write(
+                    self._write_managed_file(
                         dest, content, backups, installed_paths, written, backup_dir
                     )
 
@@ -162,8 +186,10 @@ class InstallService:
                 "r2p_version": R2P_VERSION,
                 "schema_version": SCHEMA_VERSION,
             }
+            self._validate_install_path(manifest_path, field="manifest")
             manifest_path.parent.mkdir(parents=True, exist_ok=True)
             manifest_path.write_text(_dump_manifest(manifest), encoding="utf-8")
+            manifest_written = True
 
             # Remove obsolete managed shared wrappers (e.g. a 0.1.2 r2p-adapt) that
             # are no longer part of the current template set, across all manifests.
@@ -172,6 +198,12 @@ class InstallService:
 
         except Exception:
             # Rollback: remove written files, restore backups
+            if manifest_written:
+                # A pre-existing manifest is impossible here: a fresh install
+                # never had one, and a reinstall's uninstall already removed
+                # it — prior-manifest restoration is owned by
+                # _restore_install_snapshot below.
+                manifest_path.unlink(missing_ok=True)
             for path in reversed(written):
                 try:
                     path.unlink(missing_ok=True)
@@ -183,6 +215,9 @@ class InstallService:
                 if backup_path.exists():
                     target_path.parent.mkdir(parents=True, exist_ok=True)
                     shutil.copy2(str(backup_path), str(target_path))
+                    backup_path.unlink(missing_ok=True)
+            if prior_install is not None:
+                self._restore_install_snapshot(prior_install)
             raise
 
     def uninstall(self, platform: str) -> dict:
@@ -488,31 +523,39 @@ class InstallService:
         if platform not in SUPPORTED_PLATFORMS:
             raise ValueError(f"unsafe_manifest: unsupported_platform {platform!r}")
 
+        targets = set(self._install_targets(platform))
         bin_dir = self.manifest_root / "bin"
-        targets = {
+        targets.update(bin_dir / name for name in KNOWN_OBSOLETE_SHARED_WRAPPERS)
+
+        platform_home = self.platform_homes[platform]
+        for parts in KNOWN_OBSOLETE_PLATFORM_TARGETS.get(platform, ()):
+            targets.add(platform_home.joinpath(*parts))
+
+        return targets
+
+    def _install_targets(self, platform: str) -> list[Path]:
+        bin_dir = self.manifest_root / "bin"
+        targets = [
             bin_dir / src.name
             for src in sorted(self.repo_root.glob("tools/r2p-*"))
             if src.is_file()
-        }
-        targets.update(bin_dir / name for name in KNOWN_OBSOLETE_SHARED_WRAPPERS)
+        ]
 
         template_dir = (
             self.repo_root / "tools" / "workflow_cli" / "agent_templates" / platform
         )
         platform_home = self.platform_homes[platform]
-        for parts in KNOWN_OBSOLETE_PLATFORM_TARGETS.get(platform, ()):
-            targets.add(platform_home.joinpath(*parts))
 
         if platform == "claude":
-            targets.add(platform_home / "skills" / "r2p" / "SKILL.md")
+            targets.append(platform_home / "skills" / "r2p" / "SKILL.md")
             for src in sorted((template_dir / "commands").glob("r2p-*.md")):
-                targets.add(platform_home / "commands" / src.name)
+                targets.append(platform_home / "commands" / src.name)
         elif platform == "codex":
             for src in sorted((template_dir / "skills").glob("r2p-*/SKILL.md")):
-                targets.add(platform_home / "skills" / src.parent.name / "SKILL.md")
+                targets.append(platform_home / "skills" / src.parent.name / "SKILL.md")
         elif platform == "gemini":
             for src in sorted((template_dir / "commands").glob("r2p-*.toml")):
-                targets.add(platform_home / "commands" / src.name)
+                targets.append(platform_home / "commands" / src.name)
 
         return targets
 
@@ -702,6 +745,99 @@ class InstallService:
             return _load_manifest(manifest_path)
         except (OSError, UnicodeDecodeError, ValueError):
             return None
+
+    def _capture_install_snapshot(
+        self,
+        platform: str,
+        manifest_path: Path,
+    ) -> _InstallSnapshot:
+        manifest = _load_manifest(manifest_path)
+        self._validate_manifest_for_uninstall(platform, manifest)
+        files: list[_FileSnapshot] = []
+        backup_files: list[_FileSnapshot] = []
+
+        for path_str in manifest.get("installed_paths", []):
+            snapshot = self._snapshot_file(Path(path_str))
+            if snapshot is not None:
+                files.append(snapshot)
+
+        for backup in manifest.get("backups", []):
+            snapshot = self._snapshot_file(Path(backup["backup"]))
+            if snapshot is not None:
+                backup_files.append(snapshot)
+
+        return _InstallSnapshot(
+            manifest_path=manifest_path,
+            manifest_text=manifest_path.read_text(encoding="utf-8"),
+            files=files,
+            backup_files=backup_files,
+        )
+
+    def _snapshot_file(self, path: Path) -> _FileSnapshot | None:
+        if not path.is_file():
+            return None
+        return _FileSnapshot(
+            path=path,
+            content=path.read_bytes(),
+            mode=stat.S_IMODE(path.stat().st_mode),
+        )
+
+    def _restore_install_snapshot(self, snapshot: _InstallSnapshot) -> None:
+        for file_snapshot in snapshot.files + snapshot.backup_files:
+            file_snapshot.path.parent.mkdir(parents=True, exist_ok=True)
+            file_snapshot.path.write_bytes(file_snapshot.content)
+            try:
+                file_snapshot.path.chmod(file_snapshot.mode)
+            except OSError:
+                pass
+        snapshot.manifest_path.parent.mkdir(parents=True, exist_ok=True)
+        snapshot.manifest_path.write_text(snapshot.manifest_text, encoding="utf-8")
+
+    def _validate_install_path(self, path: Path, *, field: str) -> None:
+        """Reject install writes that would follow untrusted symlinks."""
+        if path.is_symlink():
+            raise ValueError(f"unsafe_install: {field}_is_symlink")
+        normalized = self._normalize_without_resolving_symlinks(path)
+        try:
+            self._reject_symlinked_ancestors(normalized, field=field)
+        except ValueError as exc:
+            raise ValueError(
+                str(exc).replace("unsafe_manifest:", "unsafe_install:", 1)
+            ) from exc
+
+    def _validate_install_backup_dir(self, backup_dir: Path) -> None:
+        probe = backup_dir / "__r2p_probe__"
+        normalized = self._normalize_without_resolving_symlinks(probe)
+        try:
+            self._reject_symlinked_ancestors(normalized, field="backup_dir")
+        except ValueError as exc:
+            raise ValueError(
+                str(exc).replace("unsafe_manifest:", "unsafe_install:", 1)
+            ) from exc
+
+    def _validate_install_plan(
+        self,
+        platform: str,
+        manifest_path: Path,
+        backup_dir: Path,
+    ) -> None:
+        for target in self._install_targets(platform):
+            self._validate_install_path(target, field="install_destination")
+        self._validate_install_path(manifest_path, field="manifest")
+        self._validate_install_backup_dir(backup_dir)
+
+    def _write_managed_file(
+        self,
+        dest: Path,
+        content: str,
+        backups: list[dict[str, str]],
+        installed_paths: list[str],
+        written: list[Path],
+        backup_dir: Path,
+    ) -> None:
+        self._validate_install_path(dest, field="install_destination")
+        self._validate_install_backup_dir(backup_dir)
+        _safe_write(dest, content, backups, installed_paths, written, backup_dir)
 
 
 # ---------------------------------------------------------------------------
