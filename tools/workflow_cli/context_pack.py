@@ -27,6 +27,18 @@ class ProjectContextPack:
     source_dirs: list = field(default_factory=list)
 
 
+def _append_npm_dependencies(pack: ProjectContextPack, dependencies: object, *, dev: bool = False) -> None:
+    if not isinstance(dependencies, dict):
+        return
+    for name, version in dependencies.items():
+        if not isinstance(name, str) or not isinstance(version, str):
+            continue
+        dep = {"name": name, "version": version, "ecosystem": "npm"}
+        if dev:
+            dep["dev"] = True
+        pack.dependencies.append(dep)
+
+
 def build_context_pack(repo_path: Path) -> ProjectContextPack:
     repo_path = Path(repo_path).resolve()
     baseline = scan_repo_baseline(repo_path)
@@ -41,15 +53,8 @@ def build_context_pack(repo_path: Path) -> ProjectContextPack:
             scripts = data.get("scripts")
             if isinstance(scripts, dict) and scripts.get("test"):
                 pack.test_commands.append("npm test")
-            dependencies = data.get("dependencies")
-            if isinstance(dependencies, dict):
-                for name, ver in dependencies.items():
-                    pack.dependencies.append({"name": name, "version": ver, "ecosystem": "npm"})
-            dev_dependencies = data.get("devDependencies")
-            if isinstance(dev_dependencies, dict):
-                for name, ver in dev_dependencies.items():
-                    pack.dependencies.append(
-                        {"name": name, "version": ver, "ecosystem": "npm", "dev": True})
+            _append_npm_dependencies(pack, data.get("dependencies"))
+            _append_npm_dependencies(pack, data.get("devDependencies"), dev=True)
         except (ValueError, OSError):
             pass
 

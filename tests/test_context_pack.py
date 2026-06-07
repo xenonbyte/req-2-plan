@@ -75,6 +75,32 @@ class TestBuildContextPack(unittest.TestCase):
         self.assertNotIn("npm test", pack.test_commands)
         self.assertTrue(any(d["name"].startswith("pyyaml") for d in pack.dependencies))
 
+    def test_malformed_package_dependency_versions_do_not_block_context_pack(self):
+        from tools.workflow_cli.context_pack import build_context_pack, write_context_pack
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            (tmp / "package.json").write_text(
+                json.dumps({
+                    "dependencies": {"react": "^18.0.0", "broken": 1},
+                    "devDependencies": {"jest": "^29.0.0", "broken-dev": {"version": "1.0.0"}},
+                }),
+                encoding="utf-8",
+            )
+            run_dir = tmp / "run"
+            run_dir.mkdir()
+            pack = build_context_pack(tmp)
+            md_path, json_path = write_context_pack(pack, run_dir)
+            md_text = md_path.read_text(encoding="utf-8")
+            data = json.loads(json_path.read_text(encoding="utf-8"))
+
+        names = {d["name"] for d in pack.dependencies}
+        self.assertIn("react", names)
+        self.assertIn("jest", names)
+        self.assertNotIn("broken", names)
+        self.assertNotIn("broken-dev", names)
+        self.assertIn("react ^18.0.0 (npm)", md_text)
+        self.assertTrue(all(isinstance(d["version"], str) for d in data["dependencies"]))
+
     def test_top_level_non_object_package_json_does_not_block_pip_fallback(self):
         from tools.workflow_cli.context_pack import build_context_pack
         with tempfile.TemporaryDirectory() as tmpdir:
