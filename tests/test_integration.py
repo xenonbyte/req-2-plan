@@ -578,7 +578,7 @@ class TestEndToEndPipeline:
                 content
                 + "\n\n### PLAN-TASK-001 implement\n"
                 "Spec References: SPEC-CORE-001\n"
-                "Change Type: modify\n"
+                "Change Type: non_code\n"
                 "TDD Applicable: no\n"
                 "Files: n/a\n"
                 "Skeleton: update implementation\n"

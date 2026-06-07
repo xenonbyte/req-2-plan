@@ -2600,7 +2600,7 @@ def test_gap_routing_full_cascade_back_to_plan():
                     "# plan v2\n\n## Tasks\n\n"
                     "### PLAN-TASK-001 do thing\n"
                     "Spec References: SPEC-CORE-001\n"
-                    "Change Type: modify\n"
+                    "Change Type: non_code\n"
                     "TDD Applicable: no\n"
                     "Files: n/a\n"
                     "Skeleton: update implementation\n"

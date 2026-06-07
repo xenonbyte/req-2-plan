@@ -915,9 +915,9 @@ class TestPlanCodeBlockGate(unittest.TestCase):
             "## Tasks\n\n"
             "### PLAN-TASK-001: do thing\n"
             "Spec References: SPEC-AUTH-001\n"
-            "Change Type: modify\n"
+            "Change Type: create\n"
             "TDD Applicable: yes\n"
-            "Files: n/a\n"
+            "Files: src/new_thing.py\n"
             f"Skeleton:\n{skeleton}\n"
             "Steps:\n- [ ] red\n- [ ] green\n"
             f"{verification}"
@@ -1964,6 +1964,63 @@ class TestPlanTaskFields(unittest.TestCase):
         self.assertFalse(r.passed)
         self.assertTrue(any("no fenced code block" in i for i in r.issues))
 
+    def test_files_na_with_file_change_type_fails_loud(self):
+        """R16: create|modify|delete contradict 'Files: n/a'; non_code is the escape."""
+        import tempfile
+        from pathlib import Path
+        for change_type in ("create", "modify", "delete", "new"):
+            with self.subTest(change_type=change_type):
+                with tempfile.TemporaryDirectory() as tmp:
+                    plan = ("## Tasks\n\n### PLAN-TASK-001 a\n"
+                            f"Spec References: none\nChange Type: {change_type}\n"
+                            "TDD Applicable: no\nFiles: n/a\n"
+                            "Skeleton: outline\nSteps:\n- [ ] do\nVerification: pytest\n")
+                    r = self.check(Path(tmp), self.Stage.PLAN, self.tier, [], plan)
+                self.assertFalse(r.passed)
+                self.assertTrue(
+                    any("no real file path" in i and "non_code" in i for i in r.issues),
+                    f"expected Files/Change Type contradiction issue; got {r.issues}")
+
+    def test_change_type_non_code_with_na_files_passes_field_checks(self):
+        """R16: non_code + 'Files: n/a' is the legal no-file task shape."""
+        plan = ("## Tasks\n\n### PLAN-TASK-001 a\n"
+                "Spec References: SPEC-AUTH-001\nChange Type: non_code\n"
+                "TDD Applicable: no\nFiles: n/a\n"
+                "Skeleton: outline the manual step\nSteps:\n- [ ] do\nVerification: pytest\n")
+        r = self._gate(plan)
+        self.assertFalse(any("invalid 'Change Type" in i for i in r.issues))
+        self.assertFalse(any("no real file path" in i for i in r.issues))
+        self.assertFalse(any("non_code" in i for i in r.issues))
+
+    def test_change_type_non_code_with_real_files_fails_loud(self):
+        """R16: non_code must not smuggle file paths past the file-ref checks."""
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as tmp:
+            plan = ("## Tasks\n\n### PLAN-TASK-001 a\n"
+                    "Spec References: none\nChange Type: non_code\n"
+                    "TDD Applicable: no\nFiles: tools/a.py\n"
+                    "Skeleton: outline\nSteps:\n- [ ] do\nVerification: pytest\n")
+            r = self.check(Path(tmp), self.Stage.PLAN, self.tier, [], plan)
+        self.assertFalse(r.passed)
+        self.assertTrue(
+            any("non_code" in i and "file path" in i for i in r.issues),
+            f"expected non_code/Files contradiction issue; got {r.issues}")
+
+    def test_invalid_change_type_with_na_files_reports_only_enum_issue(self):
+        """R16: an invalid Change Type must not stack a second Files/n-a issue."""
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as tmp:
+            plan = ("## Tasks\n\n### PLAN-TASK-001 a\n"
+                    "Spec References: none\nChange Type: refactor\n"
+                    "TDD Applicable: no\nFiles: n/a\n"
+                    "Skeleton: outline\nSteps:\n- [ ] do\nVerification: pytest\n")
+            r = self.check(Path(tmp), self.Stage.PLAN, self.tier, [], plan)
+        self.assertFalse(r.passed)
+        self.assertTrue(any("invalid 'Change Type: refactor'" in i for i in r.issues))
+        self.assertFalse(any("no real file path" in i for i in r.issues))
+
     def test_files_recreate_type_does_not_skip_missing_path_check(self):
         import json, tempfile
         from pathlib import Path
@@ -1993,9 +2050,9 @@ class TestPlanContextPackGate(unittest.TestCase):
         "## Tasks\n\n"
         "### PLAN-TASK-001 wire limiter\n"
         "Spec References: SPEC-AUTH-001\n"
-        "Change Type: modify\n"
+        "Change Type: create\n"
         "TDD Applicable: no\n"
-        "Files: n/a\n"
+        "Files: src/limiter.py\n"
         "Skeleton: inspect current middleware\n"
         "Steps:\n"
         "- [ ] update implementation\n"

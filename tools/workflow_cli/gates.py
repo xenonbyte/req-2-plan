@@ -488,7 +488,8 @@ def _check_spec_refs_valid(run_dir: Path, content: str) -> list[str]:
 
 
 # R10: Change Type is a closed operation-kind enum; 'new' is a legacy alias.
-_CHANGE_TYPE_VALUES = frozenset({"create", "modify", "delete"})
+_FILE_CHANGE_TYPES = frozenset({"create", "modify", "delete"})
+_CHANGE_TYPE_VALUES = _FILE_CHANGE_TYPES | {"non_code"}
 _CHANGE_TYPE_ALIASES = {"new": "create"}
 _TDD_APPLICABLE_VALUES = frozenset({"yes", "no"})
 
@@ -521,11 +522,28 @@ def _check_plan_task_fields(content: str) -> list[str]:
             if not _plan_task_field_body(body, field).strip():
                 issues.append(f"{label} is missing a non-empty '{field}:' field.")
         raw_change_type = _task_change_type(body)
-        if raw_change_type and _normalized_change_type(raw_change_type) not in _CHANGE_TYPE_VALUES:
+        change_type = _normalized_change_type(raw_change_type)
+        if raw_change_type and change_type not in _CHANGE_TYPE_VALUES:
             issues.append(
                 f"{label} has invalid 'Change Type: {raw_change_type}'; "
-                "allowed: create|modify|delete (alias: new = create)."
+                "allowed: create|modify|delete|non_code (alias: new = create)."
             )
+        # R16: Change Type and Files must agree — file-op types need a real
+        # path; non_code is the only legal shape for no-file tasks.
+        files_body = _plan_task_field_body(body, "Files")
+        if files_body.strip():
+            file_paths = _plan_task_file_paths(files_body)
+            if change_type in _FILE_CHANGE_TYPES and not file_paths:
+                issues.append(
+                    f"{label} has 'Change Type: {raw_change_type}' but 'Files:' lists "
+                    "no real file path; use 'Change Type: non_code' for tasks that "
+                    "touch no files."
+                )
+            elif change_type == "non_code" and file_paths:
+                issues.append(
+                    f"{label} has 'Change Type: non_code' but 'Files:' lists a file path; "
+                    "use create|modify|delete for file-touching tasks."
+                )
         raw_tdd = _task_tdd_applicable(body)
         if raw_tdd and raw_tdd.lower() not in _TDD_APPLICABLE_VALUES:
             issues.append(
