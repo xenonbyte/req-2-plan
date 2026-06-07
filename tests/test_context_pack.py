@@ -111,6 +111,39 @@ class TestBuildContextPack(unittest.TestCase):
         self.assertEqual(pack.repo_root, str(repo.resolve()))
 
 
+class TestContextPackMarkdown(unittest.TestCase):
+    def _pack(self, dependencies):
+        from tools.workflow_cli.context_pack import ProjectContextPack
+        return ProjectContextPack(repo_root="/repo", dependencies=dependencies)
+
+    def test_markdown_lists_dependency_details(self):
+        from tools.workflow_cli.context_pack import to_markdown
+        md = to_markdown(self._pack([
+            {"name": "react", "version": "^18.0.0", "ecosystem": "npm"},
+            {"name": "jest", "version": "^29.0.0", "ecosystem": "npm", "dev": True},
+            {"name": "pyyaml>=6.0", "version": "", "ecosystem": "pip"},
+        ]))
+        self.assertIn("react ^18.0.0 (npm)", md)
+        self.assertIn("jest ^29.0.0 (npm, dev)", md)
+        self.assertIn("pyyaml>=6.0 (pip)", md)
+        self.assertIn("dependencies (3)", md)
+
+    def test_markdown_caps_dependency_list_at_20(self):
+        from tools.workflow_cli.context_pack import to_markdown
+        deps = [{"name": f"pkg{i:02d}", "version": "1.0.0", "ecosystem": "npm"}
+                for i in range(25)]
+        md = to_markdown(self._pack(deps))
+        self.assertIn("dependencies (25)", md)
+        self.assertIn("pkg19 1.0.0 (npm)", md)
+        self.assertNotIn("pkg20", md)
+        self.assertIn("… and 5 more", md)
+
+    def test_markdown_without_dependencies_says_none(self):
+        from tools.workflow_cli.context_pack import to_markdown
+        md = to_markdown(self._pack([]))
+        self.assertIn("dependencies (0): none", md)
+
+
 class TestContextPackWriters(unittest.TestCase):
     def test_write_produces_both_files_and_valid_json(self):
         from tools.workflow_cli.context_pack import build_context_pack, write_context_pack

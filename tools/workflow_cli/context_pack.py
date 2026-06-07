@@ -84,6 +84,25 @@ def to_json(pack: ProjectContextPack) -> str:
     return json.dumps(asdict(pack), indent=2, ensure_ascii=False)
 
 
+_DEP_DISPLAY_CAP = 20
+
+
+def _dependencies_markdown(dependencies: list) -> str:
+    """Itemize dependencies (name, version, ecosystem, dev flag), capped to keep the seed small."""
+    if not dependencies:
+        return "- dependencies (0): none\n"
+    lines = [f"- dependencies ({len(dependencies)}):\n"]
+    for dep in dependencies[:_DEP_DISPLAY_CAP]:
+        label = " ".join(part for part in (dep.get("name", ""), dep.get("version", "")) if part)
+        ecosystem = dep.get("ecosystem", "")
+        suffix = f"{ecosystem}, dev" if dep.get("dev") else ecosystem
+        lines.append(f"  - {label} ({suffix})\n")
+    hidden = len(dependencies) - _DEP_DISPLAY_CAP
+    if hidden > 0:
+        lines.append(f"  - … and {hidden} more\n")
+    return "".join(lines)
+
+
 def to_markdown(pack: ProjectContextPack) -> str:
     return (
         "# Project Context Pack\n\n"
@@ -93,7 +112,7 @@ def to_markdown(pack: ProjectContextPack) -> str:
         f"- test_commands: {pack.test_commands or 'none'}\n"
         f"- entrypoints: {pack.entrypoints or 'none'}\n"
         f"- config_files: {pack.config_files or 'none'}\n"
-        f"- dependencies: {len(pack.dependencies)} found\n"
+        f"{_dependencies_markdown(pack.dependencies)}"
         f"- source_dirs: {pack.source_dirs}\n"
     )
 
