@@ -290,14 +290,6 @@ def _find_next_plan_task_field_start(task_body: str, after: int) -> int | None:
     return None
 
 
-def _plan_task_field_value(task_body: str, field: str) -> str:
-    found = _find_plan_task_field(task_body, field)
-    if found is None:
-        return ""
-    match, _ = found
-    return match.group(1).strip()
-
-
 def _iter_plan_task_bodies(content: str):
     return heading_bounded_bodies(content, _PLAN_TASK_RE.match)
 
@@ -498,6 +490,7 @@ def _check_spec_refs_valid(run_dir: Path, content: str) -> list[str]:
 # R10: Change Type is a closed operation-kind enum; 'new' is a legacy alias.
 _CHANGE_TYPE_VALUES = frozenset({"create", "modify", "delete"})
 _CHANGE_TYPE_ALIASES = {"new": "create"}
+_TDD_APPLICABLE_VALUES = frozenset({"yes", "no"})
 
 
 def _normalized_change_type(raw: str) -> str:
@@ -508,6 +501,11 @@ def _normalized_change_type(raw: str) -> str:
 def _task_change_type(body: str) -> str:
     """Whitespace-normalized Change Type field body (same line + continuation lines)."""
     return " ".join(_plan_task_field_body(body, "Change Type").split())
+
+
+def _task_tdd_applicable(body: str) -> str:
+    """Whitespace-normalized TDD Applicable field body (same line + continuation lines)."""
+    return " ".join(_plan_task_field_body(body, "TDD Applicable").split())
 
 
 def _check_plan_task_fields(content: str) -> list[str]:
@@ -527,6 +525,11 @@ def _check_plan_task_fields(content: str) -> list[str]:
             issues.append(
                 f"{label} has invalid 'Change Type: {raw_change_type}'; "
                 "allowed: create|modify|delete (alias: new = create)."
+            )
+        raw_tdd = _task_tdd_applicable(body)
+        if raw_tdd and raw_tdd.lower() not in _TDD_APPLICABLE_VALUES:
+            issues.append(
+                f"{label} has invalid 'TDD Applicable: {raw_tdd}'; allowed: yes|no."
             )
     if numbers:
         if len(set(numbers)) != len(numbers):
@@ -575,8 +578,7 @@ def _plan_tasks_missing_code(content: str) -> bool:
         return False
     for body in bodies:
         skeleton = _plan_task_field_body(body, "Skeleton")
-        tdd_applicable = _plan_task_field_value(body, "TDD Applicable")
-        if tdd_applicable.lower() == "yes" and not _has_complete_code_fence(skeleton):
+        if _task_tdd_applicable(body).lower() == "yes" and not _has_complete_code_fence(skeleton):
             return True
     return False
 
