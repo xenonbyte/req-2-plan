@@ -6,6 +6,11 @@ import os
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
+try:
+    import tomllib  # Python 3.11+
+except ImportError:  # pragma: no cover - older interpreters: pyproject parsing degrades to a no-op
+    tomllib = None
+
 from tools.workflow_cli.repo_baseline import SKIP_DIRS, scan_repo_baseline
 
 _CONFIG_NAMES = {
@@ -39,6 +44,41 @@ def _append_npm_dependencies(pack: ProjectContextPack, dependencies: object, *, 
         pack.dependencies.append(dep)
 
 
+def _append_pyproject_facts(pack: ProjectContextPack, repo_path: Path) -> None:
+    """Collect PEP 621 [project] dependencies and a pytest signal from pyproject.toml.
+
+    Poetry/PDM private tables are out of scope; without tomllib (Python < 3.11)
+    this is a no-op, matching the pack's best-effort scan semantics."""
+    pyproject = repo_path / "pyproject.toml"
+    if tomllib is None or not pyproject.exists():
+        return
+    try:
+        data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+    except (tomllib.TOMLDecodeError, OSError, UnicodeDecodeError):
+        return
+    project = data.get("project")
+    project = project if isinstance(project, dict) else {}
+    raw_deps = project.get("dependencies")
+    specs = [s for s in raw_deps if isinstance(s, str)] if isinstance(raw_deps, list) else []
+    optional = project.get("optional-dependencies")
+    optional_specs: list[str] = []
+    if isinstance(optional, dict):
+        for group in optional.values():
+            if isinstance(group, list):
+                optional_specs.extend(s for s in group if isinstance(s, str))
+    if (specs or optional_specs) and "pip" not in pack.package_managers:
+        pack.package_managers.append("pip")
+    for spec in specs:
+        pack.dependencies.append({"name": spec, "version": "", "ecosystem": "pip"})
+    for spec in optional_specs:
+        pack.dependencies.append({"name": spec, "version": "", "ecosystem": "pip", "dev": True})
+    tool = data.get("tool")
+    has_pytest_config = isinstance(tool, dict) and isinstance(tool.get("pytest"), dict)
+    mentions_pytest = any(s.lower().startswith("pytest") for s in specs + optional_specs)
+    if (has_pytest_config or mentions_pytest) and "python -m pytest" not in pack.test_commands:
+        pack.test_commands.append("python -m pytest")
+
+
 def build_context_pack(repo_path: Path) -> ProjectContextPack:
     repo_path = Path(repo_path).resolve()
     baseline = scan_repo_baseline(repo_path)
@@ -67,6 +107,8 @@ def build_context_pack(repo_path: Path) -> ProjectContextPack:
                 pack.dependencies.append({"name": line, "version": "", "ecosystem": "pip"})
         if not pack.test_commands:
             pack.test_commands.append("python -m pytest")
+
+    _append_pyproject_facts(pack, repo_path)
 
     for root, dirs, files in os.walk(repo_path):
         dirs[:] = [d for d in dirs if d not in SKIP_DIRS and not d.startswith(".")]

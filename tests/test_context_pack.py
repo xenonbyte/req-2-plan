@@ -4,6 +4,14 @@ import tempfile
 import unittest
 from pathlib import Path
 
+try:
+    import tomllib  # noqa: F401  # Python 3.11+
+    _HAS_TOMLLIB = True
+except ImportError:
+    _HAS_TOMLLIB = False
+
+_needs_tomllib = unittest.skipUnless(_HAS_TOMLLIB, "tomllib requires Python 3.11+")
+
 
 class TestBuildContextPack(unittest.TestCase):
     def _make_repo(self, tmp: Path):
@@ -135,6 +143,115 @@ class TestBuildContextPack(unittest.TestCase):
             finally:
                 os.chdir(cwd)
         self.assertEqual(pack.repo_root, str(repo.resolve()))
+
+
+class TestPyprojectContextPack(unittest.TestCase):
+    """PEP 621 [project] tables only; poetry-style private tables are out of scope."""
+
+    def _build(self, tmp: Path, pyproject_text: str):
+        from tools.workflow_cli.context_pack import build_context_pack
+        (tmp / "pyproject.toml").write_text(pyproject_text, encoding="utf-8")
+        return build_context_pack(tmp)
+
+    @_needs_tomllib
+    def test_collects_project_dependencies(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            pack = self._build(Path(tmpdir), (
+                '[project]\nname = "demo"\n'
+                'dependencies = ["pyyaml>=6.0", "requests"]\n'
+            ))
+        names = {d["name"] for d in pack.dependencies}
+        self.assertIn("pyyaml>=6.0", names)
+        self.assertIn("requests", names)
+        self.assertTrue(all(
+            d["ecosystem"] == "pip" and d["version"] == ""
+            for d in pack.dependencies
+        ))
+        self.assertIn("pip", pack.package_managers)
+
+    @_needs_tomllib
+    def test_optional_dependencies_are_marked_dev(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            pack = self._build(Path(tmpdir), (
+                '[project]\nname = "demo"\n'
+                'dependencies = ["requests"]\n'
+                '[project.optional-dependencies]\n'
+                'dev = ["ruff"]\ntest = ["coverage"]\n'
+            ))
+        by_name = {d["name"]: d for d in pack.dependencies}
+        self.assertNotIn("dev", by_name["requests"])
+        self.assertIs(by_name["ruff"]["dev"], True)
+        self.assertIs(by_name["coverage"]["dev"], True)
+
+    @_needs_tomllib
+    def test_pytest_config_or_dependency_yields_pytest_command(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            pack = self._build(Path(tmpdir), (
+                '[project]\nname = "demo"\n'
+                '[tool.pytest.ini_options]\ntestpaths = ["tests"]\n'
+            ))
+        self.assertIn("python -m pytest", pack.test_commands)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            pack = self._build(Path(tmpdir), (
+                '[project]\nname = "demo"\n'
+                '[project.optional-dependencies]\ndev = ["pytest-cov"]\n'
+            ))
+        self.assertIn("python -m pytest", pack.test_commands)
+
+    def test_pytest_command_not_duplicated_with_requirements_txt(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            (tmp / "requirements.txt").write_text("pyyaml>=6.0\n", encoding="utf-8")
+            pack = self._build(tmp, (
+                '[project]\nname = "demo"\n'
+                '[tool.pytest.ini_options]\ntestpaths = ["tests"]\n'
+            ))
+        self.assertEqual(pack.test_commands.count("python -m pytest"), 1)
+        self.assertEqual(pack.package_managers.count("pip"), 1)
+
+    def test_poetry_style_pyproject_adds_nothing(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            pack = self._build(Path(tmpdir), (
+                '[tool.poetry]\nname = "demo"\n'
+                '[tool.poetry.dependencies]\nrequests = "^2.0"\n'
+            ))
+        self.assertEqual(pack.dependencies, [])
+        self.assertNotIn("pip", pack.package_managers)
+        self.assertNotIn("python -m pytest", pack.test_commands)
+
+    def test_malformed_pyproject_does_not_block_context_pack(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            (tmp / "requirements.txt").write_text("pyyaml>=6.0\n", encoding="utf-8")
+            pack = self._build(tmp, "[project\nbroken = ")
+        self.assertIn("pip", pack.package_managers)
+        self.assertTrue(any(d["name"].startswith("pyyaml") for d in pack.dependencies))
+
+    @_needs_tomllib
+    def test_non_string_dependency_entries_are_skipped(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            pack = self._build(Path(tmpdir), (
+                '[project]\nname = "demo"\n'
+                'dependencies = ["requests", 1]\n'
+                '[project.optional-dependencies]\ndev = ["ruff", false]\n'
+            ))
+        names = {d["name"] for d in pack.dependencies}
+        self.assertEqual(names, {"requests", "ruff"})
+
+    def test_missing_tomllib_skips_pyproject_parsing(self):
+        """Python < 3.11 has no tomllib: pyproject parsing degrades to a no-op."""
+        from unittest import mock
+        from tools.workflow_cli import context_pack
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            (tmp / "pyproject.toml").write_text(
+                '[project]\nname = "demo"\ndependencies = ["requests"]\n',
+                encoding="utf-8",
+            )
+            with mock.patch.object(context_pack, "tomllib", None):
+                pack = context_pack.build_context_pack(tmp)
+        self.assertEqual(pack.dependencies, [])
+        self.assertNotIn("pip", pack.package_managers)
 
 
 class TestContextPackMarkdown(unittest.TestCase):
