@@ -227,11 +227,6 @@ def _escape_cell(val: str) -> str:
     return val.replace("\\", "\\\\").replace("|", "\\|")
 
 
-def _unescape_cell(val: str) -> str:
-    """Unescape backslashes and pipes in a parsed markdown table cell."""
-    return val.replace("\\|", "|").replace("\\\\", "\\")
-
-
 def _split_cells(row_text: str) -> list[str]:
     """Split pipe-delimited row, honouring \\| and \\\\ escape sequences."""
     cells: list[str] = []
@@ -608,7 +603,12 @@ class RunStateManager:
 
     def save(self, record: RunRecord) -> None:
         self.run_dir.mkdir(parents=True, exist_ok=True)
-        self.run_path.write_text(run_record_to_markdown(record), encoding="utf-8")
+        text = run_record_to_markdown(record)
+        # Atomic write: a crash mid-write must not leave a truncated run.md that
+        # bricks the run. Write a sibling temp file then atomically replace.
+        tmp = self.run_path.with_name(self.run_path.name + ".tmp")
+        tmp.write_text(text, encoding="utf-8")
+        tmp.replace(self.run_path)
 
     def load(self) -> RunRecord:
         if not self.run_path.exists():

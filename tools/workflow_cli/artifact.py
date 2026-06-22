@@ -98,7 +98,11 @@ def write_artifact(
         fm, _ = _parse_frontmatter(path.read_text(encoding="utf-8"))
         created_at = fm.get("r2p_created_at", now)
     full_text = _frontmatter(stage, version, status, created_at, now) + content
-    path.write_text(full_text, encoding="utf-8")
+    # Atomic write: a crash mid-write must not leave a truncated artifact that
+    # fails to parse on the next load. Write a sibling temp file then replace.
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(full_text, encoding="utf-8")
+    tmp.replace(path)
     return path
 
 
@@ -225,4 +229,6 @@ class ArtifactManager:
             f"r2p_replaced_by: {replaced_by}\n"
             f"---\n\n"
         ) + body
-        path.write_text(content, encoding="utf-8")
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(content, encoding="utf-8")
+        tmp.replace(path)

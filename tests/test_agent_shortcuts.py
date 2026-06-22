@@ -13,7 +13,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from tools.workflow_cli.models import RunStatus
+from tools.workflow_cli.models import RunStatus, WorkId
 from tools.workflow_cli.version import R2P_VERSION
 from tools.workflow_cli.agent_shortcuts import (
     generate_work_id,
@@ -198,6 +198,27 @@ class TestGenerateWorkId:
             wid2 = generate_work_id(req, base_path=base, today="20260527")
             assert wid2 != wid1
             assert wid2.endswith("-2")
+
+    def test_truncation_never_leaves_trailing_dash(self):
+        # Regression: truncating after strip("-") could leave a trailing "-",
+        # producing an invalid WorkId. The 36-char slug window means a word
+        # whose boundary aligns a hyphen at the slice edge must still validate.
+        req = "a" * 35 + " bb"
+        wid = generate_work_id(req, today="20260527")
+        assert not wid.endswith("-")
+        WorkId(wid)  # raises ValueError if invalid
+
+    def test_generated_ids_always_valid_workid(self):
+        for req in [
+            "authentication internationalization localization",
+            "a" * 60,
+            "x" * 36 + " yyy",
+            "implement a very long requirement that exceeds the maximum allowed length for slugs",
+            "short req here",
+        ]:
+            wid = generate_work_id(req, today="20260527")
+            assert len(wid) <= 48
+            WorkId(wid)  # must not raise
 
 
 # ---------------------------------------------------------------------------

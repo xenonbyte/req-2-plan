@@ -808,11 +808,12 @@ def _cmd_tier_escalate(args):
             active_item=record.current_stage.value,
         )
 
-    # Revoke affected bundle authorizations that cover high-tier stages
+    # Revoke affected bundle authorizations that cover high-tier stages.
+    # Reuse the gates definition so bundle revocation stays in lockstep with
+    # forced-review behavior if the high-risk modifier set ever changes.
     from tools.workflow_cli.gates import _FORCED_REVIEW_MODIFIERS
-    high_modifiers = {TierModifier.MIGRATION, TierModifier.SAFETY, TierModifier.CROSS_PROJECT}
     from datetime import datetime, timezone
-    if modifier in high_modifiers:
+    if modifier in _FORCED_REVIEW_MODIFIERS:
         revoke_ts = datetime.now(timezone.utc).isoformat()
         from tools.workflow_cli.models import STAGE_REQUIRED_UPSTREAM_CHECKPOINTS
         affected_stages = {Stage.DESIGN, Stage.SPEC, Stage.PLAN}

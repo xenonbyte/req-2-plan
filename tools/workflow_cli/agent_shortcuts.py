@@ -122,7 +122,9 @@ def generate_work_id(
         words = [f"run-{h}"]
 
     candidate = "-".join(words[:5])
-    candidate = re.sub(r"-+", "-", candidate).strip("-")[:max_slug_len]
+    # Truncate first, then strip dashes: stripping before truncation can leave a
+    # trailing "-" at the slice boundary, producing an invalid WorkId.
+    candidate = re.sub(r"-+", "-", candidate)[:max_slug_len].strip("-")
     if len(candidate) < 2:
         import hashlib
         h = hashlib.md5(requirement.encode()).hexdigest()[:8]
@@ -138,7 +140,8 @@ def generate_work_id(
 
     for n in range(2, 100):
         suffix = f"-{n}"
-        alt = f"{prefix}{candidate[:max_slug_len - len(suffix)]}{suffix}"
+        alt_candidate = candidate[:max_slug_len - len(suffix)].rstrip("-")
+        alt = f"{prefix}{alt_candidate}{suffix}"
         if not (base_path / ".req-to-plan" / alt).exists():
             return alt
 

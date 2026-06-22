@@ -4,8 +4,7 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock, patch
-from urllib import error as urllib_error
+from unittest.mock import patch
 
 from tools.workflow_cli.link_expander import (
     LinkExpansionResult,
@@ -207,63 +206,94 @@ class TestExpandLinksURLs(unittest.TestCase):
         results = expand_links("See https://example.com", fetch_urls=False)
         self.assertEqual(results[0].url, "https://example.com")
 
-    @patch("tools.workflow_cli.link_expander.request.urlopen")
-    def test_url_reachable(self, mock_urlopen):
-        mock_resp = MagicMock()
-        mock_resp.read.return_value = b"<html>Hello</html>"
-        mock_resp.__enter__ = lambda s: s
-        mock_resp.__exit__ = MagicMock(return_value=False)
-        mock_urlopen.return_value = mock_resp
-
+    @patch("tools.workflow_cli.link_expander._http_get")
+    @patch("tools.workflow_cli.link_expander._resolve_pinned_ip", return_value="93.184.216.34")
+    def test_url_reachable(self, _mock_ip, mock_get):
+        mock_get.return_value = (200, b"<html>Hello</html>", None)
         results = expand_links("See https://example.com", fetch_urls=True)
         self.assertEqual(results[0].status, LinkStatus.REACHABLE)
         self.assertIn("Hello", results[0].content_preview)
 
-    @patch("tools.workflow_cli.link_expander.request.urlopen")
-    def test_url_network_error_sets_unreachable(self, mock_urlopen):
-        mock_urlopen.side_effect = Exception("Connection refused")
+    @patch("tools.workflow_cli.link_expander._http_get")
+    @patch("tools.workflow_cli.link_expander._resolve_pinned_ip", return_value="93.184.216.34")
+    def test_url_network_error_sets_unreachable(self, _mock_ip, mock_get):
+        mock_get.side_effect = Exception("Connection refused")
         results = expand_links("See https://example.com", fetch_urls=True)
         self.assertEqual(results[0].status, LinkStatus.UNREACHABLE)
         self.assertIn("Connection refused", results[0].error)
 
-    @patch("tools.workflow_cli.link_expander.request.urlopen")
-    def test_url_401_sets_requires_auth(self, mock_urlopen):
-        http_error = urllib_error.HTTPError(
-            url="https://example.com",
-            code=401,
-            msg="Unauthorized",
-            hdrs=None,
-            fp=None,
-        )
-        mock_urlopen.side_effect = http_error
+    @patch("tools.workflow_cli.link_expander._http_get")
+    @patch("tools.workflow_cli.link_expander._resolve_pinned_ip", return_value="93.184.216.34")
+    def test_url_401_sets_requires_auth(self, _mock_ip, mock_get):
+        mock_get.return_value = (401, b"", None)
         results = expand_links("See https://example.com", fetch_urls=True)
         self.assertEqual(results[0].status, LinkStatus.REQUIRES_AUTH)
 
-    @patch("tools.workflow_cli.link_expander.request.urlopen")
-    def test_url_403_sets_requires_auth(self, mock_urlopen):
-        http_error = urllib_error.HTTPError(
-            url="https://example.com",
-            code=403,
-            msg="Forbidden",
-            hdrs=None,
-            fp=None,
-        )
-        mock_urlopen.side_effect = http_error
+    @patch("tools.workflow_cli.link_expander._http_get")
+    @patch("tools.workflow_cli.link_expander._resolve_pinned_ip", return_value="93.184.216.34")
+    def test_url_403_sets_requires_auth(self, _mock_ip, mock_get):
+        mock_get.return_value = (403, b"", None)
         results = expand_links("See https://example.com", fetch_urls=True)
         self.assertEqual(results[0].status, LinkStatus.REQUIRES_AUTH)
 
-    @patch("tools.workflow_cli.link_expander.request.urlopen")
-    def test_url_404_sets_unreachable(self, mock_urlopen):
-        http_error = urllib_error.HTTPError(
-            url="https://example.com",
-            code=404,
-            msg="Not Found",
-            hdrs=None,
-            fp=None,
-        )
-        mock_urlopen.side_effect = http_error
+    @patch("tools.workflow_cli.link_expander._http_get")
+    @patch("tools.workflow_cli.link_expander._resolve_pinned_ip", return_value="93.184.216.34")
+    def test_url_404_sets_unreachable(self, _mock_ip, mock_get):
+        mock_get.return_value = (404, b"", None)
         results = expand_links("See https://example.com", fetch_urls=True)
         self.assertEqual(results[0].status, LinkStatus.UNREACHABLE)
+
+    @patch("tools.workflow_cli.link_expander._http_get")
+    @patch("tools.workflow_cli.link_expander._resolve_pinned_ip")
+    def test_redirect_to_internal_is_blocked(self, mock_ip, mock_get):
+        # A public URL 302-ing to an internal host must be refused: every
+        # redirect hop is re-validated, so the pinned IP cannot be bypassed.
+        mock_ip.side_effect = lambda host: None if host == "evil.internal" else "93.184.216.34"
+        mock_get.return_value = (302, b"", "http://evil.internal/secret")
+        results = expand_links("See https://example.com", fetch_urls=True)
+        self.assertEqual(results[0].status, LinkStatus.UNREACHABLE)
+        self.assertIn("blocked", results[0].error.lower())
+
+    @patch("tools.workflow_cli.link_expander._http_get")
+    @patch("tools.workflow_cli.link_expander._resolve_pinned_ip", return_value="93.184.216.34")
+    def test_redirect_followed_to_reachable(self, _mock_ip, mock_get):
+        mock_get.side_effect = [
+            (302, b"", "https://example.com/final"),
+            (200, b"<html>Final</html>", None),
+        ]
+        results = expand_links("See https://example.com", fetch_urls=True)
+        self.assertEqual(results[0].status, LinkStatus.REACHABLE)
+        self.assertIn("Final", results[0].content_preview)
+
+    @patch("tools.workflow_cli.link_expander._http_get")
+    @patch("tools.workflow_cli.link_expander._resolve_pinned_ip", return_value="93.184.216.34")
+    def test_too_many_redirects_sets_unreachable(self, _mock_ip, mock_get):
+        mock_get.return_value = (302, b"", "https://example.com/loop")
+        results = expand_links("See https://example.com", fetch_urls=True)
+        self.assertEqual(results[0].status, LinkStatus.UNREACHABLE)
+        self.assertIn("redirect", results[0].error.lower())
+
+    def test_url_fetch_default_is_disabled(self):
+        results = expand_links("See https://example.com")
+        self.assertEqual(results[0].status, LinkStatus.UNREACHABLE)
+        self.assertIn("disabled", results[0].error.lower())
+
+    @patch("tools.workflow_cli.link_expander.getaddrinfo")
+    def test_ssrf_metadata_endpoint_blocked(self, mock_getaddrinfo):
+        # 169.254.169.254 is a link-local (cloud metadata) address.
+        mock_getaddrinfo.return_value = [
+            (0, 0, 0, "", ("169.254.169.254", 0)),
+        ]
+        results = expand_links("See http://169.254.169.254/latest/meta-data/", fetch_urls=True)
+        self.assertEqual(results[0].status, LinkStatus.UNREACHABLE)
+        self.assertIn("blocked", results[0].error.lower())
+
+    @patch("tools.workflow_cli.link_expander.getaddrinfo")
+    def test_ssrf_loopback_blocked(self, mock_getaddrinfo):
+        mock_getaddrinfo.return_value = [(0, 0, 0, "", ("127.0.0.1", 0))]
+        results = expand_links("See http://localhost:8080/admin", fetch_urls=True)
+        self.assertEqual(results[0].status, LinkStatus.UNREACHABLE)
+        self.assertIn("blocked", results[0].error.lower())
 
 
 class TestExpandLinksEdgeCases(unittest.TestCase):
