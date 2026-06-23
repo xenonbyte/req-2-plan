@@ -476,6 +476,9 @@ def _cmd_run_reopen(args):
     # Repopulate active_artifacts for copied stages so the reopened record
     # matches the on-disk artifacts and approved checkpoints.
     for cp in new_record.approved_checkpoints:
+        # Invariant: cp.artifact == STAGE_ARTIFACT_MAP[cp.stage] (artifacts are
+        # only ever created via the map, artifact.py:23). The existence check and
+        # the recorded name are therefore interchangeable; no drift path exists.
         artifact_name = STAGE_ARTIFACT_MAP.get(cp.stage)
         if artifact_name and (new_run_dir / artifact_name).exists():
             upsert_active_artifact(
