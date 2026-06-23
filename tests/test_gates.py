@@ -2612,5 +2612,37 @@ class TestPlanTaskVerificationPlaceholder(unittest.TestCase):
         )
 
 
+class TestAmbiguityMarkers(unittest.TestCase):
+    def setUp(self):
+        from tools.workflow_cli.gates import check_quality_gate
+        from tools.workflow_cli.models import Stage, TierBase, TierEstimate
+        self.check = check_quality_gate
+        self.Stage = Stage
+        self.tier = TierEstimate(base=TierBase.STANDARD, modifiers=frozenset())
+
+    def _design_placeholder_issue(self, summary_body: str) -> bool:
+        import tempfile
+        from pathlib import Path
+        content = f"# Design\n\n## Design Summary\n{summary_body}\n"
+        with tempfile.TemporaryDirectory() as tmp:
+            result = self.check(Path(tmp), self.Stage.DESIGN, self.tier, [], content)
+        return any("placeholder" in i.lower() for i in result.issues)
+
+    def test_triple_question_marks_flagged(self):
+        self.assertTrue(self._design_placeholder_issue("error handling ???"))
+
+    def test_zh_undecided_marker_flagged(self):
+        self.assertTrue(self._design_placeholder_issue("锁策略待定"))
+
+    def test_to_be_determined_flagged(self):
+        self.assertTrue(self._design_placeholder_issue("retry count to be determined"))
+
+    def test_normal_prose_not_flagged(self):
+        # Hedge-ish prose with none of the markers must NOT raise a placeholder issue.
+        self.assertFalse(
+            self._design_placeholder_issue("We may add caching later if profiling shows need.")
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

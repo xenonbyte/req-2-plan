@@ -103,6 +103,9 @@ _PLACEHOLDER_PATTERNS = [
     re.compile(
         r"(?im)^\s*(?:[-*]\s*)?(?:[A-Za-z][A-Za-z0-9 /_-]*:\s*)?FIXME\s*$"
     ),                                                     # FIXME as a placeholder line/field, not prose
+    re.compile(r"\?{3,}"),                                  # ??? unresolved marker
+    re.compile(r"待定"),                                     # zh: undecided / pending
+    re.compile(r"(?i)\bto be (?:decided|determined)\b"),    # english placeholder phrase
 ]
 
 # IDs that represent upstream references: REQ-*, RISK-*, DES-*, SPEC-*
