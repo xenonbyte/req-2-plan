@@ -57,6 +57,8 @@ from tools.workflow_cli.output import (
 )
 from tools.workflow_cli.tier import estimate_tier, scan_keywords
 from tools.workflow_cli.workspace import ensure_workspace_gitignore, commit_requirement_dir
+from tools.workflow_cli.atomic import atomic_write_text
+from tools.workflow_cli.markdown import plan_task_anchors
 
 
 # ---------------------------------------------------------------------------
@@ -557,6 +559,49 @@ def _cmd_run_archive(args):
         format_success(
             {"work_id": str(record.work_id), "status": "archived", "archived_to": str(archive_dir)},
             message=f"Run archived: {record.work_id}",
+        ),
+        EXIT_OK,
+    )
+
+
+def _cmd_run_execute_start(args):
+    record, mgr, run_dir = _load_run(args.work_id, args.base_path)
+    if record.status != RunStatus.CLOSED_AT_PLAN_CHECKPOINT:
+        print_and_exit(
+            format_error(
+                f"Cannot start execution in status {record.status.value!r}; "
+                "must be closed_at_plan_checkpoint (plan_not_ready)",
+                exit_code=EXIT_CONFLICT,
+            ),
+            EXIT_CONFLICT,
+        )
+    try:
+        plan_text = read_artifact(run_dir, Stage.PLAN)
+    except FileNotFoundError:
+        print_and_exit(
+            format_error("PLAN artifact not found; cannot start execution", exit_code=EXIT_NOT_FOUND),
+            EXIT_NOT_FOUND,
+        )
+    record = update_run_status(record, RunStatus.EXECUTING)
+    update_resume_context(record, last_operation="execute_start", next_operation="implement_tasks")
+    mgr.save(record)
+    # Seed the structural progress ledger (IDs + checkboxes = structure, not
+    # semantics; the agent appends progress). CLI never generates artifact text.
+    anchors = plan_task_anchors(plan_text)
+    lines = ["# Execution Progress", "", f"work_id: {record.work_id}", ""]
+    lines += [f"- [ ] {tid} {title}".rstrip() for tid, title in anchors]
+    exec_dir = run_dir / "execution"
+    exec_dir.mkdir(parents=True, exist_ok=True)
+    atomic_write_text(exec_dir / "progress.md", "\n".join(lines) + "\n")
+    print_and_exit(
+        format_success(
+            {
+                "work_id": str(record.work_id),
+                "status": record.status.value,
+                "ledger": str(exec_dir / "progress.md"),
+                "task_count": len(anchors),
+            },
+            message=f"Execution started: {record.work_id}",
         ),
         EXIT_OK,
     )
@@ -1436,6 +1481,11 @@ def _register_run_commands(subparsers):
     p = subparsers.add_parser("run-archive", help="Archive a closed run out of the active workspace")
     p.add_argument("--work-id", required=True)
     p.set_defaults(func=_cmd_run_archive)
+
+    # run-execute-start
+    p = subparsers.add_parser("run-execute-start", help="Begin executing a closed run's PLAN in place")
+    p.add_argument("--work-id", required=True)
+    p.set_defaults(func=_cmd_run_execute_start)
 
 
 def _register_tier_commands(subparsers):

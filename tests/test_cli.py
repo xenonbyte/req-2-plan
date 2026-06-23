@@ -3000,3 +3000,51 @@ class TestRunArchive:
             assert (base / ".req-to-plan" / "WF-20260101-arch").exists()  # not moved
             rec = RunStateManager(base / ".req-to-plan" / "WF-20260101-arch").load()
             assert rec.status.value == "closed_at_plan_checkpoint"  # no partial archive state
+
+
+class TestRunExecuteStart:
+    def _closed_run_with_plan(self, base, wid_str, plan_body):
+        from tools.workflow_cli.state import RunStateManager, create_run_record
+        from tools.workflow_cli.models import RunStatus, Stage, WorkId
+        from tools.workflow_cli.artifact import write_artifact
+        wid = WorkId(wid_str)
+        run_dir = base / ".req-to-plan" / wid_str
+        run_dir.mkdir(parents=True)
+        rec = create_run_record(wid)
+        rec.status = RunStatus.CLOSED_AT_PLAN_CHECKPOINT
+        rec.current_stage = Stage.CLOSED
+        write_artifact(run_dir, Stage.PLAN, plan_body, version=1, status="approved")
+        RunStateManager(run_dir).save(rec)
+        return run_dir
+
+    def test_execute_start_sets_executing_and_seeds_ledger(self):
+        from tools.workflow_cli.state import RunStateManager
+        plan = (
+            "# Plan\n\n## Tasks\n"
+            "### PLAN-TASK-001: first task\nFiles:\n- a.py\n"
+            "### PLAN-TASK-002: second task\nFiles:\n- b.py\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            run_dir = self._closed_run_with_plan(base, "WF-20260101-exec", plan)
+            with pytest.raises(SystemExit) as exc:
+                main(["--base-path", str(base), "run-execute-start", "--work-id", "WF-20260101-exec"])
+            assert exc.value.code == 0
+            rec = RunStateManager(run_dir).load()
+            assert rec.status.value == "executing"
+            ledger = (run_dir / "execution" / "progress.md").read_text(encoding="utf-8")
+            assert "- [ ] PLAN-TASK-001 first task" in ledger
+            assert "- [ ] PLAN-TASK-002 second task" in ledger
+
+    def test_execute_start_refuses_when_not_closed(self):
+        from tools.workflow_cli.state import RunStateManager, create_run_record
+        from tools.workflow_cli.models import WorkId
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            wid = WorkId("WF-20260101-open")
+            run_dir = base / ".req-to-plan" / "WF-20260101-open"
+            run_dir.mkdir(parents=True)
+            RunStateManager(run_dir).save(create_run_record(wid))  # ACTIVE_STAGE_DRAFT
+            with pytest.raises(SystemExit) as exc:
+                main(["--base-path", str(base), "run-execute-start", "--work-id", "WF-20260101-open"])
+            assert exc.value.code == 6  # EXIT_CONFLICT
