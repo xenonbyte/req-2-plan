@@ -473,6 +473,19 @@ def _cmd_run_reopen(args):
         if cp_stage_idx < target_idx:
             new_record.approved_checkpoints.append(cp)
 
+    # Repopulate active_artifacts for copied stages so the reopened record
+    # matches the on-disk artifacts and approved checkpoints.
+    for cp in new_record.approved_checkpoints:
+        artifact_name = STAGE_ARTIFACT_MAP.get(cp.stage)
+        if artifact_name and (new_run_dir / artifact_name).exists():
+            upsert_active_artifact(
+                new_record,
+                stage=cp.stage,
+                artifact=cp.artifact,
+                version=cp.version,
+                status="approved",
+            )
+
     new_mgr = RunStateManager(new_run_dir)
     new_mgr.save(new_record)
 
@@ -723,14 +736,6 @@ def _cmd_tier_lock(args):
         record.tier_estimate = TierEstimate(base=TierBase.LIGHT, modifiers=frozenset())
 
     if args.override_floor:
-        if not args.confirm:
-            print_and_exit(
-                format_error(
-                    "Overriding floor requires --confirm flag as well",
-                    exit_code=EXIT_CLI_ERR,
-                ),
-                EXIT_CLI_ERR,
-            )
         from tools.workflow_cli.models import TierEstimate
         record.tier_locked = TierEstimate(base=base, modifiers=modifiers)
     else:

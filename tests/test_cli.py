@@ -2199,7 +2199,7 @@ def test_gap_open_routes_back_and_invalidates_downstream(capsys):
         assert "r2p_status: stale" in (Path(tmp) / ".req-to-plan" / work_id / STAGE_ARTIFACT_MAP[Stage.PLAN]).read_text(encoding="utf-8")
 
 
-def test_gap_open_invalidates_reopened_copied_artifacts_without_active_records():
+def test_gap_open_invalidates_reopened_copied_artifacts():
     with tempfile.TemporaryDirectory() as tmp:
         source_work_id, _ = _seed_plan_approved_run(tmp)
         source = load_record(tmp, source_work_id)
@@ -2213,7 +2213,12 @@ def test_gap_open_invalidates_reopened_copied_artifacts_without_active_records()
         )
         work_id = f"{source_work_id}-r1"
         reopened = load_record(tmp, work_id)
-        assert reopened.active_artifacts == []
+        assert {aa.stage: aa.status for aa in reopened.active_artifacts} == {
+            Stage.REQUIREMENT_BRIEF: "approved",
+            Stage.RISK_DISCOVERY: "approved",
+            Stage.DESIGN: "approved",
+            Stage.SPEC: "approved",
+        }
         assert {cp.stage for cp in reopened.approved_checkpoints} == {
             Stage.REQUIREMENT_BRIEF,
             Stage.RISK_DISCOVERY,
@@ -2230,6 +2235,8 @@ def test_gap_open_invalidates_reopened_copied_artifacts_without_active_records()
 
         rec = load_record(tmp, work_id)
         assert {aa.stage: aa.status for aa in rec.active_artifacts} == {
+            Stage.REQUIREMENT_BRIEF: "approved",
+            Stage.RISK_DISCOVERY: "approved",
             Stage.DESIGN: "stale",
             Stage.SPEC: "stale",
         }

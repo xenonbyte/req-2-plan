@@ -53,7 +53,9 @@ def write_active_pointer(base_path: Path, work_id: str, reason: str = "workflow_
         f"updated_at: {updated_at}\n"
         f"reason: {reason}\n"
     )
-    path.write_text(content, encoding="utf-8")
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(content, encoding="utf-8")
+    tmp.replace(path)
 
 
 def _validate_work_id(raw: str) -> str:
