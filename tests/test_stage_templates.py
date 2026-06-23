@@ -47,3 +47,11 @@ class TestStageTemplates(unittest.TestCase):
         self.assertIn("`none`", standard)          # guidance mentions the none escape
         self.assertIn("Status: pending", standard)  # fenced example shows the contract
         self.assertNotIn("## Decision Requests", template_for(Stage.DESIGN, TierBase.LIGHT))
+
+    def test_plan_template_verification_is_a_placeholder_until_filled(self):
+        from tools.workflow_cli.stage_templates import template_for
+        from tools.workflow_cli.gates import _check_plan_task_verification_placeholders
+        text = template_for(Stage.PLAN, TierBase.STANDARD)
+        # The seeded Verification must still trip the gate so an untouched
+        # template cannot pass.
+        self.assertTrue(_check_plan_task_verification_placeholders(text))

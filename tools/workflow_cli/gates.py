@@ -91,7 +91,7 @@ def check_entry_gate(
 # Upstream ID reference pattern
 # ---------------------------------------------------------------------------
 
-_FILL_IN_PLACEHOLDER_RE = re.compile(r"<!--\s*fill in\s*-->", re.IGNORECASE)
+_FILL_IN_PLACEHOLDER_RE = re.compile(r"<!--\s*fill in(?:\s*:.*?)?\s*-->", re.IGNORECASE)
 
 _PLACEHOLDER_PATTERNS = [
     _FILL_IN_PLACEHOLDER_RE,                              # untouched template body
@@ -621,6 +621,19 @@ def _check_plan_task_skeleton_placeholders(content: str) -> list[str]:
     return issues
 
 
+def _check_plan_task_verification_placeholders(content: str) -> list[str]:
+    issues: list[str] = []
+    for body in _iter_plan_task_bodies(content):
+        verification = _plan_task_field_body(body, "Verification")
+        if verification.strip() and any(p.search(verification) for p in _PLACEHOLDER_PATTERNS):
+            issues.append(
+                f"{_plan_task_label(body)} Verification contains an unresolved "
+                "placeholder; replace it with an objective pass/fail check "
+                "(command + expected result) before passing the gate."
+            )
+    return issues
+
+
 def _section_bodies(content: str, heading: str) -> list[str]:
     """Return all bodies under `heading`, each stopping at the next same-or-higher heading."""
     level = len(heading) - len(heading.lstrip("#"))
@@ -994,6 +1007,8 @@ def check_quality_gate(
             issues.extend(_check_spec_refs_valid(run_dir, gate_content))
             # R5.2b: Skeleton is fenced, so detect template placeholders there explicitly.
             issues.extend(_check_plan_task_skeleton_placeholders(gate_content))
+            # R5.2c: Verification must be an objective check, not a placeholder.
+            issues.extend(_check_plan_task_verification_placeholders(gate_content))
             # R5.3: file refs vs Context Pack repo_root
             issues.extend(_check_plan_file_refs(run_dir, gate_content))
 

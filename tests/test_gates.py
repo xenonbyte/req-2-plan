@@ -2552,5 +2552,65 @@ class TestDecisionRequestsGate(unittest.TestCase):
                         f"multiple Status lines must fail: {issues}")
 
 
+class TestPlanTaskVerificationPlaceholder(unittest.TestCase):
+    def _task(self, verification: str) -> str:
+        return (
+            "## Tasks\n"
+            "### PLAN-TASK-001: do thing\n"
+            "Spec References: SPEC-AUTH-001\n"
+            "Change Type: modify\n"
+            "TDD Applicable: yes\n"
+            "Files:\n- src/x.py\n"
+            "Skeleton:\n```python\npass\n```\n"
+            "Steps:\n- [ ] do\n"
+            f"Verification: {verification}\n"
+        )
+
+    def test_fill_in_verification_is_flagged(self):
+        from tools.workflow_cli.gates import _check_plan_task_verification_placeholders
+        self.assertTrue(
+            _check_plan_task_verification_placeholders(self._task("<!-- fill in -->"))
+        )
+
+    def test_fill_in_guidance_comment_is_flagged(self):
+        from tools.workflow_cli.gates import _check_plan_task_verification_placeholders
+        self.assertTrue(
+            _check_plan_task_verification_placeholders(
+                self._task("<!-- fill in: objective pass/fail check -->")
+            )
+        )
+
+    def test_tbd_verification_is_flagged(self):
+        from tools.workflow_cli.gates import _check_plan_task_verification_placeholders
+        self.assertTrue(
+            _check_plan_task_verification_placeholders(self._task("TBD"))
+        )
+
+    def test_objective_verification_passes(self):
+        from tools.workflow_cli.gates import _check_plan_task_verification_placeholders
+        self.assertFalse(
+            _check_plan_task_verification_placeholders(
+                self._task("`pytest tests/x.py::test_y` passes")
+            )
+        )
+
+    def test_quality_gate_reports_verification_placeholder_issue(self):
+        import tempfile
+        from pathlib import Path
+        from tools.workflow_cli.gates import check_quality_gate
+        from tools.workflow_cli.models import Stage, TierBase, TierEstimate
+        tier = TierEstimate(base=TierBase.LIGHT, modifiers=frozenset())
+        with tempfile.TemporaryDirectory() as tmp:
+            result = check_quality_gate(
+                Path(tmp), Stage.PLAN, tier, [], self._task("<!-- fill in -->")
+            )
+        self.assertTrue(
+            any(
+                "Verification contains an unresolved placeholder" in issue
+                for issue in result.issues
+            )
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

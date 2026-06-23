@@ -47,7 +47,8 @@ _HEADING_BODY = {
         "```\n"
         "Steps:\n"
         "- [ ] <!-- fill in -->\n"
-        "Verification: <!-- fill in -->\n"
+        "Verification: <!-- fill in: objective pass/fail check (command + expected result), "
+        "e.g. `pytest tests/x.py::test_y` passes / `GET /foo` returns 429 when over limit -->\n"
     ),
 }
 
