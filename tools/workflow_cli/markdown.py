@@ -130,6 +130,24 @@ def heading_level(line: str) -> int | None:
     return len(stripped) - len(stripped.lstrip("#"))
 
 
+# A PLAN-TASK anchor heading, e.g. "### PLAN-TASK-001: title". Single source of
+# truth shared by gates (task iteration) and cli (ledger seeding).
+PLAN_TASK_ANCHOR_RE = re.compile(r"^### PLAN-TASK-\d+", re.MULTILINE)
+_PLAN_TASK_ANCHOR_LINE_RE = re.compile(r"^###\s+(PLAN-TASK-\d+)\s*:?\s*(.*?)\s*$")
+
+
+def plan_task_anchors(content: str) -> list[tuple[str, str]]:
+    """Return (PLAN-TASK-NNN, title) for each task anchor outside code fences."""
+    anchors: list[tuple[str, str]] = []
+    for line, _, _ in unfenced_markdown_lines(content):
+        if not PLAN_TASK_ANCHOR_RE.match(line):
+            continue
+        m = _PLAN_TASK_ANCHOR_LINE_RE.match(line.rstrip("\n"))
+        if m:
+            anchors.append((m.group(1), m.group(2).strip()))
+    return anchors
+
+
 def heading_bounded_bodies(content: str, is_start):
     """Yield each section whose heading line satisfies `is_start(line)`.
 

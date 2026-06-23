@@ -23,6 +23,7 @@ from tools.workflow_cli.models import (
 from tools.workflow_cli.markdown import (
     heading_bounded_bodies,
     heading_level,
+    PLAN_TASK_ANCHOR_RE as _PLAN_TASK_RE,
     strip_readonly_sections,
     unfenced_markdown_lines,
     unfenced_markdown_text,
@@ -252,7 +253,6 @@ def _has_external_docs_inventory(content: str) -> bool:
 # PLAN code-block gate helpers
 # ---------------------------------------------------------------------------
 
-_PLAN_TASK_RE = re.compile(r"^### PLAN-TASK-\d+", re.MULTILINE)
 _CODE_FENCE_LINE_RE = re.compile(r"^[ \t]{0,3}(`{3,}|~{3,})(.*)$")
 _INLINE_CODE_VALUE_RE = re.compile(r"^(`+)(.*?)\1$", re.DOTALL)
 _MARKDOWN_LINK_VALUE_RE = re.compile(r"^\[([^\]]+)\]\([^)]+\)$")
