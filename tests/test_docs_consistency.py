@@ -57,5 +57,37 @@ class TestAgentTemplateCheckpointGuidance(unittest.TestCase):
         )
 
 
+class TestExecuteTemplateContent(unittest.TestCase):
+    def test_execute_surfaces_carry_sdd_orchestration_tokens(self):
+        surfaces = [
+            "tools/workflow_cli/agent_templates/claude/commands/r2p-execute.md",
+            "tools/workflow_cli/agent_templates/codex/skills/r2p-execute/SKILL.md",
+        ]
+        required = (
+            "closed_at_plan_checkpoint",
+            "current branch",          # in-place, no branch
+            "Pre-flight",
+            "Verification",            # per-task completion gate
+            "fresh implementer subagent",
+            "task-reviewer",
+            "whole-branch review",
+            "r2p-archive",
+            "hard prerequisite",       # no subagent degrade
+            "NEEDS_CONTEXT",           # ambiguity ladder
+        )
+        missing = []
+        for rel in surfaces:
+            text = (REPO_ROOT / rel).read_text(encoding="utf-8")
+            for tok in required:
+                if tok not in text:
+                    missing.append(f"{rel}:{tok}")
+        self.assertEqual(missing, [], f"missing SDD tokens: {missing}")
+
+    def test_gemini_execute_toml_mentions_in_place_and_archive(self):
+        text = (REPO_ROOT / "tools/workflow_cli/agent_templates/gemini/commands/r2p-execute.toml").read_text(encoding="utf-8")
+        self.assertIn("r2p-execute", text)
+        self.assertIn("current branch", text)
+
+
 if __name__ == "__main__":
     unittest.main()
