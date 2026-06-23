@@ -142,6 +142,7 @@ step of running a workflow:
 | `r2p-gap-open` | Route an upstream gap on an open run back to its `--owner-stage`; downstream artifacts become stale and must be re-derived. |
 | `r2p-gap-resolve` | Close a gap `--route-id` after the owner stage is re-worked and passes `gate-quality`. |
 | `r2p-archive` | Archive a closed run out of the active workspace (moves it under `.req-to-plan/archive/` and untracks it). |
+| `r2p-execute` | Implement a closed run's PLAN in place on the current branch via the subagent-driven SDD loop, then archive. |
 
 > [!TIP]
 > Add `~/.req-to-plan/bin` to your `PATH` to run the `r2p-*` wrappers directly:

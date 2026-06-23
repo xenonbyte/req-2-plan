@@ -67,7 +67,7 @@
 
 - **Agent/CLI separation**: CLI manages state and validates structure; Agent generates semantic content. CLI never generates artifact text.
 - **Tier floor enforcement**: `TierEstimate.lock()` raises ValueError if locking below computed floor. Override requires `--override-floor --confirm`.
-- **Terminal status**: Only `RunStatus.CLOSED_AT_PLAN_CHECKPOINT` is terminal. All others are open.
+- **Terminal status**: `RunStatus.ARCHIVED` is the terminal state. `EXECUTING` is open (an executing run blocks starting a new one); `CLOSED_AT_PLAN_CHECKPOINT` is also non-blocking for new runs but is reopen/execute/archive-able. `is_terminal()` returns True only for CLOSED and ARCHIVED.
 - **Exit codes**: 0=ok, 2=cli-err, 3=gate-fail, 4=dry-run, 5=review-required, 6=conflict, 7=not-found.
 - **Manifest safety**: Uninstall only removes `installed_paths` listed in manifest. Backup before any overwrite.
 - **JSON mode**: Set `R2P_JSON=1` to get machine-readable JSON output instead of human-readable text.
