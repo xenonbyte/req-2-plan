@@ -173,6 +173,24 @@ class TestInstallService:
         assert not (escaped_manifest / "install").exists()
         assert not (ph_root / "claude" / "skills" / "r2p" / "SKILL.md").exists()
 
+    def test_install_rejects_symlinked_manifest_tmp(self, tmp_path):
+        # Regression: the atomic manifest write goes through a "<manifest>.tmp"
+        # sibling. A planted symlink there must be rejected, or write_text would
+        # follow it and redirect the manifest write outside the manifest dir
+        # (the manifest_path validation alone never inspects the temp sibling).
+        svc, manifest_root, ph_root = make_service(tmp_path)
+        install_dir = manifest_root / "install"
+        install_dir.mkdir(parents=True)
+        victim = tmp_path / "victim.txt"
+        victim.write_text("do not overwrite", encoding="utf-8")
+        (install_dir / "claude.yaml.tmp").symlink_to(victim)
+
+        with pytest.raises(ValueError, match="unsafe_install"):
+            svc.install("claude")
+
+        assert victim.read_text(encoding="utf-8") == "do not overwrite"
+        assert not (install_dir / "claude.yaml").exists()
+
     def test_install_removes_manifest_when_post_manifest_cleanup_fails(self, tmp_path):
         svc, manifest_root, ph_root = make_service(tmp_path)
         manifest_path = manifest_root / "install" / "claude.yaml"

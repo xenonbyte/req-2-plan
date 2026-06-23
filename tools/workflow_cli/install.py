@@ -188,7 +188,13 @@ class InstallService:
             }
             self._validate_install_path(manifest_path, field="manifest")
             manifest_path.parent.mkdir(parents=True, exist_ok=True)
-            manifest_path.write_text(_dump_manifest(manifest), encoding="utf-8")
+            tmp = manifest_path.with_name(manifest_path.name + ".tmp")
+            # The temp sibling shares the (validated) parent, but its own path is
+            # untrusted: reject a planted symlink so the atomic write cannot be
+            # redirected outside the manifest dir.
+            self._validate_install_path(tmp, field="manifest")
+            tmp.write_text(_dump_manifest(manifest), encoding="utf-8")
+            tmp.replace(manifest_path)
             manifest_written = True
 
             # Remove obsolete managed shared wrappers (e.g. a 0.1.2 r2p-adapt) that
