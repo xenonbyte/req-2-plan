@@ -7,7 +7,12 @@ from pathlib import Path
 
 
 def atomic_write_text(path: Path, content: str, *, encoding: str = "utf-8") -> None:
-    """Write text via a unique sibling temp file, then atomically replace path."""
+    """Write text via a unique sibling temp file, then atomically replace path.
+
+    Guarantees atomic-replace semantics (a reader sees either the old or the new
+    file, never a truncated one). It does NOT fsync — durability across power
+    loss / crash is a deliberate non-goal for this CLI.
+    """
     tmp_path, fd = _open_unique_sibling_tmp(path)
     try:
         with os.fdopen(fd, "w", encoding=encoding) as tmp:

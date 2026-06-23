@@ -221,10 +221,15 @@ def _tier_lock_command(base_path: Path, work_id: str, record) -> str:
 
 
 def _prepare_input_file(run_dir: Path, stage: str, suffix: str, seed: str = "") -> Path:
-    path = run_dir / "inputs" / f"{stage}-{suffix}.md"
-    path.parent.mkdir(parents=True, exist_ok=True)
+    inputs_dir = run_dir / "inputs"
+    if inputs_dir.is_symlink():
+        raise ValueError("unsafe_input_file_symlink")
+    inputs_dir.mkdir(parents=True, exist_ok=True)
+    path = inputs_dir / f"{stage}-{suffix}.md"
+    if path.is_symlink():
+        raise ValueError("unsafe_input_file_symlink")
     if not path.exists():
-        path.write_text(seed, encoding="utf-8")
+        atomic_write_text(path, seed)
     return path
 
 

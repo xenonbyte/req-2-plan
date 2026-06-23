@@ -8,6 +8,7 @@ import shlex
 import subprocess
 import sys
 import tempfile
+import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -1321,3 +1322,41 @@ class TestRunStartArgs:
         from tools.workflow_cli.agent_shortcuts import _build_run_start_args
         args = _build_run_start_args("WF-x", "do thing", None, repo_path=None)
         assert "--repo-path" not in args
+
+
+class TestPrepareInputFileSymlink(unittest.TestCase):
+    def test_rejects_preplanted_symlink_target(self):
+        from tools.workflow_cli.agent_shortcuts import _prepare_input_file
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            (run_dir / "inputs").mkdir()
+            outside = run_dir / "outside.md"
+            outside.write_text("secret", encoding="utf-8")
+            link = run_dir / "inputs" / "spec-content.md"
+            os.symlink(outside, link)
+            with self.assertRaises(ValueError):
+                _prepare_input_file(run_dir, "spec", "content", "seed")
+            # The symlink target must NOT have been written through.
+            self.assertEqual(outside.read_text(encoding="utf-8"), "secret")
+
+    def test_rejects_symlinked_inputs_directory(self):
+        from tools.workflow_cli.agent_shortcuts import _prepare_input_file
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            run_dir = base / "run"
+            run_dir.mkdir()
+            outside_inputs = base / "outside-inputs"
+            outside_inputs.mkdir()
+            os.symlink(outside_inputs, run_dir / "inputs")
+            with self.assertRaises(ValueError):
+                _prepare_input_file(run_dir, "spec", "content", "seed")
+            # The symlinked directory must NOT receive the seeded file.
+            self.assertFalse((outside_inputs / "spec-content.md").exists())
+
+    def test_writes_seed_when_absent_and_not_a_symlink(self):
+        from tools.workflow_cli.agent_shortcuts import _prepare_input_file
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            p = _prepare_input_file(run_dir, "spec", "content", "seed text")
+            self.assertEqual(p.read_text(encoding="utf-8"), "seed text")
+            self.assertFalse(p.is_symlink())
