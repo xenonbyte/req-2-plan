@@ -106,7 +106,7 @@ def compute_floor(
         or repo.is_monorepo
         or repo.module_count > module_threshold
         or _has_multi_repo_refs(requirement_text)
-        or any(r.status in (LinkStatus.UNREACHABLE, LinkStatus.REQUIRES_AUTH) for r in link_results)
+        or any(r.status == LinkStatus.EXTERNAL for r in link_results)
     ):
         base = TierBase.STANDARD
 

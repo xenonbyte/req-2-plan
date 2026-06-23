@@ -4,7 +4,6 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
 
 from tools.workflow_cli.link_expander import (
     LinkExpansionResult,
@@ -55,14 +54,8 @@ class TestExtractLinks(unittest.TestCase):
 
 
 class TestLinkStatus(unittest.TestCase):
-    def test_has_reachable(self):
-        self.assertEqual(LinkStatus.REACHABLE, "reachable")
-
-    def test_has_unreachable(self):
-        self.assertEqual(LinkStatus.UNREACHABLE, "unreachable")
-
-    def test_has_requires_auth(self):
-        self.assertEqual(LinkStatus.REQUIRES_AUTH, "requires_auth")
+    def test_has_external(self):
+        self.assertEqual(LinkStatus.EXTERNAL, "external")
 
     def test_has_local_found(self):
         self.assertEqual(LinkStatus.LOCAL_FOUND, "local_found")
@@ -70,34 +63,31 @@ class TestLinkStatus(unittest.TestCase):
     def test_has_local_missing(self):
         self.assertEqual(LinkStatus.LOCAL_MISSING, "local_missing")
 
-    def test_all_five_values(self):
+    def test_all_values(self):
         values = {s.value for s in LinkStatus}
-        self.assertEqual(
-            values,
-            {"reachable", "unreachable", "requires_auth", "local_found", "local_missing"},
-        )
+        self.assertEqual(values, {"external", "local_found", "local_missing"})
 
 
 class TestLinkExpansionResult(unittest.TestCase):
     def test_is_dataclass_with_required_fields(self):
-        result = LinkExpansionResult(url="https://example.com", status=LinkStatus.REACHABLE)
+        result = LinkExpansionResult(url="https://example.com", status=LinkStatus.EXTERNAL)
         self.assertEqual(result.url, "https://example.com")
-        self.assertEqual(result.status, LinkStatus.REACHABLE)
+        self.assertEqual(result.status, LinkStatus.EXTERNAL)
 
     def test_content_preview_defaults_to_empty_string(self):
-        result = LinkExpansionResult(url="x", status=LinkStatus.UNREACHABLE)
+        result = LinkExpansionResult(url="x", status=LinkStatus.EXTERNAL)
         self.assertEqual(result.content_preview, "")
 
     def test_error_defaults_to_empty_string(self):
-        result = LinkExpansionResult(url="x", status=LinkStatus.UNREACHABLE)
+        result = LinkExpansionResult(url="x", status=LinkStatus.EXTERNAL)
         self.assertEqual(result.error, "")
 
     def test_can_set_content_preview(self):
-        result = LinkExpansionResult(url="x", status=LinkStatus.REACHABLE, content_preview="hello")
+        result = LinkExpansionResult(url="x", status=LinkStatus.LOCAL_FOUND, content_preview="hello")
         self.assertEqual(result.content_preview, "hello")
 
     def test_can_set_error(self):
-        result = LinkExpansionResult(url="x", status=LinkStatus.UNREACHABLE, error="timeout")
+        result = LinkExpansionResult(url="x", status=LinkStatus.LOCAL_MISSING, error="timeout")
         self.assertEqual(result.error, "timeout")
 
 
@@ -193,116 +183,31 @@ class TestExpandLinksLocalFiles(unittest.TestCase):
 
 
 class TestExpandLinksURLs(unittest.TestCase):
-    def test_url_with_fetch_disabled(self):
-        results = expand_links("See https://example.com", fetch_urls=False)
-        self.assertEqual(len(results), 1)
-        self.assertEqual(results[0].status, LinkStatus.UNREACHABLE)
-
-    def test_url_fetch_disabled_error_message(self):
-        results = expand_links("See https://example.com", fetch_urls=False)
-        self.assertIn("disabled", results[0].error.lower())
-
-    def test_url_fetch_disabled_url_field(self):
-        results = expand_links("See https://example.com", fetch_urls=False)
-        self.assertEqual(results[0].url, "https://example.com")
-
-    @patch("tools.workflow_cli.link_expander._http_get")
-    @patch("tools.workflow_cli.link_expander._resolve_pinned_ip", return_value="93.184.216.34")
-    def test_url_reachable(self, _mock_ip, mock_get):
-        mock_get.return_value = (200, b"<html>Hello</html>", None)
-        results = expand_links("See https://example.com", fetch_urls=True)
-        self.assertEqual(results[0].status, LinkStatus.REACHABLE)
-        self.assertIn("Hello", results[0].content_preview)
-
-    @patch("tools.workflow_cli.link_expander._http_get")
-    @patch("tools.workflow_cli.link_expander._resolve_pinned_ip", return_value="93.184.216.34")
-    def test_url_network_error_sets_unreachable(self, _mock_ip, mock_get):
-        mock_get.side_effect = Exception("Connection refused")
-        results = expand_links("See https://example.com", fetch_urls=True)
-        self.assertEqual(results[0].status, LinkStatus.UNREACHABLE)
-        self.assertIn("Connection refused", results[0].error)
-
-    @patch("tools.workflow_cli.link_expander._http_get")
-    @patch("tools.workflow_cli.link_expander._resolve_pinned_ip", return_value="93.184.216.34")
-    def test_url_401_sets_requires_auth(self, _mock_ip, mock_get):
-        mock_get.return_value = (401, b"", None)
-        results = expand_links("See https://example.com", fetch_urls=True)
-        self.assertEqual(results[0].status, LinkStatus.REQUIRES_AUTH)
-
-    @patch("tools.workflow_cli.link_expander._http_get")
-    @patch("tools.workflow_cli.link_expander._resolve_pinned_ip", return_value="93.184.216.34")
-    def test_url_403_sets_requires_auth(self, _mock_ip, mock_get):
-        mock_get.return_value = (403, b"", None)
-        results = expand_links("See https://example.com", fetch_urls=True)
-        self.assertEqual(results[0].status, LinkStatus.REQUIRES_AUTH)
-
-    @patch("tools.workflow_cli.link_expander._http_get")
-    @patch("tools.workflow_cli.link_expander._resolve_pinned_ip", return_value="93.184.216.34")
-    def test_url_404_sets_unreachable(self, _mock_ip, mock_get):
-        mock_get.return_value = (404, b"", None)
-        results = expand_links("See https://example.com", fetch_urls=True)
-        self.assertEqual(results[0].status, LinkStatus.UNREACHABLE)
-
-    @patch("tools.workflow_cli.link_expander._http_get")
-    @patch("tools.workflow_cli.link_expander._resolve_pinned_ip")
-    def test_redirect_to_internal_is_blocked(self, mock_ip, mock_get):
-        # A public URL 302-ing to an internal host must be refused: every
-        # redirect hop is re-validated, so the pinned IP cannot be bypassed.
-        mock_ip.side_effect = lambda host: None if host == "evil.internal" else "93.184.216.34"
-        mock_get.return_value = (302, b"", "http://evil.internal/secret")
-        results = expand_links("See https://example.com", fetch_urls=True)
-        self.assertEqual(results[0].status, LinkStatus.UNREACHABLE)
-        self.assertIn("blocked", results[0].error.lower())
-
-    @patch("tools.workflow_cli.link_expander._http_get")
-    @patch("tools.workflow_cli.link_expander._resolve_pinned_ip", return_value="93.184.216.34")
-    def test_redirect_followed_to_reachable(self, _mock_ip, mock_get):
-        mock_get.side_effect = [
-            (302, b"", "https://example.com/final"),
-            (200, b"<html>Final</html>", None),
-        ]
-        results = expand_links("See https://example.com", fetch_urls=True)
-        self.assertEqual(results[0].status, LinkStatus.REACHABLE)
-        self.assertIn("Final", results[0].content_preview)
-
-    @patch("tools.workflow_cli.link_expander._http_get")
-    @patch("tools.workflow_cli.link_expander._resolve_pinned_ip", return_value="93.184.216.34")
-    def test_too_many_redirects_sets_unreachable(self, _mock_ip, mock_get):
-        mock_get.return_value = (302, b"", "https://example.com/loop")
-        results = expand_links("See https://example.com", fetch_urls=True)
-        self.assertEqual(results[0].status, LinkStatus.UNREACHABLE)
-        self.assertIn("redirect", results[0].error.lower())
-
-    def test_url_fetch_default_is_disabled(self):
+    def test_url_recorded_as_external(self):
         results = expand_links("See https://example.com")
-        self.assertEqual(results[0].status, LinkStatus.UNREACHABLE)
-        self.assertIn("disabled", results[0].error.lower())
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0].status, LinkStatus.EXTERNAL)
 
-    @patch("tools.workflow_cli.link_expander.getaddrinfo")
-    def test_ssrf_metadata_endpoint_blocked(self, mock_getaddrinfo):
-        # 169.254.169.254 is a link-local (cloud metadata) address.
-        mock_getaddrinfo.return_value = [
-            (0, 0, 0, "", ("169.254.169.254", 0)),
-        ]
-        results = expand_links("See http://169.254.169.254/latest/meta-data/", fetch_urls=True)
-        self.assertEqual(results[0].status, LinkStatus.UNREACHABLE)
-        self.assertIn("blocked", results[0].error.lower())
+    def test_url_field_preserved(self):
+        results = expand_links("See https://example.com/spec")
+        self.assertEqual(results[0].url, "https://example.com/spec")
 
-    @patch("tools.workflow_cli.link_expander.getaddrinfo")
-    def test_ssrf_loopback_blocked(self, mock_getaddrinfo):
-        mock_getaddrinfo.return_value = [(0, 0, 0, "", ("127.0.0.1", 0))]
-        results = expand_links("See http://localhost:8080/admin", fetch_urls=True)
-        self.assertEqual(results[0].status, LinkStatus.UNREACHABLE)
-        self.assertIn("blocked", results[0].error.lower())
+    def test_url_not_fetched_no_preview(self):
+        # r2p must never make an outbound request for a URL in requirement text,
+        # so an external link carries no fetched preview and no network error.
+        results = expand_links("See http://169.254.169.254/latest/meta-data/")
+        self.assertEqual(results[0].status, LinkStatus.EXTERNAL)
+        self.assertEqual(results[0].content_preview, "")
+        self.assertEqual(results[0].error, "")
 
 
 class TestExpandLinksEdgeCases(unittest.TestCase):
     def test_empty_text_returns_empty_list(self):
-        results = expand_links("", fetch_urls=False)
+        results = expand_links("")
         self.assertEqual(results, [])
 
     def test_no_links_returns_empty_list(self):
-        results = expand_links("just plain text here", fetch_urls=False)
+        results = expand_links("just plain text here")
         self.assertEqual(results, [])
 
     def test_mixed_local_and_url(self):
@@ -312,11 +217,10 @@ class TestExpandLinksEdgeCases(unittest.TestCase):
             results = expand_links(
                 f"See ./doc.md and https://example.com",
                 base_path=Path(tmp),
-                fetch_urls=False,
             )
             statuses = {r.url: r.status for r in results}
             self.assertEqual(statuses["./doc.md"], LinkStatus.LOCAL_FOUND)
-            self.assertEqual(statuses["https://example.com"], LinkStatus.UNREACHABLE)
+            self.assertEqual(statuses["https://example.com"], LinkStatus.EXTERNAL)
 
 
 if __name__ == "__main__":

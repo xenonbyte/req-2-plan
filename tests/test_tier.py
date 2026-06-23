@@ -174,19 +174,22 @@ class TestComputeFloor(unittest.TestCase):
         floor = compute_floor({}, repo, [], "")
         self.assertIn(TierModifier.CROSS_PROJECT, floor.modifiers)
 
-    def test_unreachable_link_gives_standard(self):
+    def test_external_url_link_gives_standard(self):
+        # An external http(s) reference in the requirement bumps the floor to
+        # STANDARD: the requirement reaches outside the repo for context.
         link_results = [
-            LinkExpansionResult(url="https://example.com/spec", status=LinkStatus.UNREACHABLE, error="timeout")
+            LinkExpansionResult(url="https://example.com/spec", status=LinkStatus.EXTERNAL)
         ]
         floor = compute_floor({}, RepoBaseline(), link_results, "")
         self.assertEqual(floor.base, TierBase.STANDARD)
 
-    def test_requires_auth_link_gives_standard(self):
+    def test_local_link_alone_does_not_give_standard(self):
+        # A resolved local link is in-repo context and must not raise the floor.
         link_results = [
-            LinkExpansionResult(url="https://private.example.com/doc", status=LinkStatus.REQUIRES_AUTH)
+            LinkExpansionResult(url="docs/spec.md", status=LinkStatus.LOCAL_FOUND, content_preview="x")
         ]
         floor = compute_floor({}, RepoBaseline(), link_results, "")
-        self.assertEqual(floor.base, TierBase.STANDARD)
+        self.assertEqual(floor.base, TierBase.LIGHT)
 
     def test_multiple_modifiers(self):
         hits = {
@@ -254,13 +257,13 @@ class TestBuildEvidenceBlock(unittest.TestCase):
         floor = self._make_floor()
         link_results = [
             LinkExpansionResult(
-                url="https://example.com",
-                status=LinkStatus.REACHABLE,
+                url="docs/spec.md",
+                status=LinkStatus.LOCAL_FOUND,
                 content_preview="some spec content",
             )
         ]
         ev = build_evidence_block({}, RepoBaseline(), link_results, floor)
-        self.assertIn("https://example.com", ev.linked_context)
+        self.assertIn("docs/spec.md", ev.linked_context)
 
     def test_scope_signals_extracted(self):
         hits = {TierModifier.SCOPE_EXPANDING: ["entire", "all of"]}
@@ -330,7 +333,7 @@ class TestEstimateTier(unittest.TestCase):
 
     def test_link_results_passed_through(self):
         link_results = [
-            LinkExpansionResult(url="https://example.com/spec", status=LinkStatus.UNREACHABLE, error="timeout")
+            LinkExpansionResult(url="https://example.com/spec", status=LinkStatus.EXTERNAL)
         ]
         floor, ev = estimate_tier("add a feature", link_results=link_results)
         self.assertEqual(floor.base, TierBase.STANDARD)

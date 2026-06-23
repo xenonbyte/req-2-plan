@@ -231,8 +231,8 @@ def _cmd_run_start(args):
     link_results = []
     if repo_path is not None:
         from tools.workflow_cli.link_expander import expand_links
-        # Local relative links expand; HTTP is recorded as not-expanded (needs confirmation).
-        link_results = expand_links(requirement, base_path=repo_path, fetch_urls=False)
+        # Local relative links expand; HTTP URLs are recorded as external references only.
+        link_results = expand_links(requirement, base_path=repo_path)
 
     # Tier estimation
     tier_estimate, evidence = estimate_tier(requirement, repo_path=repo_path, link_results=link_results)

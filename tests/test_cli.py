@@ -2876,7 +2876,7 @@ class TestRunStartBuildsContextPack:
         assert "docs/context.md" in intake
         assert "local architecture note" in intake
         assert "https://example.com/spec" in intake
-        assert "URL fetching disabled" in intake
+        assert "external" in intake
 
     def test_run_start_with_http_link_uses_link_results_for_tier(self, tmp_path):
         from tools.workflow_cli.cli import main
