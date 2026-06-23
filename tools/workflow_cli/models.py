@@ -31,6 +31,7 @@ class RunStatus(str, Enum):
     CHECKPOINT_APPROVED = "checkpoint_approved"
     NEXT_STAGE = "next_stage"
     CLOSED_AT_PLAN_CHECKPOINT = "closed_at_plan_checkpoint"
+    ARCHIVED = "archived"       # terminal: requirement directory archived
 
 
 class Stage(str, Enum):
@@ -148,7 +149,8 @@ ALLOWED_TRANSITIONS: dict[RunStatus, set[RunStatus]] = {
         RunStatus.ACTIVE_STAGE_DRAFT,
         RunStatus.ENTRY_GATE_FAILED,
     },
-    RunStatus.CLOSED_AT_PLAN_CHECKPOINT: set(),
+    RunStatus.CLOSED_AT_PLAN_CHECKPOINT: {RunStatus.ARCHIVED},
+    RunStatus.ARCHIVED: set(),
 }
 
 
@@ -268,8 +270,12 @@ ALLOWED_COMMANDS_BY_RUN_STATE: dict[RunStatus, set[str]] = {
     },
     RunStatus.CLOSED_AT_PLAN_CHECKPOINT: {
         "CMD-RUN-REOPEN",
+        "CMD-RUN-ARCHIVE",
         "CMD-TIER-STATUS",
     },
+    # ARCHIVED is terminal: only the always-allowed read-only commands
+    # (see READ_ONLY_COMMANDS) remain reachable.
+    RunStatus.ARCHIVED: set(),
 }
 
 

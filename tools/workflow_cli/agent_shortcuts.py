@@ -158,7 +158,7 @@ def generate_work_id(
 
 
 def is_terminal(status: RunStatus) -> bool:
-    return status == RunStatus.CLOSED_AT_PLAN_CHECKPOINT
+    return status in (RunStatus.CLOSED_AT_PLAN_CHECKPOINT, RunStatus.ARCHIVED)
 
 
 # ---------------------------------------------------------------------------

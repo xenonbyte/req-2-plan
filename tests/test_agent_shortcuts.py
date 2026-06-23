@@ -1400,3 +1400,15 @@ class TestCheckpointAmbiguityGuidance(unittest.TestCase):
         out = self._emit_subagent_review_output()
         self.assertIn("needs_subagent_review", out)
         self.assertIn("ambiguity", out.lower())
+
+
+class TestIsTerminalArchived(unittest.TestCase):
+    def test_archived_is_terminal(self):
+        from tools.workflow_cli.agent_shortcuts import is_terminal
+        from tools.workflow_cli.models import RunStatus
+        self.assertTrue(is_terminal(RunStatus.ARCHIVED))
+
+    def test_closed_is_terminal(self):
+        from tools.workflow_cli.agent_shortcuts import is_terminal
+        from tools.workflow_cli.models import RunStatus
+        self.assertTrue(is_terminal(RunStatus.CLOSED_AT_PLAN_CHECKPOINT))
