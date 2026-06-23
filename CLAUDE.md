@@ -38,6 +38,7 @@
 | `tools/workflow_cli/stage_schema.py` | STAGE_SCHEMA required headings per stage × tier; PLAN_TASK_FIELDS |
 | `tools/workflow_cli/stage_templates.py` | Render STAGE_SCHEMA into per-stage/tier seed templates |
 | `tools/workflow_cli/markdown.py` | Fence-aware Markdown helpers: unfenced lines, read-only strip, heading blocks |
+| `tools/workflow_cli/atomic.py` | atomic_write_text: unique-temp + O_NOFOLLOW/O_EXCL then os.replace (used by state/artifact/pointer writes) |
 | `tools/workflow_cli/trace.py` | Derived trace model: SPEC consumption, scope/risk closure, scope-out violations |
 | `tools/workflow_cli/gates.py` | check_entry_gate, check_quality_gate, check_forced_subagent_review |
 | `tools/workflow_cli/output.py` | Exit code constants, format_success/error/gate_result, is_json_mode |

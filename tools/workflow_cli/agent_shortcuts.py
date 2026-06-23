@@ -14,6 +14,7 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+from tools.workflow_cli.atomic import atomic_write_text
 from tools.workflow_cli.models import RunStatus, WorkId
 from tools.workflow_cli.output import EXIT_CONFLICT
 
@@ -53,9 +54,7 @@ def write_active_pointer(base_path: Path, work_id: str, reason: str = "workflow_
         f"updated_at: {updated_at}\n"
         f"reason: {reason}\n"
     )
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(content, encoding="utf-8")
-    tmp.replace(path)
+    atomic_write_text(path, content)
 
 
 def _validate_work_id(raw: str) -> str:

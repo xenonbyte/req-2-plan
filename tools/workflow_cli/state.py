@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+from tools.workflow_cli.atomic import atomic_write_text
 from tools.workflow_cli.models import (
     ActiveArtifact,
     BundleAuthorization,
@@ -605,10 +606,8 @@ class RunStateManager:
         self.run_dir.mkdir(parents=True, exist_ok=True)
         text = run_record_to_markdown(record)
         # Atomic write: a crash mid-write must not leave a truncated run.md that
-        # bricks the run. Write a sibling temp file then atomically replace.
-        tmp = self.run_path.with_name(self.run_path.name + ".tmp")
-        tmp.write_text(text, encoding="utf-8")
-        tmp.replace(self.run_path)
+        # bricks the run. Write a unique sibling temp then atomically replace.
+        atomic_write_text(self.run_path, text)
 
     def load(self) -> RunRecord:
         if not self.run_path.exists():

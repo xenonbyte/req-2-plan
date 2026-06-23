@@ -9,6 +9,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from pathlib import Path
 
+from tools.workflow_cli.atomic import atomic_write_text
 from tools.workflow_cli.models import Stage, STAGE_ARTIFACT_MAP
 
 
@@ -99,10 +100,8 @@ def write_artifact(
         created_at = fm.get("r2p_created_at", now)
     full_text = _frontmatter(stage, version, status, created_at, now) + content
     # Atomic write: a crash mid-write must not leave a truncated artifact that
-    # fails to parse on the next load. Write a sibling temp file then replace.
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(full_text, encoding="utf-8")
-    tmp.replace(path)
+    # fails to parse on the next load. Write a unique sibling temp then replace.
+    atomic_write_text(path, full_text)
     return path
 
 
@@ -229,6 +228,4 @@ class ArtifactManager:
             f"r2p_replaced_by: {replaced_by}\n"
             f"---\n\n"
         ) + body
-        tmp = path.with_name(path.name + ".tmp")
-        tmp.write_text(content, encoding="utf-8")
-        tmp.replace(path)
+        atomic_write_text(path, content)
