@@ -525,7 +525,7 @@ def _cmd_run_archive(args):
         print_and_exit(
             format_error(
                 f"Cannot archive run in status {record.status.value!r}; "
-                "must be closed_at_plan_checkpoint",
+                "must be closed_at_plan_checkpoint or executing",
                 exit_code=EXIT_CONFLICT,
             ),
             EXIT_CONFLICT,
