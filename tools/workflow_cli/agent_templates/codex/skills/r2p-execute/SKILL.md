@@ -11,7 +11,7 @@ Execute each PLAN-TASK on the **current branch** using a fresh implementer subag
 
 ## Precondition Gate
 
-Run `{{R2P_BIN_DIR}}/r2p-execute-start` and check the status.
+Run `{{R2P_BIN_DIR}}/r2p-execute` and read its stop output. On a `closed_at_plan_checkpoint` run it transitions the run to `executing` (via the `run-execute-start` CLI command) and stops with `execute_plan`; on an already-`executing` run it stops with `resume_execution`; on any other status it stops with `plan_not_ready`.
 
 - If the run status is `closed_at_plan_checkpoint` (first execution): the command transitions it to `executing` and returns the plan path.
 - If the run status is already `executing` (resume after interruption): proceed directly to the plan path.
