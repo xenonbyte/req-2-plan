@@ -1282,6 +1282,33 @@ class TestSeedForStage:
         assert "Project Context" in seed
         assert "'Python'" in seed
 
+    def test_seed_strips_readonly_blocks_carried_by_upstream(self):
+        # An upstream artifact persists the read-only blocks it was seeded with
+        # (nothing strips them at store time). When that artifact becomes the
+        # next stage's upstream summary, those blocks must be stripped so the
+        # freshly injected ones are not duplicated/accumulated.
+        from tools.workflow_cli.agent_shortcuts import _seed_for_stage
+        from tools.workflow_cli.models import Stage, TierBase, TierEstimate
+        tier = TierEstimate(base=TierBase.LIGHT, modifiers=frozenset())
+        upstream = (
+            "# spec v1\n\n## Spec Summary\nreal spec content\n"
+            "\n## Upstream Summary (read-only)\nstale design echo\n"
+            "<!-- /r2p-read-only -->\n"
+            "\n## Project Context (read-only)\nstale pack echo\n"
+            "<!-- /r2p-read-only -->\n"
+        )
+        seed = _seed_for_stage(
+            Stage.PLAN, tier, upstream_summary=upstream, context_summary="fresh pack"
+        )
+        # Exactly one of each read-only heading: the freshly injected wrappers.
+        assert seed.count("## Project Context (read-only)") == 1
+        assert seed.count("## Upstream Summary (read-only)") == 1
+        # The upstream's real content survives; its carried read-only echoes don't.
+        assert "real spec content" in seed
+        assert "fresh pack" in seed
+        assert "stale design echo" not in seed
+        assert "stale pack echo" not in seed
+
 
 class TestRunStartArgs:
     def test_repo_path_is_forwarded_to_run_start(self):

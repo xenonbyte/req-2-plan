@@ -239,12 +239,18 @@ def _prev_stage(stage):
 def _seed_for_stage(stage, tier, upstream_summary: str = "", context_summary: str = "") -> str:
     """Build the seed text for a stage content file: template + upstream summary + context pack."""
     from tools.workflow_cli.stage_templates import template_for
+    from tools.workflow_cli.markdown import strip_readonly_sections
     base = tier.base if tier is not None else None
     text = template_for(stage, base) if base is not None else ""
-    if upstream_summary.strip():
+    # Upstream artifacts persist the read-only blocks they were seeded with
+    # (nothing strips them at store time). Strip them here, like every other
+    # consumer (gates/trace), so the freshly injected Upstream Summary / Project
+    # Context wrappers below are not duplicated or accumulated across stages.
+    upstream_summary = strip_readonly_sections(upstream_summary).strip()
+    if upstream_summary:
         text += (
             "\n## Upstream Summary (read-only)\n"
-            + upstream_summary.strip()
+            + upstream_summary
             + "\n<!-- /r2p-read-only -->\n"
         )
     if context_summary.strip():
