@@ -1448,3 +1448,65 @@ class TestIsTerminalExecuting(unittest.TestCase):
         from tools.workflow_cli.agent_shortcuts import is_terminal
         from tools.workflow_cli.models import RunStatus
         self.assertFalse(is_terminal(RunStatus.EXECUTING))
+
+
+class TestExecuteShortcutAndRouting(unittest.TestCase):
+    def _run(self, base, wid_str, status):
+        from tools.workflow_cli.state import RunStateManager, create_run_record
+        from tools.workflow_cli.models import RunStatus, Stage, WorkId
+        from tools.workflow_cli.artifact import write_artifact
+        wid = WorkId(wid_str)
+        run_dir = base / ".req-to-plan" / wid_str
+        run_dir.mkdir(parents=True)
+        rec = create_run_record(wid)
+        rec.status = status
+        rec.current_stage = Stage.CLOSED if status != RunStatus.ACTIVE_STAGE_DRAFT else Stage.RAW_REQUIREMENT
+        write_artifact(run_dir, Stage.PLAN, "# Plan\n\n## Tasks\n### PLAN-TASK-001: t\n", version=1, status="approved")
+        RunStateManager(run_dir).save(rec)
+        from tools.workflow_cli import agent_shortcuts as ash
+        ash.write_active_pointer(base, wid_str, reason="test")
+        return run_dir
+
+    def _capture(self, fn, *a):
+        import io, contextlib
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            with self.assertRaises(SystemExit) as cm:
+                fn(*a)
+        return buf.getvalue(), cm.exception.code
+
+    def test_execute_on_closed_starts_and_prints_execute_plan(self):
+        import tempfile, argparse
+        from pathlib import Path
+        from tools.workflow_cli import agent_shortcuts as ash
+        from tools.workflow_cli.models import RunStatus
+        from tools.workflow_cli.state import RunStateManager
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            run_dir = self._run(base, "WF-20260101-exec", RunStatus.CLOSED_AT_PLAN_CHECKPOINT)
+            out, code = self._capture(ash._cmd_execute, argparse.Namespace(work_id="WF-20260101-exec"), base)
+            self.assertEqual(code, 0)
+            self.assertIn("stop: execute_plan", out)
+            self.assertEqual(RunStateManager(run_dir).load().status, RunStatus.EXECUTING)
+
+    def test_execute_on_executing_prints_resume(self):
+        import tempfile, argparse
+        from pathlib import Path
+        from tools.workflow_cli import agent_shortcuts as ash
+        from tools.workflow_cli.models import RunStatus
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            self._run(base, "WF-20260101-exec", RunStatus.EXECUTING)
+            out, code = self._capture(ash._cmd_execute, argparse.Namespace(work_id="WF-20260101-exec"), base)
+            self.assertIn("stop: resume_execution", out)
+
+    def test_continue_routes_executing_to_resume(self):
+        import tempfile, argparse
+        from pathlib import Path
+        from tools.workflow_cli import agent_shortcuts as ash
+        from tools.workflow_cli.models import RunStatus
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            self._run(base, "WF-20260101-exec", RunStatus.EXECUTING)
+            out, _ = self._capture(ash._cmd_continue, argparse.Namespace(), base)
+            self.assertIn("resume_execution", out)

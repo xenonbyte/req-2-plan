@@ -3048,3 +3048,22 @@ class TestRunExecuteStart:
             with pytest.raises(SystemExit) as exc:
                 main(["--base-path", str(base), "run-execute-start", "--work-id", "WF-20260101-open"])
             assert exc.value.code == 6  # EXIT_CONFLICT
+
+
+class TestRunArchiveFromExecuting:
+    def test_archive_executing_run(self):
+        from tools.workflow_cli.state import RunStateManager, create_run_record
+        from tools.workflow_cli.models import RunStatus, Stage, WorkId
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            wid = WorkId("WF-20260101-exec")
+            run_dir = base / ".req-to-plan" / "WF-20260101-exec"
+            run_dir.mkdir(parents=True)
+            rec = create_run_record(wid)
+            rec.status = RunStatus.EXECUTING
+            rec.current_stage = Stage.CLOSED
+            RunStateManager(run_dir).save(rec)
+            with pytest.raises(SystemExit) as exc:
+                main(["--base-path", str(base), "run-archive", "--work-id", "WF-20260101-exec"])
+            assert exc.value.code == 0
+            assert (base / ".req-to-plan" / "archive" / "WF-20260101-exec" / "run.md").exists()

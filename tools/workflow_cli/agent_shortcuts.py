@@ -477,9 +477,25 @@ def _cmd_continue(ns: argparse.Namespace, base_path: Path) -> None:
         s = record.status
         stage = record.current_stage.value
 
+        if s == RunStatus.EXECUTING:
+            ledger = run_path.parent / "execution" / "progress.md"
+            print(
+                "stop: resume_execution\n"
+                f"work_id: {work_id}\n"
+                f"ledger: {ledger}\n"
+                "next: resume the r2p-execute loop from the first unchecked task\n"
+            )
+            sys.exit(0)
+
+        if s == RunStatus.ARCHIVED:
+            print(f"done: archived\nwork_id: {work_id}\n")
+            sys.exit(0)
+
         if s == RunStatus.CLOSED_AT_PLAN_CHECKPOINT:
             print(f"done: run_closed\nwork_id: {work_id}\nplan: 07-plan.md\n"
-                  "next: hand the PLAN to your executor\n")
+                  "next: hand the PLAN to your executor\n"
+                  f"to implement: r2p-execute --work-id {work_id}\n"
+                  f"to archive: r2p-archive --work-id {work_id}\n")
             sys.exit(0)
 
         if s == RunStatus.ACTIVE_STAGE_DRAFT:
@@ -731,6 +747,53 @@ def _cmd_archive(ns: argparse.Namespace, base_path: Path) -> None:
     sys.exit(0)
 
 
+def _cmd_execute(ns: argparse.Namespace, base_path: Path) -> None:
+    work_id = ns.work_id
+    if not work_id:
+        pointer = read_active_pointer(base_path)
+        if not pointer:
+            print("no_selected_run: true\nnext: r2p-execute --work-id <id>\n")
+            sys.exit(1)
+        work_id = pointer["selected_work_id"]
+    work_id = _validate_work_id(work_id)
+    run_path = base_path / ".req-to-plan" / work_id / "run.md"
+    if not run_path.exists():
+        print(f"blocked: source_run_not_found\nwork_id: {work_id}\n")
+        sys.exit(7)
+
+    from tools.workflow_cli.state import RunStateManager
+    record = RunStateManager(run_path.parent).load()
+    ledger = run_path.parent / "execution" / "progress.md"
+
+    if record.status == RunStatus.CLOSED_AT_PLAN_CHECKPOINT:
+        code = _run_cli(["run-execute-start", "--work-id", work_id], base_path)
+        if code != 0:
+            sys.exit(code)
+        print(
+            "stop: execute_plan\n"
+            f"work_id: {work_id}\n"
+            "plan: 07-plan.md\n"
+            f"ledger: {ledger}\n"
+            "next: drive the r2p-execute skill (subagent-driven SDD loop) to "
+            "implement each PLAN-TASK in place on the current branch, then "
+            "r2p-archive when done\n"
+        )
+        sys.exit(0)
+
+    if record.status == RunStatus.EXECUTING:
+        print(
+            "stop: resume_execution\n"
+            f"work_id: {work_id}\n"
+            f"ledger: {ledger}\n"
+            "next: resume the r2p-execute loop from the first unchecked task in "
+            "the ledger\n"
+        )
+        sys.exit(0)
+
+    print(f"blocked: plan_not_ready\nwork_id: {work_id}\nstatus: {record.status.value}\nnext: r2p-continue\n")
+    sys.exit(EXIT_CONFLICT)
+
+
 def _cmd_gap_open(ns: argparse.Namespace, base_path: Path) -> None:
     work_id = _validate_work_id(ns.work_id)
     args = [
@@ -838,6 +901,9 @@ def _build_parser() -> argparse.ArgumentParser:
     p_gap_resolve.add_argument("--route-id", dest="route_id", required=True)
     p_gap_resolve.add_argument("--confirm", action="store_true")
 
+    p_execute = sub.add_parser("execute")
+    p_execute.add_argument("--work-id", dest="work_id", default=None)
+
     return parser
 
 
@@ -862,6 +928,7 @@ def main(args: list[str] | None = None, base_path: Path | None = None) -> None:
         "tier-lock": _cmd_tier_lock,
         "gap-open": _cmd_gap_open,
         "gap-resolve": _cmd_gap_resolve,
+        "execute": _cmd_execute,
     }
     handlers[ns.subcommand](ns, bp)
     sys.exit(0)
