@@ -1412,3 +1412,32 @@ class TestIsTerminalArchived(unittest.TestCase):
         from tools.workflow_cli.agent_shortcuts import is_terminal
         from tools.workflow_cli.models import RunStatus
         self.assertTrue(is_terminal(RunStatus.CLOSED_AT_PLAN_CHECKPOINT))
+
+
+class TestArchiveShortcut(unittest.TestCase):
+    def _closed_run(self, base, wid_str):
+        from tools.workflow_cli.state import RunStateManager, create_run_record
+        from tools.workflow_cli.models import RunStatus, Stage, WorkId
+        wid = WorkId(wid_str)
+        run_dir = base / ".req-to-plan" / wid_str
+        run_dir.mkdir(parents=True)
+        rec = create_run_record(wid)
+        rec.status = RunStatus.CLOSED_AT_PLAN_CHECKPOINT
+        rec.current_stage = Stage.CLOSED
+        RunStateManager(run_dir).save(rec)
+
+    def test_archive_clears_pointer_when_pointing_at_archived_run(self):
+        import argparse
+        import tempfile
+        from pathlib import Path
+        from tools.workflow_cli import agent_shortcuts as ash
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            self._closed_run(base, "WF-20260101-arch")
+            ash.write_active_pointer(base, "WF-20260101-arch", reason="test")
+            ns = argparse.Namespace(work_id="WF-20260101-arch")
+            with self.assertRaises(SystemExit) as cm:
+                ash._cmd_archive(ns, base)
+            self.assertEqual(cm.exception.code, 0)
+            self.assertFalse(ash._pointer_path(base).exists())
+            self.assertTrue((base / ".req-to-plan" / "archive" / "WF-20260101-arch" / "run.md").exists())

@@ -712,6 +712,25 @@ def _cmd_reopen(ns: argparse.Namespace, base_path: Path) -> None:
     sys.exit(exit_code)
 
 
+def _cmd_archive(ns: argparse.Namespace, base_path: Path) -> None:
+    work_id = ns.work_id
+    if not work_id:
+        pointer = read_active_pointer(base_path)
+        if not pointer:
+            print("no_selected_run: true\nnext: r2p-archive --work-id <id>\n")
+            sys.exit(1)
+        work_id = pointer["selected_work_id"]
+    work_id = _validate_work_id(work_id)
+    exit_code = _run_cli(["run-archive", "--work-id", work_id], base_path)
+    if exit_code != 0:
+        sys.exit(exit_code)
+    pointer = read_active_pointer(base_path)
+    if pointer and pointer.get("selected_work_id") == work_id:
+        _pointer_path(base_path).unlink(missing_ok=True)
+    print(f"archived: {work_id}\nnext: r2p-status --all\n")
+    sys.exit(0)
+
+
 def _cmd_gap_open(ns: argparse.Namespace, base_path: Path) -> None:
     work_id = _validate_work_id(ns.work_id)
     args = [
@@ -798,6 +817,9 @@ def _build_parser() -> argparse.ArgumentParser:
     p_reopen.add_argument("--stage", required=True)
     p_reopen.add_argument("--reason", required=True)
 
+    p_archive = sub.add_parser("archive")
+    p_archive.add_argument("--work-id", dest="work_id", default=None)
+
     p_tier_lock = sub.add_parser("tier-lock")
     p_tier_lock.add_argument("--work-id", dest="work_id", required=True)
     p_tier_lock.add_argument("--base", required=True, choices=["light", "standard"])
@@ -836,6 +858,7 @@ def main(args: list[str] | None = None, base_path: Path | None = None) -> None:
         "status": _cmd_status,
         "switch": _cmd_switch,
         "reopen": _cmd_reopen,
+        "archive": _cmd_archive,
         "tier-lock": _cmd_tier_lock,
         "gap-open": _cmd_gap_open,
         "gap-resolve": _cmd_gap_resolve,
