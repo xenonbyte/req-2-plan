@@ -1,4 +1,4 @@
 name = "r2p-continue"
-description = "Continue the active requirement-to-PLAN workflow run"
+description = "Continue the active requirement-to-PLAN workflow run. At checkpoints, only approve DESIGN/SPEC/PLAN artifacts with no unresolved ambiguity or undecided point."
 command = "{{R2P_BIN_DIR}}/r2p-continue"
 version = "{{R2P_VERSION}}"

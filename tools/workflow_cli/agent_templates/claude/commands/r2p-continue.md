@@ -10,6 +10,7 @@ Behavior:
 - Stops when human action is required: stage content generation, marking an artifact ready (`stage-ready`), Quality Gate failure or requested changes (repair), human checkpoint approval (`checkpoint-decide`), entry gate failure
 - Stops with `needs_subagent_review` on forced-review runs (a `migration`/`safety`/`cross_project` modifier at `design`/`spec`/`plan`) when the required review file is missing. You are authorized to run a read-only review subagent yourself for this step — no separate human approval is needed
 - Does NOT auto-mark artifacts ready and does NOT auto-approve checkpoints
+- At a checkpoint, only approve a DESIGN/SPEC/PLAN artifact that has no unresolved ambiguity or undecided point: resolve it by evidence, or route it (DESIGN: `### DECISION-NNN`; SPEC/PLAN: `r2p-gap-open`) before approving
 
 Call repeatedly until the output says `stop:` with a message indicating why the run paused. For `needs_content` and `needs_repair`, write the required artifact content into the printed `content_file`, then run the printed `next:` command exactly. For `needs_subagent_review`, run a review subagent to audit the stage artifact, write its findings to the printed `review_file`, then resume with `r2p-continue` (you do not need to ask for approval to spawn the review subagent). For other stops, run the printed `next:` command exactly. If an `alt:` command is shown, use it only when that alternate decision is intended. Resume with `r2p-continue` after completing that step.
 

@@ -35,5 +35,27 @@ class TestDocsHaveNoHardcodedTestCount(unittest.TestCase):
         )
 
 
+class TestAgentTemplateCheckpointGuidance(unittest.TestCase):
+    def test_continue_surfaces_include_ambiguity_checkpoint_rule(self):
+        surfaces = [
+            "tools/workflow_cli/agent_templates/claude/SKILL.md",
+            "tools/workflow_cli/agent_templates/claude/commands/r2p-continue.md",
+            "tools/workflow_cli/agent_templates/codex/skills/r2p-continue/SKILL.md",
+            "tools/workflow_cli/agent_templates/gemini/commands/r2p-continue.toml",
+        ]
+        required_terms = ("unresolved ambiguity", "undecided point")
+        missing = []
+        for rel in surfaces:
+            text = (REPO_ROOT / rel).read_text(encoding="utf-8")
+            if not all(term in text for term in required_terms):
+                missing.append(rel)
+        self.assertEqual(
+            missing, [],
+            "Every r2p-continue surface must tell agents not to approve "
+            "DESIGN/SPEC/PLAN checkpoints with unresolved ambiguity. Missing: "
+            + ", ".join(missing),
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
