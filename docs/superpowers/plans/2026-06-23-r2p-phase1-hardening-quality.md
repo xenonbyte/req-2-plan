@@ -119,13 +119,14 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 ### Task 2: PLAN `Verification` placeholder gate (R5.2c) + template
 
 **Files:**
-- Modify: `tools/workflow_cli/gates.py` — add `_check_plan_task_verification_placeholders` (next to `_check_plan_task_skeleton_placeholders` at `gates.py:612`) and wire it into the R5 block at `gates.py:996`.
+- Modify: `tools/workflow_cli/gates.py` — widen `_FILL_IN_PLACEHOLDER_RE` to match colon-qualified guidance comments, add `_check_plan_task_verification_placeholders` (next to `_check_plan_task_skeleton_placeholders` at `gates.py:612`), and wire it into the R5 block at `gates.py:996`.
 - Modify: `tools/workflow_cli/stage_templates.py:50` — keep a `fill in` token in the seeded `Verification` line + add an objective example.
 - Test: `tests/test_gates.py` (new `TestPlanTaskVerificationPlaceholder` class), `tests/test_stage_templates.py` (one new assertion).
 
 **Interfaces:**
 - Consumes: `_iter_plan_task_bodies(content)`, `_plan_task_field_body(body, field)`, `_plan_task_label(body)`, `_PLACEHOLDER_PATTERNS` — all already in `gates.py`.
 - Produces: `_check_plan_task_verification_placeholders(content: str) -> list[str]` — one issue per PLAN-TASK whose `Verification` body still matches a placeholder pattern. Wired so `check_quality_gate(..., Stage.PLAN, ...)` returns these in `result.issues`.
+- Updates: `_FILL_IN_PLACEHOLDER_RE` so both `<!-- fill in -->` and `<!-- fill in: ... -->` are treated as unresolved placeholders; this is required because the PLAN template keeps guidance text inside the seeded `Verification` placeholder.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -152,6 +153,14 @@ class TestPlanTaskVerificationPlaceholder(unittest.TestCase):
             _check_plan_task_verification_placeholders(self._task("<!-- fill in -->"))
         )
 
+    def test_fill_in_guidance_comment_is_flagged(self):
+        from tools.workflow_cli.gates import _check_plan_task_verification_placeholders
+        self.assertTrue(
+            _check_plan_task_verification_placeholders(
+                self._task("<!-- fill in: objective pass/fail check -->")
+            )
+        )
+
     def test_tbd_verification_is_flagged(self):
         from tools.workflow_cli.gates import _check_plan_task_verification_placeholders
         self.assertTrue(
@@ -163,6 +172,23 @@ class TestPlanTaskVerificationPlaceholder(unittest.TestCase):
         self.assertFalse(
             _check_plan_task_verification_placeholders(
                 self._task("`pytest tests/x.py::test_y` passes")
+            )
+        )
+
+    def test_quality_gate_reports_verification_placeholder_issue(self):
+        import tempfile
+        from pathlib import Path
+        from tools.workflow_cli.gates import check_quality_gate
+        from tools.workflow_cli.models import Stage, TierBase, TierEstimate
+        tier = TierEstimate(base=TierBase.LIGHT, modifiers=frozenset())
+        with tempfile.TemporaryDirectory() as tmp:
+            result = check_quality_gate(
+                Path(tmp), Stage.PLAN, tier, [], self._task("<!-- fill in -->")
+            )
+        self.assertTrue(
+            any(
+                "Verification contains an unresolved placeholder" in issue
+                for issue in result.issues
             )
         )
 ```
@@ -182,9 +208,21 @@ Append to `tests/test_stage_templates.py` (inside `TestStageTemplates`):
 - [ ] **Step 2: Run the tests to verify they fail**
 
 Run: `.venv/bin/python -m pytest tests/test_gates.py::TestPlanTaskVerificationPlaceholder tests/test_stage_templates.py::TestStageTemplates::test_plan_template_verification_is_a_placeholder_until_filled -v`
-Expected: FAIL with `ImportError`/`AttributeError: ... _check_plan_task_verification_placeholders` (function not defined yet).
+Expected: FAIL with `ImportError`/`AttributeError: ... _check_plan_task_verification_placeholders` (function not defined yet). After the helper exists but before the regex update, `test_fill_in_guidance_comment_is_flagged` still fails; that is the red test proving the template guidance placeholder stays blocked.
 
 - [ ] **Step 3: Implement the gate function + wiring**
+
+In `tools/workflow_cli/gates.py`, first widen `_FILL_IN_PLACEHOLDER_RE` (line 94) from:
+
+```python
+_FILL_IN_PLACEHOLDER_RE = re.compile(r"<!--\s*fill in\s*-->", re.IGNORECASE)
+```
+
+to:
+
+```python
+_FILL_IN_PLACEHOLDER_RE = re.compile(r"<!--\s*fill in(?:\s*:.*?)?\s*-->", re.IGNORECASE)
+```
 
 In `tools/workflow_cli/gates.py`, add directly after `_check_plan_task_skeleton_placeholders` (after line 621):
 
@@ -227,7 +265,7 @@ to:
 - [ ] **Step 5: Run the tests to verify they pass**
 
 Run: `.venv/bin/python -m pytest tests/test_gates.py::TestPlanTaskVerificationPlaceholder tests/test_stage_templates.py -v`
-Expected: PASS (4 gate/template assertions green).
+Expected: PASS; the new 5 gate assertions and new template assertion are green, and existing stage-template tests remain green.
 
 - [ ] **Step 6: Run the full gate + template suites for regressions**
 
