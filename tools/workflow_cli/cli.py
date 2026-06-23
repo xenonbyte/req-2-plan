@@ -515,6 +515,53 @@ def _cmd_run_reopen(args):
     )
 
 
+def _cmd_run_archive(args):
+    record, mgr, run_dir = _load_run(args.work_id, args.base_path)
+    base = args.base_path or Path.cwd()
+    archivable = {RunStatus.CLOSED_AT_PLAN_CHECKPOINT}
+    if record.status not in archivable:
+        print_and_exit(
+            format_error(
+                f"Cannot archive run in status {record.status.value!r}; "
+                "must be closed_at_plan_checkpoint",
+                exit_code=EXIT_CONFLICT,
+            ),
+            EXIT_CONFLICT,
+        )
+    # 1. Refuse to clobber an existing archived copy before mutating state.
+    archive_dir = base / ".req-to-plan" / "archive" / str(record.work_id)
+    if archive_dir.exists():
+        print_and_exit(
+            format_error(
+                f"Archive target already exists: {archive_dir}",
+                exit_code=EXIT_CONFLICT,
+            ),
+            EXIT_CONFLICT,
+        )
+    # 2. Ensure /archive is ignored before anything lands under it.
+    ensure_workspace_gitignore(base)
+    # 3. Mark ARCHIVED and persist in the original directory.
+    try:
+        record = update_run_status(record, RunStatus.ARCHIVED)
+    except ValueError as e:
+        print_and_exit(format_error(str(e), exit_code=EXIT_CONFLICT), EXIT_CONFLICT)
+    mgr.save(record)
+    archive_dir.parent.mkdir(parents=True, exist_ok=True)
+    # 4. Move the run dir into the (ignored) archive.
+    shutil.move(str(run_dir), str(archive_dir))
+    # 5. Commit the removal of the original path (untracks the dir). spec §4.6
+    commit_requirement_dir(
+        base, str(record.work_id), f"chore(r2p): archive {record.work_id}"
+    )
+    print_and_exit(
+        format_success(
+            {"work_id": str(record.work_id), "status": "archived", "archived_to": str(archive_dir)},
+            message=f"Run archived: {record.work_id}",
+        ),
+        EXIT_OK,
+    )
+
+
 def _cmd_gap_resolve(args):
     record, mgr, run_dir = _load_run(args.work_id, args.base_path)
     route = next(
@@ -1384,6 +1431,11 @@ def _register_run_commands(subparsers):
     p.add_argument("--stage", required=True, help="Target stage to reopen at")
     p.add_argument("--reason", required=True, help="Reason for reopening")
     p.set_defaults(func=_cmd_run_reopen)
+
+    # run-archive
+    p = subparsers.add_parser("run-archive", help="Archive a closed run out of the active workspace")
+    p.add_argument("--work-id", required=True)
+    p.set_defaults(func=_cmd_run_archive)
 
 
 def _register_tier_commands(subparsers):

@@ -2940,3 +2940,63 @@ class TestRunCloseCommitsRequirementDir:
 
             tracked = git(base, "ls-files", f".req-to-plan/{wid}").stdout
             assert f"{wid}/run.md" in tracked
+
+
+class TestRunArchive:
+    def _closed_run(self, base, wid_str):
+        from tools.workflow_cli.state import RunStateManager, create_run_record
+        from tools.workflow_cli.models import RunStatus, Stage, WorkId
+        wid = WorkId(wid_str)
+        run_dir = base / ".req-to-plan" / wid_str
+        run_dir.mkdir(parents=True)
+        rec = create_run_record(wid)
+        rec.status = RunStatus.CLOSED_AT_PLAN_CHECKPOINT
+        rec.current_stage = Stage.CLOSED
+        RunStateManager(run_dir).save(rec)
+        return run_dir
+
+    def test_archive_moves_run_dir_under_archive(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            self._closed_run(base, "WF-20260101-arch")
+            with pytest.raises(SystemExit) as exc:
+                main(["--base-path", str(base), "run-archive", "--work-id", "WF-20260101-arch"])
+            assert exc.value.code == 0
+            assert not (base / ".req-to-plan" / "WF-20260101-arch").exists()
+            assert (base / ".req-to-plan" / "archive" / "WF-20260101-arch" / "run.md").exists()
+
+    def test_archive_sets_status_archived(self):
+        from tools.workflow_cli.state import RunStateManager
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            self._closed_run(base, "WF-20260101-arch")
+            with pytest.raises(SystemExit):
+                main(["--base-path", str(base), "run-archive", "--work-id", "WF-20260101-arch"])
+            rec = RunStateManager(base / ".req-to-plan" / "archive" / "WF-20260101-arch").load()
+            assert rec.status.value == "archived"
+
+    def test_archive_refuses_when_not_closed(self):
+        from tools.workflow_cli.state import RunStateManager, create_run_record
+        from tools.workflow_cli.models import WorkId
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            wid = WorkId("WF-20260101-open")
+            run_dir = base / ".req-to-plan" / "WF-20260101-open"
+            run_dir.mkdir(parents=True)
+            RunStateManager(run_dir).save(create_run_record(wid))  # ACTIVE_STAGE_DRAFT
+            with pytest.raises(SystemExit) as exc:
+                main(["--base-path", str(base), "run-archive", "--work-id", "WF-20260101-open"])
+            assert exc.value.code == 6  # EXIT_CONFLICT
+
+    def test_archive_refuses_to_overwrite_existing_archive(self):
+        from tools.workflow_cli.state import RunStateManager
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            self._closed_run(base, "WF-20260101-arch")
+            (base / ".req-to-plan" / "archive" / "WF-20260101-arch").mkdir(parents=True)
+            with pytest.raises(SystemExit) as exc:
+                main(["--base-path", str(base), "run-archive", "--work-id", "WF-20260101-arch"])
+            assert exc.value.code == 6  # EXIT_CONFLICT
+            assert (base / ".req-to-plan" / "WF-20260101-arch").exists()  # not moved
+            rec = RunStateManager(base / ".req-to-plan" / "WF-20260101-arch").load()
+            assert rec.status.value == "closed_at_plan_checkpoint"  # no partial archive state
