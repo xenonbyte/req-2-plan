@@ -95,6 +95,7 @@ def test_every_workflow_skill_is_documented():
         "r2p-reopen",
         "r2p-gap-open",
         "r2p-gap-resolve",
+        "r2p-archive",
     )
     en = EN.read_text(encoding="utf-8")
     zh = ZH.read_text(encoding="utf-8")

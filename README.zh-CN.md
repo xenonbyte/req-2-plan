@@ -129,6 +129,7 @@ r2p uninstall --platform claude,codex,gemini
 | `r2p-reopen` | 从指定 `--stage` 重开一个已关闭的运行。 |
 | `r2p-gap-open` | 把 open run 的上游缺口路由回其 `--owner-stage`；下游 artifact 失效、需重新派生。 |
 | `r2p-gap-resolve` | owner 阶段重做并通过 `gate-quality` 后，关闭一个 `--route-id` 缺口路由。 |
+| `r2p-archive` | 将已关闭的运行归档到活动工作区外（移至 `.req-to-plan/archive/` 并取消跟踪）。 |
 
 > [!TIP]
 > 把 `~/.req-to-plan/bin` 加入 `PATH`，即可直接运行 `r2p-*` wrapper：
