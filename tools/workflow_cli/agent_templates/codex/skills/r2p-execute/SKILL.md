@@ -83,7 +83,7 @@ The task-reviewer returns two verdicts:
 
 - Dispatch fix subagents for Critical and Important findings
 - Re-dispatch the task-reviewer after each fix wave
-- Only when the task-reviewer is clean (both spec ✅ and quality Approved, and `Verification` satisfied) append one line to `execution/progress.md`:
+- Only when the task-reviewer is clean (both spec ✅ and quality Approved, and `Verification` satisfied), update the matching `execution/progress.md` checkbox from `- [ ] PLAN-TASK-NNN ...` to `- [x] PLAN-TASK-NNN ...` and append one line:
   `Task N: complete (commits <base7>..<head7>, review clean)`
 
 ## Final Whole-Branch Review
@@ -99,7 +99,7 @@ After all tasks complete, dispatch a final whole-branch review subagent:
 When all tasks are done and the final whole-branch review is clean, call:
 
 ```
-{{R2P_BIN_DIR}}/r2p-archive
+{{R2P_BIN_DIR}}/r2p-archive --work-id <work_id from the precondition output>
 ```
 
 Commits are already on the **current branch**. `push` and PR creation still require an explicit user request.

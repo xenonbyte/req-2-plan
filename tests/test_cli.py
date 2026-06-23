@@ -3001,6 +3001,21 @@ class TestRunArchive:
             rec = RunStateManager(base / ".req-to-plan" / "WF-20260101-arch").load()
             assert rec.status.value == "closed_at_plan_checkpoint"  # no partial archive state
 
+    def test_archive_move_failure_leaves_original_status_closed(self):
+        from unittest.mock import patch
+        from tools.workflow_cli.state import RunStateManager
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            run_dir = self._closed_run(base, "WF-20260101-arch")
+
+            with patch("tools.workflow_cli.cli.shutil.move", side_effect=OSError("disk full")):
+                with pytest.raises(OSError):
+                    main(["--base-path", str(base), "run-archive", "--work-id", "WF-20260101-arch"])
+
+            rec = RunStateManager(run_dir).load()
+            assert rec.status.value == "closed_at_plan_checkpoint"
+            assert not (base / ".req-to-plan" / "archive" / "WF-20260101-arch").exists()
+
 
 class TestRunExecuteStart:
     def _closed_run_with_plan(self, base, wid_str, plan_body):

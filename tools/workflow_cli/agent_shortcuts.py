@@ -769,6 +769,7 @@ def _cmd_execute(ns: argparse.Namespace, base_path: Path) -> None:
         code = _run_cli(["run-execute-start", "--work-id", work_id], base_path)
         if code != 0:
             sys.exit(code)
+        write_active_pointer(base_path, work_id, reason="execute_start")
         print(
             "stop: execute_plan\n"
             f"work_id: {work_id}\n"
@@ -776,17 +777,19 @@ def _cmd_execute(ns: argparse.Namespace, base_path: Path) -> None:
             f"ledger: {ledger}\n"
             "next: drive the r2p-execute skill (subagent-driven SDD loop) to "
             "implement each PLAN-TASK in place on the current branch, then "
-            "r2p-archive when done\n"
+            f"r2p-archive --work-id {work_id} when done\n"
         )
         sys.exit(0)
 
     if record.status == RunStatus.EXECUTING:
+        write_active_pointer(base_path, work_id, reason="execute_resume")
         print(
             "stop: resume_execution\n"
             f"work_id: {work_id}\n"
             f"ledger: {ledger}\n"
             "next: resume the r2p-execute loop from the first unchecked task in "
-            "the ledger\n"
+            "the ledger, then "
+            f"r2p-archive --work-id {work_id} when done\n"
         )
         sys.exit(0)
 

@@ -542,23 +542,23 @@ def _cmd_run_archive(args):
         )
     # 2. Ensure /archive is ignored before anything lands under it.
     ensure_workspace_gitignore(base)
-    # 3. Mark ARCHIVED and persist in the original directory.
+    # 3. Build the archived record, but do not persist it until the move succeeds.
     try:
-        record = update_run_status(record, RunStatus.ARCHIVED)
+        archived_record = update_run_status(record, RunStatus.ARCHIVED)
     except ValueError as e:
         print_and_exit(format_error(str(e), exit_code=EXIT_CONFLICT), EXIT_CONFLICT)
-    mgr.save(record)
     archive_dir.parent.mkdir(parents=True, exist_ok=True)
-    # 4. Move the run dir into the (ignored) archive.
+    # 4. Move the run dir into the (ignored) archive, then persist ARCHIVED there.
     shutil.move(str(run_dir), str(archive_dir))
+    RunStateManager(archive_dir).save(archived_record)
     # 5. Commit the removal of the original path (untracks the dir). spec §4.6
     commit_requirement_dir(
-        base, str(record.work_id), f"chore(r2p): archive {record.work_id}"
+        base, str(archived_record.work_id), f"chore(r2p): archive {archived_record.work_id}"
     )
     print_and_exit(
         format_success(
-            {"work_id": str(record.work_id), "status": "archived", "archived_to": str(archive_dir)},
-            message=f"Run archived: {record.work_id}",
+            {"work_id": str(archived_record.work_id), "status": "archived", "archived_to": str(archive_dir)},
+            message=f"Run archived: {archived_record.work_id}",
         ),
         EXIT_OK,
     )

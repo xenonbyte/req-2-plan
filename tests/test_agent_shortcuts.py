@@ -1487,7 +1487,28 @@ class TestExecuteShortcutAndRouting(unittest.TestCase):
             out, code = self._capture(ash._cmd_execute, argparse.Namespace(work_id="WF-20260101-exec"), base)
             self.assertEqual(code, 0)
             self.assertIn("stop: execute_plan", out)
+            self.assertIn("r2p-archive --work-id WF-20260101-exec", out)
             self.assertEqual(RunStateManager(run_dir).load().status, RunStatus.EXECUTING)
+            pointer = ash.read_active_pointer(base)
+            self.assertEqual(pointer["selected_work_id"], "WF-20260101-exec")
+
+    def test_execute_explicit_work_id_overrides_different_active_pointer(self):
+        import tempfile, argparse
+        from pathlib import Path
+        from tools.workflow_cli import agent_shortcuts as ash
+        from tools.workflow_cli.models import RunStatus
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            self._run(base, "WF-20260101-target", RunStatus.CLOSED_AT_PLAN_CHECKPOINT)
+            self._run(base, "WF-20260101-other", RunStatus.CLOSED_AT_PLAN_CHECKPOINT)
+            ash.write_active_pointer(base, "WF-20260101-other", reason="test")
+
+            out, code = self._capture(ash._cmd_execute, argparse.Namespace(work_id="WF-20260101-target"), base)
+
+            self.assertEqual(code, 0)
+            self.assertIn("r2p-archive --work-id WF-20260101-target", out)
+            pointer = ash.read_active_pointer(base)
+            self.assertEqual(pointer["selected_work_id"], "WF-20260101-target")
 
     def test_execute_on_executing_prints_resume(self):
         import tempfile, argparse
@@ -1499,6 +1520,7 @@ class TestExecuteShortcutAndRouting(unittest.TestCase):
             self._run(base, "WF-20260101-exec", RunStatus.EXECUTING)
             out, code = self._capture(ash._cmd_execute, argparse.Namespace(work_id="WF-20260101-exec"), base)
             self.assertIn("stop: resume_execution", out)
+            self.assertIn("r2p-archive --work-id WF-20260101-exec", out)
 
     def test_continue_routes_executing_to_resume(self):
         import tempfile, argparse

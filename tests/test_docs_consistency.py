@@ -72,6 +72,8 @@ class TestExecuteTemplateContent(unittest.TestCase):
             "task-reviewer",
             "whole-branch review",
             "r2p-archive",
+            "--work-id",
+            "- [x] PLAN-TASK-NNN",
             "hard prerequisite",       # no subagent degrade
             "NEEDS_CONTEXT",           # ambiguity ladder
         )
