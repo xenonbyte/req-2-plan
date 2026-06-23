@@ -2907,6 +2907,48 @@ class TestRunStartBuildsContextPack:
 
 
 class TestRunCloseCommitsRequirementDir:
+    def test_close_json_stdout_remains_parseable_when_auto_commit_skips(self, monkeypatch, capsys):
+        with tempfile.TemporaryDirectory() as tmp:
+            work_id, _ = _seed_plan_approved_run(tmp, "WF-20260101-json")
+            monkeypatch.setenv("R2P_JSON", "1")
+
+            with pytest.raises(SystemExit) as exc:
+                main(["--base-path", str(tmp), "run-close", "--work-id", work_id])
+
+            assert exc.value.code == 0
+            captured = capsys.readouterr()
+            payload = json.loads(captured.out)
+            assert payload["status"] == "closed_at_plan_checkpoint"
+            assert payload["message"] == "Run closed"
+            assert payload["work_id"] == work_id
+            assert "warning: skipped commit" in captured.err
+
+    def test_failed_auto_commit_unstages_r2p_paths(self):
+        import subprocess
+
+        def git(base, *a):
+            return subprocess.run(["git", "-C", str(base), *a], capture_output=True, text=True)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            git(base, "init", "-q")
+            git(base, "config", "user.email", "t@e.com")
+            git(base, "config", "user.name", "t")
+            (base / "README.md").write_text("# repo\n", encoding="utf-8")
+            git(base, "add", "README.md")
+            git(base, "commit", "-m", "initial")
+            hook = base / ".git" / "hooks" / "pre-commit"
+            hook.write_text("#!/bin/sh\necho reject >&2\nexit 1\n", encoding="utf-8")
+            hook.chmod(0o755)
+
+            work_id, _ = _seed_plan_approved_run(base, "WF-20260101-hook")
+            with pytest.raises(SystemExit) as exc:
+                main(["--base-path", str(base), "run-close", "--work-id", work_id])
+
+            assert exc.value.code == 0
+            staged = git(base, "diff", "--cached", "--name-only", "--", ".req-to-plan").stdout.splitlines()
+            assert staged == []
+
     def test_close_commits_requirement_dir_in_a_git_repo(self):
         import subprocess
         from tools.workflow_cli.state import (
@@ -3050,6 +3092,22 @@ class TestRunExecuteStart:
             ledger = (run_dir / "execution" / "progress.md").read_text(encoding="utf-8")
             assert "- [ ] PLAN-TASK-001 first task" in ledger
             assert "- [ ] PLAN-TASK-002 second task" in ledger
+
+    def test_execute_start_ledger_failure_leaves_status_closed(self):
+        from tools.workflow_cli.state import RunStateManager
+        plan = "# Plan\n\n## Tasks\n### PLAN-TASK-001: first task\nFiles:\n- a.py\n"
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            run_dir = self._closed_run_with_plan(base, "WF-20260101-exec", plan)
+            (run_dir / "execution").write_text("not a directory", encoding="utf-8")
+
+            with pytest.raises(FileExistsError):
+                main(["--base-path", str(base), "run-execute-start", "--work-id", "WF-20260101-exec"])
+
+            rec = RunStateManager(run_dir).load()
+            assert rec.status.value == "closed_at_plan_checkpoint"
+            assert rec.resume_context.last_completed_operation != "execute_start"
+            assert rec.resume_context.next_allowed_operation != "implement_tasks"
 
     def test_execute_start_refuses_when_not_closed(self):
         from tools.workflow_cli.state import RunStateManager, create_run_record

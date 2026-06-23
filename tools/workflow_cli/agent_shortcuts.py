@@ -138,19 +138,24 @@ def generate_work_id(
     if base_path is None:
         return base_id
 
-    if not (base_path / ".req-to-plan" / base_id).exists():
+    r2p_dir = base_path / ".req-to-plan"
+
+    def is_reserved(work_id: str) -> bool:
+        return (r2p_dir / work_id).exists() or (r2p_dir / "archive" / work_id).exists()
+
+    if not is_reserved(base_id):
         return base_id
 
     for n in range(2, 100):
         suffix = f"-{n}"
         alt_candidate = candidate[:max_slug_len - len(suffix)].rstrip("-")
         alt = f"{prefix}{alt_candidate}{suffix}"
-        if not (base_path / ".req-to-plan" / alt).exists():
+        if not is_reserved(alt):
             return alt
 
     raise RuntimeError(
         f"Could not generate a unique work ID for {base_id!r} after 98 attempts. "
-        "Clean up old runs in .req-to-plan/ before starting a new one."
+        "Clean up old runs in .req-to-plan/ or .req-to-plan/archive/ before starting a new one."
     )
 
 

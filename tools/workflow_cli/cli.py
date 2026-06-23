@@ -582,9 +582,6 @@ def _cmd_run_execute_start(args):
             format_error("PLAN artifact not found; cannot start execution", exit_code=EXIT_NOT_FOUND),
             EXIT_NOT_FOUND,
         )
-    record = update_run_status(record, RunStatus.EXECUTING)
-    update_resume_context(record, last_operation="execute_start", next_operation="implement_tasks")
-    mgr.save(record)
     # Seed the structural progress ledger (IDs + checkboxes = structure, not
     # semantics; the agent appends progress). CLI never generates artifact text.
     anchors = plan_task_anchors(plan_text)
@@ -593,6 +590,9 @@ def _cmd_run_execute_start(args):
     exec_dir = run_dir / "execution"
     exec_dir.mkdir(parents=True, exist_ok=True)
     atomic_write_text(exec_dir / "progress.md", "\n".join(lines) + "\n")
+    record = update_run_status(record, RunStatus.EXECUTING)
+    update_resume_context(record, last_operation="execute_start", next_operation="implement_tasks")
+    mgr.save(record)
     print_and_exit(
         format_success(
             {

@@ -63,7 +63,7 @@ The implementer must:
 
 The fresh implementer subagent verifies-then-removes ambiguity by evidence and TDD. If it cannot resolve ambiguity:
 - Return `NEEDS_CONTEXT` or `BLOCKED` and escalate to the human — never guess a vague implementation
-- If the ambiguity is an upstream (SPEC or DESIGN) defect, stop and route via `r2p-gap-open` rather than patching over it in execution
+- If the ambiguity is an upstream (SPEC or DESIGN) defect, stop and ask the human to choose an upstream repair path (for example, reopening from the affected stage) rather than patching over it in execution. Do not try to open a gap route from an `executing` run.
 
 ### 5. Write diff and dispatch task-reviewer
 
@@ -114,7 +114,7 @@ Track progress in `execution/progress.md` (not only in todos). On resume, read t
 |---|---|
 | Status not `closed_at_plan_checkpoint` or `executing` | Stop: `plan_not_ready` |
 | Implementer returns `NEEDS_CONTEXT` | Provide missing context, re-dispatch fresh implementer subagent |
-| Upstream SPEC/DESIGN defect found | Stop: route via `r2p-gap-open` |
+| Upstream SPEC/DESIGN defect found | Stop: ask the human to reopen/repair the upstream stage |
 | Platform lacks subagent capability | Fail explicitly (subagents are a hard prerequisite) |
 
 Use `r2p-status` to inspect progress without making changes.

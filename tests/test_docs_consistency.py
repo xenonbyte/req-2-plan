@@ -85,6 +85,24 @@ class TestExecuteTemplateContent(unittest.TestCase):
                     missing.append(f"{rel}:{tok}")
         self.assertEqual(missing, [], f"missing SDD tokens: {missing}")
 
+    def test_execute_surfaces_do_not_route_defects_through_gap_open(self):
+        surfaces = [
+            "tools/workflow_cli/agent_templates/claude/commands/r2p-execute.md",
+            "tools/workflow_cli/agent_templates/codex/skills/r2p-execute/SKILL.md",
+        ]
+        offenders = []
+        for rel in surfaces:
+            text = (REPO_ROOT / rel).read_text(encoding="utf-8")
+            if "`r2p-gap-open`" in text:
+                offenders.append(rel)
+        self.assertEqual(
+            offenders,
+            [],
+            "Execution runs have current_stage=closed, so upstream defects must "
+            "use a reopen/human repair path instead of r2p-gap-open: "
+            + ", ".join(offenders),
+        )
+
     def test_gemini_execute_toml_mentions_in_place_and_archive(self):
         text = (REPO_ROOT / "tools/workflow_cli/agent_templates/gemini/commands/r2p-execute.toml").read_text(encoding="utf-8")
         self.assertIn("r2p-execute", text)

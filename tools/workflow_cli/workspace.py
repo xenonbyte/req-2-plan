@@ -8,6 +8,7 @@ path-limited git-commit primitive used by run-close (add) and run-archive
 from __future__ import annotations
 
 import subprocess
+import sys
 from pathlib import Path
 
 from tools.workflow_cli.atomic import atomic_write_text
@@ -43,6 +44,10 @@ def _git(base_path: Path, *args: str) -> subprocess.CompletedProcess:
     )
 
 
+def _warn(message: str) -> None:
+    print(f"warning: {message}", file=sys.stderr)
+
+
 def commit_requirement_dir(base_path: Path, work_id: str, message: str) -> None:
     """Path-limited, best-effort commit of one requirement directory.
 
@@ -57,7 +62,7 @@ def commit_requirement_dir(base_path: Path, work_id: str, message: str) -> None:
     # Guard 1: must be inside a git work tree.
     inside = _git(base_path, "rev-parse", "--is-inside-work-tree")
     if inside.returncode != 0 or inside.stdout.strip() != "true":
-        print(f"warning: skipped commit for {run_rel}: not a git work tree")
+        _warn(f"skipped commit for {run_rel}: not a git work tree")
         return
 
     # Stage (path-limited). `git add -- <path>` stages an addition/modification
@@ -70,9 +75,12 @@ def commit_requirement_dir(base_path: Path, work_id: str, message: str) -> None:
     # no-change. `git diff --cached --quiet` returns 0 when there is no diff.
     staged = _git(base_path, "diff", "--cached", "--quiet", "--", gitignore_rel, run_rel)
     if staged.returncode == 0:
-        print(f"warning: skipped commit for {run_rel}: nothing staged (ignored or unchanged)")
+        _warn(f"skipped commit for {run_rel}: nothing staged (ignored or unchanged)")
         return
 
     committed = _git(base_path, "commit", "-m", message, "--", gitignore_rel, run_rel)
     if committed.returncode != 0:
-        print(f"warning: git commit failed for {run_rel}: {committed.stderr.strip()}")
+        unstaged = _git(base_path, "reset", "-q", "--", gitignore_rel, run_rel)
+        _warn(f"git commit failed for {run_rel}: {committed.stderr.strip()}")
+        if unstaged.returncode != 0:
+            _warn(f"failed to unstage {run_rel}: {unstaged.stderr.strip()}")

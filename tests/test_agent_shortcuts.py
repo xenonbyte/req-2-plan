@@ -202,6 +202,18 @@ class TestGenerateWorkId:
             assert wid2 != wid1
             assert wid2.endswith("-2")
 
+    def test_deduplicates_if_archive_path_exists(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            req = "add login feature"
+            wid1 = generate_work_id(req, base_path=base, today="20260527")
+            (base / ".req-to-plan" / "archive" / wid1).mkdir(parents=True)
+
+            wid2 = generate_work_id(req, base_path=base, today="20260527")
+
+            assert wid2 != wid1
+            assert wid2.endswith("-2")
+
     def test_truncation_never_leaves_trailing_dash(self):
         # Regression: truncating after strip("-") could leave a trailing "-",
         # producing an invalid WorkId. The 36-char slug window means a word
