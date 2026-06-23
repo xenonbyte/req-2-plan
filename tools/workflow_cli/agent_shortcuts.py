@@ -17,6 +17,7 @@ from pathlib import Path
 from tools.workflow_cli.atomic import atomic_write_text
 from tools.workflow_cli.models import RunStatus, WorkId
 from tools.workflow_cli.output import EXIT_CONFLICT
+from tools.workflow_cli.workspace import ensure_workspace_gitignore
 
 ACTIVE_POINTER_FILE = ".workflow-active"
 
@@ -46,6 +47,7 @@ def write_active_pointer(base_path: Path, work_id: str, reason: str = "workflow_
     work_id = _validate_work_id(work_id)
     path = _pointer_path(base_path)
     path.parent.mkdir(parents=True, exist_ok=True)
+    ensure_workspace_gitignore(base_path)
     run_rel = f".req-to-plan/{work_id}/run.md"
     updated_at = datetime.now(timezone.utc).astimezone().isoformat()
     content = (
