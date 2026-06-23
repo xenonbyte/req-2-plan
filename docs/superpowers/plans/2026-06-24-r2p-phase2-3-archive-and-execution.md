@@ -593,7 +593,7 @@ git commit -m "feat(r2p): commit requirement dir into version control on run-clo
 
 **Interfaces:**
 - Consumes: `RunStateManager`, `update_run_status`, `ensure_workspace_gitignore`, `commit_requirement_dir`, `EXIT_CONFLICT`/`EXIT_NOT_FOUND`.
-- Produces: `run-archive --work-id <id>`. Precondition `status == CLOSED_AT_PLAN_CHECKPOINT` (Phase 3 widens this to also accept `EXECUTING`). Steps, in order: set `ARCHIVED` and save in the original dir; `ensure_workspace_gitignore`; refuse if `archive/<id>` exists (`EXIT_CONFLICT`); `shutil.move` run dir → `archive/<id>`; `commit_requirement_dir` (commits the removal). Pointer clearing is the shortcut layer's job (Task 6), not the CLI's.
+- Produces: `run-archive --work-id <id>`. Precondition `status == CLOSED_AT_PLAN_CHECKPOINT` (Phase 3 widens this to also accept `EXECUTING`). Steps, in order: compute `archive/<id>` and refuse if it already exists (`EXIT_CONFLICT`, with no run-state mutation); `ensure_workspace_gitignore`; set `ARCHIVED` and save in the original dir; `shutil.move` run dir → `archive/<id>`; `commit_requirement_dir` (commits the removal). Pointer clearing is the shortcut layer's job (Task 6), not the CLI's.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -647,6 +647,7 @@ class TestRunArchive:
             assert exc.value.code == 6  # EXIT_CONFLICT
 
     def test_archive_refuses_to_overwrite_existing_archive(self):
+        from tools.workflow_cli.state import RunStateManager
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
             self._closed_run(base, "WF-20260101-arch")
@@ -655,6 +656,8 @@ class TestRunArchive:
                 main(["--base-path", str(base), "run-archive", "--work-id", "WF-20260101-arch"])
             assert exc.value.code == 6  # EXIT_CONFLICT
             assert (base / ".req-to-plan" / "WF-20260101-arch").exists()  # not moved
+            rec = RunStateManager(base / ".req-to-plan" / "WF-20260101-arch").load()
+            assert rec.status.value == "closed_at_plan_checkpoint"  # no partial archive state
 ```
 
 - [ ] **Step 2: Run the tests to verify they fail**
@@ -680,15 +683,7 @@ def _cmd_run_archive(args):
             ),
             EXIT_CONFLICT,
         )
-    # 1. Mark ARCHIVED and persist in the original directory.
-    try:
-        record = update_run_status(record, RunStatus.ARCHIVED)
-    except ValueError as e:
-        print_and_exit(format_error(str(e), exit_code=EXIT_CONFLICT), EXIT_CONFLICT)
-    mgr.save(record)
-    # 2. Ensure /archive is ignored before anything lands under it.
-    ensure_workspace_gitignore(base)
-    # 3. Refuse to clobber an existing archived copy.
+    # 1. Refuse to clobber an existing archived copy before mutating state.
     archive_dir = base / ".req-to-plan" / "archive" / str(record.work_id)
     if archive_dir.exists():
         print_and_exit(
@@ -698,6 +693,14 @@ def _cmd_run_archive(args):
             ),
             EXIT_CONFLICT,
         )
+    # 2. Ensure /archive is ignored before anything lands under it.
+    ensure_workspace_gitignore(base)
+    # 3. Mark ARCHIVED and persist in the original directory.
+    try:
+        record = update_run_status(record, RunStatus.ARCHIVED)
+    except ValueError as e:
+        print_and_exit(format_error(str(e), exit_code=EXIT_CONFLICT), EXIT_CONFLICT)
+    mgr.save(record)
     archive_dir.parent.mkdir(parents=True, exist_ok=True)
     # 4. Move the run dir into the (ignored) archive.
     shutil.move(str(run_dir), str(archive_dir))
@@ -1612,11 +1615,11 @@ class TestExecuteTemplateContent(unittest.TestCase):
         self.assertIn("current branch", text)
 ```
 
-Append to `tests/test_install.py` (inside `TestInstallService` — a plain pytest class: methods take `self, tmp_path`, use bare `assert`, and the helper `_make_service(tmp_path)` returns `(service, manifest_root, ph_root)`):
+Append to `tests/test_install.py` (inside `TestInstallService` — a plain pytest class: methods take `self, tmp_path`, use bare `assert`, and the helper `make_service(tmp_path)` returns `(service, manifest_root, ph_root)`):
 
 ```python
     def test_install_ships_r2p_execute_for_all_platforms(self, tmp_path):
-        service, _manifest_root, ph_root = _make_service(tmp_path)
+        service, _manifest_root, ph_root = make_service(tmp_path)
         for platform, rel in (
             ("claude", "commands/r2p-execute.md"),
             ("codex", "skills/r2p-execute/SKILL.md"),
@@ -1626,7 +1629,7 @@ Append to `tests/test_install.py` (inside `TestInstallService` — a plain pytes
             assert (ph_root / platform / rel).exists(), f"{platform}:{rel} not installed"
 ```
 
-> Implementer note: confirm `_make_service`'s exact signature/return at the top of `tests/test_install.py` before relying on it.
+> Implementer note: confirm `make_service`'s exact signature/return at the top of `tests/test_install.py` before relying on it.
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
