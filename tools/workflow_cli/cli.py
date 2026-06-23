@@ -56,6 +56,7 @@ from tools.workflow_cli.output import (
     EXIT_NOT_FOUND,
 )
 from tools.workflow_cli.tier import estimate_tier, scan_keywords
+from tools.workflow_cli.workspace import ensure_workspace_gitignore, commit_requirement_dir
 
 
 # ---------------------------------------------------------------------------
@@ -378,6 +379,14 @@ def _cmd_run_close(args):
     record.current_stage = Stage.CLOSED
     update_resume_context(record, last_operation="close_at_plan_checkpoint")
     mgr.save(record)
+    # PLAN complete → land the requirement directory in version control
+    # (best-effort, path-limited; never touches unrelated changes). spec §4.5
+    ensure_workspace_gitignore(args.base_path or Path.cwd())
+    commit_requirement_dir(
+        args.base_path or Path.cwd(),
+        str(record.work_id),
+        f"chore(r2p): plan {record.work_id}",
+    )
     print_and_exit(
         format_success({"work_id": str(record.work_id), "status": record.status.value}, message="Run closed"),
         EXIT_OK,

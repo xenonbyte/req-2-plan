@@ -2904,3 +2904,39 @@ class TestRunStartBuildsContextPack:
         assert record.tier_estimate.base == TierBase.STANDARD
         intake = (tmp_path / ".req-to-plan" / "WF-20260605-http-link-tier" / "01-intake-brief.md").read_text(encoding="utf-8")
         assert "base: standard" in intake
+
+
+class TestRunCloseCommitsRequirementDir:
+    def test_close_commits_requirement_dir_in_a_git_repo(self):
+        import subprocess
+        from tools.workflow_cli.state import (
+            RunStateManager, create_run_record, upsert_active_artifact, add_checkpoint,
+        )
+        from tools.workflow_cli.models import (
+            RunStatus, Stage, WorkId, STAGE_ARTIFACT_MAP, TierBase, TierEstimate,
+        )
+        from tools.workflow_cli.artifact import write_artifact
+
+        def git(base, *a):
+            return subprocess.run(["git", "-C", str(base), *a], capture_output=True, text=True)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            git(base, "init", "-q"); git(base, "config", "user.email", "t@e.com"); git(base, "config", "user.name", "t")
+            wid = WorkId("WF-20260101-close")
+            run_dir = base / ".req-to-plan" / str(wid)
+            run_dir.mkdir(parents=True)
+            rec = create_run_record(wid)
+            rec.tier_locked = TierEstimate(base=TierBase.LIGHT, modifiers=frozenset())
+            rec.current_stage = Stage.PLAN
+            rec.status = RunStatus.CHECKPOINT_APPROVED
+            write_artifact(run_dir, Stage.PLAN, "# Plan\n\n## Tasks\n", version=1, status="approved")
+            upsert_active_artifact(rec, Stage.PLAN, STAGE_ARTIFACT_MAP[Stage.PLAN], 1, "approved")
+            add_checkpoint(rec, Stage.PLAN, STAGE_ARTIFACT_MAP[Stage.PLAN], 1, "close_workflow_run")
+            RunStateManager(run_dir).save(rec)
+
+            with pytest.raises(SystemExit):
+                main(["--base-path", str(base), "run-close", "--work-id", str(wid)])
+
+            tracked = git(base, "ls-files", f".req-to-plan/{wid}").stdout
+            assert f"{wid}/run.md" in tracked
