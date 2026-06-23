@@ -18,6 +18,7 @@
 - **Placeholder detection must not false-positive on normal prose:** keep patterns line/field-anchored or high-precision (3+ `?`, exact `待定`, exact `to be decided|determined`). (spec §2.3)
 - **No new PLAN-TASK field:** `Verification` stays the acceptance contract; strengthen it, do not add `Acceptance`. (spec §2.1)
 - **Tests:** use `tempfile.TemporaryDirectory`; never touch real `~/.req-to-plan` or `.req-to-plan/`. Run with `.venv/bin/python -m pytest` (system Python lacks PyYAML). (CLAUDE.md test conventions)
+- **Worktree safety:** before Task 1 and before every commit, run `git status --short`. If any planned target file already has unrelated local changes, stop and ask for direction before editing or staging. Before each `git add`, run `git diff -- <task files>` and stage only the task files named in that task.
 - **TDD:** red → green → commit per task. Full suite stays green at every commit.
 - **Commit messages:** `<type>(r2p): <subject>`, and end every commit message with the trailer `Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>` (shown in full in Task 1 Step 5; subject-only thereafter for brevity — append the same trailer each time).
 
@@ -32,7 +33,7 @@
 
 **Interfaces:**
 - Consumes: `atomic_write_text(path, content)` from `tools.workflow_cli.atomic` (already imported at `agent_shortcuts.py:17`).
-- Produces: `_prepare_input_file(run_dir, stage, suffix, seed="") -> Path` — unchanged signature; now raises `ValueError("unsafe_input_file_symlink")` if the target path is a symlink, and writes the seed via `atomic_write_text` instead of `path.write_text`.
+- Produces: `_prepare_input_file(run_dir, stage, suffix, seed="") -> Path` — unchanged signature; now raises `ValueError("unsafe_input_file_symlink")` if `run_dir/inputs` or the target path is a symlink, and writes the seed via `atomic_write_text` instead of `path.write_text`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -60,6 +61,20 @@ class TestPrepareInputFileSymlink(unittest.TestCase):
             # The symlink target must NOT have been written through.
             self.assertEqual(outside.read_text(encoding="utf-8"), "secret")
 
+    def test_rejects_symlinked_inputs_directory(self):
+        from tools.workflow_cli.agent_shortcuts import _prepare_input_file
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            run_dir = base / "run"
+            run_dir.mkdir()
+            outside_inputs = base / "outside-inputs"
+            outside_inputs.mkdir()
+            os.symlink(outside_inputs, run_dir / "inputs")
+            with self.assertRaises(ValueError):
+                _prepare_input_file(run_dir, "spec", "content", "seed")
+            # The symlinked directory must NOT receive the seeded file.
+            self.assertFalse((outside_inputs / "spec-content.md").exists())
+
     def test_writes_seed_when_absent_and_not_a_symlink(self):
         from tools.workflow_cli.agent_shortcuts import _prepare_input_file
         with tempfile.TemporaryDirectory() as tmp:
@@ -72,7 +87,7 @@ class TestPrepareInputFileSymlink(unittest.TestCase):
 - [ ] **Step 2: Run the tests to verify they fail**
 
 Run: `.venv/bin/python -m pytest tests/test_agent_shortcuts.py::TestPrepareInputFileSymlink -v`
-Expected: `test_rejects_preplanted_symlink_target` FAILS (current code writes through / does not raise).
+Expected: both symlink rejection tests FAIL (current code writes through / does not raise).
 
 - [ ] **Step 3: Implement the hardening**
 
@@ -80,8 +95,11 @@ In `tools/workflow_cli/agent_shortcuts.py`, replace the body of `_prepare_input_
 
 ```python
 def _prepare_input_file(run_dir: Path, stage: str, suffix: str, seed: str = "") -> Path:
-    path = run_dir / "inputs" / f"{stage}-{suffix}.md"
-    path.parent.mkdir(parents=True, exist_ok=True)
+    inputs_dir = run_dir / "inputs"
+    if inputs_dir.is_symlink():
+        raise ValueError("unsafe_input_file_symlink")
+    inputs_dir.mkdir(parents=True, exist_ok=True)
+    path = inputs_dir / f"{stage}-{suffix}.md"
     if path.is_symlink():
         raise ValueError("unsafe_input_file_symlink")
     if not path.exists():
@@ -103,11 +121,16 @@ In `tools/workflow_cli/atomic.py`, extend the `atomic_write_text` docstring (lin
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `.venv/bin/python -m pytest tests/test_agent_shortcuts.py::TestPrepareInputFileSymlink -v`
-Expected: PASS (2 passed).
+Expected: PASS (3 passed).
 
 - [ ] **Step 5: Commit**
 
+Run: `.venv/bin/python -m pytest tests/ -q`
+Expected: all pass before this commit.
+
 ```bash
+git status --short
+git diff -- tools/workflow_cli/agent_shortcuts.py tools/workflow_cli/atomic.py tests/test_agent_shortcuts.py
 git add tools/workflow_cli/agent_shortcuts.py tools/workflow_cli/atomic.py tests/test_agent_shortcuts.py
 git commit -m "fix(r2p): reject symlinked input file, write seed atomically
 
@@ -274,7 +297,12 @@ Expected: all pass (no existing PLAN test regressed by R5.2c).
 
 - [ ] **Step 7: Commit**
 
+Run: `.venv/bin/python -m pytest tests/ -q`
+Expected: all pass before this commit.
+
 ```bash
+git status --short
+git diff -- tools/workflow_cli/gates.py tools/workflow_cli/stage_templates.py tests/test_gates.py tests/test_stage_templates.py
 git add tools/workflow_cli/gates.py tools/workflow_cli/stage_templates.py tests/test_gates.py tests/test_stage_templates.py
 git commit -m "feat(r2p): gate PLAN-TASK Verification placeholders (R5.2c)"
 ```
@@ -357,7 +385,12 @@ Expected: all pass — confirms no existing artifact fixture trips the new marke
 
 - [ ] **Step 6: Commit**
 
+Run: `.venv/bin/python -m pytest tests/ -q`
+Expected: all pass before this commit.
+
 ```bash
+git status --short
+git diff -- tools/workflow_cli/gates.py tests/test_gates.py
 git add tools/workflow_cli/gates.py tests/test_gates.py
 git commit -m "feat(r2p): flag ???/待定/'to be decided' as gate placeholders"
 ```
@@ -461,7 +494,12 @@ Expected: one match.
 
 - [ ] **Step 7: Commit**
 
+Run: `.venv/bin/python -m pytest tests/ -q`
+Expected: all pass before this commit.
+
 ```bash
+git status --short
+git diff -- tools/workflow_cli/agent_shortcuts.py tools/workflow_cli/agent_templates/claude/SKILL.md tests/test_agent_shortcuts.py
 git add tools/workflow_cli/agent_shortcuts.py tools/workflow_cli/agent_templates/claude/SKILL.md tests/test_agent_shortcuts.py
 git commit -m "feat(r2p): name unresolved ambiguity as a checkpoint audit criterion"
 ```
@@ -500,6 +538,8 @@ Expected: all pass.
 - [ ] **Step 4: Commit**
 
 ```bash
+git status --short
+git diff -- tools/workflow_cli/cli.py
 git add tools/workflow_cli/cli.py
 git commit -m "docs(r2p): note cp.artifact == STAGE_ARTIFACT_MAP invariant in reopen"
 ```
