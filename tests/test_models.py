@@ -112,7 +112,7 @@ class TestTransitions(unittest.TestCase):
     def test_closed_at_plan_checkpoint_only_transitions_to_archived(self):
         from tools.workflow_cli.models import RunStatus
         for target in RunStatus:
-            if target == RunStatus.ARCHIVED:
+            if target in (RunStatus.EXECUTING, RunStatus.ARCHIVED):
                 self.assertTrue(
                     self.is_transition_allowed(
                         self.RunStatus.CLOSED_AT_PLAN_CHECKPOINT,
@@ -429,6 +429,28 @@ class TestArchivedState(unittest.TestCase):
         from tools.workflow_cli.models import RunStatus, is_command_allowed
         self.assertTrue(
             is_command_allowed(RunStatus.CLOSED_AT_PLAN_CHECKPOINT, "CMD-RUN-ARCHIVE")
+        )
+
+
+class TestExecutingState(unittest.TestCase):
+    def test_executing_status_exists(self):
+        from tools.workflow_cli.models import RunStatus
+        self.assertEqual(RunStatus.EXECUTING.value, "executing")
+
+    def test_closed_can_transition_to_executing(self):
+        from tools.workflow_cli.models import RunStatus, is_transition_allowed
+        self.assertTrue(
+            is_transition_allowed(RunStatus.CLOSED_AT_PLAN_CHECKPOINT, RunStatus.EXECUTING)
+        )
+
+    def test_executing_can_transition_to_archived(self):
+        from tools.workflow_cli.models import RunStatus, is_transition_allowed
+        self.assertTrue(is_transition_allowed(RunStatus.EXECUTING, RunStatus.ARCHIVED))
+
+    def test_execute_start_command_allowed_when_closed(self):
+        from tools.workflow_cli.models import RunStatus, is_command_allowed
+        self.assertTrue(
+            is_command_allowed(RunStatus.CLOSED_AT_PLAN_CHECKPOINT, "CMD-RUN-EXECUTE-START")
         )
 
 

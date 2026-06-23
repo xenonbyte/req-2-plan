@@ -31,6 +31,7 @@ class RunStatus(str, Enum):
     CHECKPOINT_APPROVED = "checkpoint_approved"
     NEXT_STAGE = "next_stage"
     CLOSED_AT_PLAN_CHECKPOINT = "closed_at_plan_checkpoint"
+    EXECUTING = "executing"     # PLAN closed; implementing tasks in place
     ARCHIVED = "archived"       # terminal: requirement directory archived
 
 
@@ -149,7 +150,8 @@ ALLOWED_TRANSITIONS: dict[RunStatus, set[RunStatus]] = {
         RunStatus.ACTIVE_STAGE_DRAFT,
         RunStatus.ENTRY_GATE_FAILED,
     },
-    RunStatus.CLOSED_AT_PLAN_CHECKPOINT: {RunStatus.ARCHIVED},
+    RunStatus.CLOSED_AT_PLAN_CHECKPOINT: {RunStatus.EXECUTING, RunStatus.ARCHIVED},
+    RunStatus.EXECUTING: {RunStatus.EXECUTING, RunStatus.ARCHIVED},
     RunStatus.ARCHIVED: set(),
 }
 
@@ -270,6 +272,11 @@ ALLOWED_COMMANDS_BY_RUN_STATE: dict[RunStatus, set[str]] = {
     },
     RunStatus.CLOSED_AT_PLAN_CHECKPOINT: {
         "CMD-RUN-REOPEN",
+        "CMD-RUN-EXECUTE-START",
+        "CMD-RUN-ARCHIVE",
+        "CMD-TIER-STATUS",
+    },
+    RunStatus.EXECUTING: {
         "CMD-RUN-ARCHIVE",
         "CMD-TIER-STATUS",
     },

@@ -1441,3 +1441,10 @@ class TestArchiveShortcut(unittest.TestCase):
             self.assertEqual(cm.exception.code, 0)
             self.assertFalse(ash._pointer_path(base).exists())
             self.assertTrue((base / ".req-to-plan" / "archive" / "WF-20260101-arch" / "run.md").exists())
+
+
+class TestIsTerminalExecuting(unittest.TestCase):
+    def test_executing_is_not_terminal(self):
+        from tools.workflow_cli.agent_shortcuts import is_terminal
+        from tools.workflow_cli.models import RunStatus
+        self.assertFalse(is_terminal(RunStatus.EXECUTING))
