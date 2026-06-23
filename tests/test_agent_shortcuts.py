@@ -3,6 +3,8 @@ Tests for tools/workflow_cli/agent_shortcuts.py
 """
 from __future__ import annotations
 
+import contextlib
+import io
 import os
 import shlex
 import subprocess
@@ -1360,3 +1362,41 @@ class TestPrepareInputFileSymlink(unittest.TestCase):
             p = _prepare_input_file(run_dir, "spec", "content", "seed text")
             self.assertEqual(p.read_text(encoding="utf-8"), "seed text")
             self.assertFalse(p.is_symlink())
+
+
+class TestCheckpointAmbiguityGuidance(unittest.TestCase):
+    def _emit_subagent_review_output(self) -> str:
+        from pathlib import Path
+        from tools.workflow_cli import agent_shortcuts as ash
+        from tools.workflow_cli.models import (
+            Stage, TierBase, TierModifier, TierEstimate, WorkId, STAGE_ARTIFACT_MAP,
+        )
+        from tools.workflow_cli.state import create_run_record, upsert_active_artifact
+        # Force a subagent review at DESIGN: a safety modifier with no
+        # version-matched review file on disk → _emit_checkpoint_stop prints
+        # `needs_subagent_review`.
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            (run_dir / "reviews").mkdir()
+            rec = create_run_record(WorkId("WF-20260101-amb"))
+            rec.current_stage = Stage.DESIGN
+            rec.tier_locked = TierEstimate(
+                base=TierBase.STANDARD,
+                modifiers=frozenset({TierModifier.SAFETY}),
+            )
+            upsert_active_artifact(
+                rec,
+                stage=Stage.DESIGN,
+                artifact=STAGE_ARTIFACT_MAP[Stage.DESIGN],
+                version=1,
+                status="ready",
+            )
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                ash._emit_checkpoint_stop(run_dir, "WF-20260101-amb", "design", rec, run_dir)
+            return buf.getvalue()
+
+    def test_subagent_review_note_mentions_ambiguity(self):
+        out = self._emit_subagent_review_output()
+        self.assertIn("needs_subagent_review", out)
+        self.assertIn("ambiguity", out.lower())

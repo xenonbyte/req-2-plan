@@ -323,7 +323,9 @@ def _emit_checkpoint_stop(
             f"reason: forced subagent review required (tier modifier: {modifiers})\n"
             "note: you are authorized to spawn a read-only review subagent now; "
             "separate human approval is NOT required for this step\n"
-            "next: have the review subagent audit the stage artifact, write its "
+            "next: have the review subagent audit the stage artifact for spec "
+            "compliance, code/design quality, AND any unresolved ambiguity / "
+            "undecided point (flag hedging that lacks a decision), write its "
             "findings to review_file, then r2p-continue\n"
         )
         return
