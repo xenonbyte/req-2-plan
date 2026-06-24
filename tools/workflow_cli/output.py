@@ -11,10 +11,36 @@ EXIT_REVIEW_REQ = 5  # forced subagent review required
 EXIT_CONFLICT = 6  # state conflict (run already closed, etc.)
 EXIT_NOT_FOUND = 7 # resource not found (run.md, artifact, etc.)
 
+# Opt-in compact display limits. Default formatters remain uncapped.
+COMPACT_DETAIL_LIMIT = 10
+COMPACT_FILE_LIST_LIMIT = 15
+
 
 def is_json_mode() -> bool:
     """Check if JSON output mode is enabled via R2P_JSON environment variable."""
     return os.environ.get("R2P_JSON", "0") == "1"
+
+
+def compact_human_list(
+    *,
+    label: str,
+    items: list,
+    limit: int,
+    recovery_path: str | None = None,
+) -> dict:
+    """Build an opt-in compact list payload without touching the filesystem."""
+    if limit < 0:
+        raise ValueError("limit must be non-negative")
+
+    visible_items = list(items[:limit])
+    result = {
+        label: visible_items,
+        f"{label}_shown": len(visible_items),
+        f"{label}_total": len(items),
+    }
+    if recovery_path:
+        result[f"{label}_full_list"] = recovery_path
+    return result
 
 
 def format_success(data: dict, message: str = "") -> str:

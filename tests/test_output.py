@@ -4,6 +4,9 @@ import unittest
 from unittest.mock import patch
 
 from tools.workflow_cli.output import (
+    COMPACT_DETAIL_LIMIT,
+    COMPACT_FILE_LIST_LIMIT,
+    compact_human_list,
     format_error,
     format_gate_result,
     format_stop,
@@ -17,6 +20,54 @@ from tools.workflow_cli.output import (
     EXIT_OK,
     EXIT_REVIEW_REQ,
 )
+
+
+class TestCompactHumanList(unittest.TestCase):
+    """Test opt-in compact list representation."""
+
+    def test_compact_limits_match_output_contract(self):
+        self.assertEqual(COMPACT_DETAIL_LIMIT, 10)
+        self.assertEqual(COMPACT_FILE_LIST_LIMIT, 15)
+
+    def test_compact_list_display_reports_counts_and_path(self):
+        items = [f"item-{i}" for i in range(20)]
+        result = compact_human_list(
+            label="approved_checkpoints",
+            items=items,
+            limit=COMPACT_DETAIL_LIMIT,
+            recovery_path=".req-to-plan/WF-test/logs/status-run-approved-checkpoints.txt",
+        )
+
+        self.assertEqual(result["approved_checkpoints"], items[:COMPACT_DETAIL_LIMIT])
+        self.assertEqual(result["approved_checkpoints_shown"], COMPACT_DETAIL_LIMIT)
+        self.assertEqual(result["approved_checkpoints_total"], 20)
+        self.assertEqual(
+            result["approved_checkpoints_full_list"],
+            ".req-to-plan/WF-test/logs/status-run-approved-checkpoints.txt",
+        )
+
+    def test_compact_list_preserves_order_without_recovery_path(self):
+        items = ["first", "second", "third", "fourth"]
+        result = compact_human_list(label="files", items=items, limit=2)
+
+        self.assertEqual(result["files"], ["first", "second"])
+        self.assertEqual(result["files_shown"], 2)
+        self.assertEqual(result["files_total"], 4)
+        self.assertNotIn("files_full_list", result)
+
+    def test_compact_list_is_json_serializable(self):
+        result = compact_human_list(
+            label="files",
+            items=["a", "b", "c"],
+            limit=COMPACT_FILE_LIST_LIMIT,
+            recovery_path=".req-to-plan/WF-test/logs/files.txt",
+        )
+
+        parsed = json.loads(json.dumps(result))
+        self.assertEqual(parsed["files"], ["a", "b", "c"])
+        self.assertEqual(parsed["files_shown"], 3)
+        self.assertEqual(parsed["files_total"], 3)
+        self.assertEqual(parsed["files_full_list"], ".req-to-plan/WF-test/logs/files.txt")
 
 
 class TestExitCodes(unittest.TestCase):
@@ -93,6 +144,23 @@ class TestFormatSuccess(unittest.TestCase):
             self.assertIn("a", output)
             self.assertIn("b", output)
 
+    def test_default_formatters_still_emit_full_lists(self):
+        with patch.dict(os.environ, {"R2P_JSON": "0"}, clear=False):
+            output = format_success({"items": ["a", "b", "c"]}, message="ok")
+
+        self.assertIn("    - a", output)
+        self.assertIn("    - b", output)
+        self.assertIn("    - c", output)
+
+    def test_success_json_mode_preserves_full_list(self):
+        items = [f"item-{i}" for i in range(COMPACT_DETAIL_LIMIT + 5)]
+        with patch.dict(os.environ, {"R2P_JSON": "1"}):
+            output = format_success({"items": items}, message="ok")
+
+        data = json.loads(output)
+        self.assertEqual(data["status"], "ok")
+        self.assertEqual(data["items"], items)
+
     def test_success_with_dict_data(self):
         with patch.dict(os.environ, {"R2P_JSON": "0"}):
             output = format_success({"config": {"key": "value"}})
@@ -129,6 +197,24 @@ class TestFormatError(unittest.TestCase):
             data = json.loads(output)
             self.assertEqual(data["status"], "error")
             self.assertEqual(data["details"], ["issue 1", "issue 2"])
+
+    def test_error_human_mode_emits_full_issue_list(self):
+        details = [f"issue {i}" for i in range(COMPACT_DETAIL_LIMIT + 4)]
+        with patch.dict(os.environ, {"R2P_JSON": "0"}):
+            output = format_error("forced review failed", details, EXIT_REVIEW_REQ)
+
+        for detail in details:
+            self.assertIn(f"  • {detail}", output)
+
+    def test_error_json_mode_preserves_full_issue_list(self):
+        details = [f"issue {i}" for i in range(COMPACT_DETAIL_LIMIT + 4)]
+        with patch.dict(os.environ, {"R2P_JSON": "1"}):
+            output = format_error("forced review failed", details, EXIT_REVIEW_REQ)
+
+        data = json.loads(output)
+        self.assertEqual(data["status"], "error")
+        self.assertEqual(data["exit_code"], EXIT_REVIEW_REQ)
+        self.assertEqual(data["details"], details)
 
     def test_error_default_exit_code(self):
         with patch.dict(os.environ, {"R2P_JSON": "1"}):
@@ -178,6 +264,15 @@ class TestFormatStop(unittest.TestCase):
             self.assertEqual(data["status"], "stop")
             self.assertEqual(data["run_id"], "WF-123")
 
+    def test_stop_json_mode_preserves_full_list_data(self):
+        items = [f"item-{i}" for i in range(COMPACT_DETAIL_LIMIT + 3)]
+        with patch.dict(os.environ, {"R2P_JSON": "1"}):
+            output = format_stop("waiting", data={"items": items})
+
+        data = json.loads(output)
+        self.assertEqual(data["status"], "stop")
+        self.assertEqual(data["items"], items)
+
     def test_stop_human_mode_with_data(self):
         with patch.dict(os.environ, {"R2P_JSON": "0"}):
             output = format_stop("waiting", data={"run_id": "WF-123"})
@@ -212,6 +307,22 @@ class TestFormatGateResult(unittest.TestCase):
             self.assertIn("failed", output)
             self.assertIn("issue 1", output)
 
+    def test_gate_failed_human_mode_emits_full_issue_list(self):
+        from unittest.mock import Mock
+
+        issues = [f"issue {i}" for i in range(COMPACT_DETAIL_LIMIT + 6)]
+        gate_result = Mock()
+        gate_result.passed = False
+        gate_result.issues = issues
+        gate_result.exit_code = EXIT_GATE_FAIL
+
+        with patch.dict(os.environ, {"R2P_JSON": "0"}):
+            output = format_gate_result(gate_result, "execution-completion")
+
+        self.assertIn("execution-completion failed", output)
+        for issue in issues:
+            self.assertIn(f"  • {issue}", output)
+
     def test_gate_failed_json(self):
         from unittest.mock import Mock
 
@@ -225,6 +336,23 @@ class TestFormatGateResult(unittest.TestCase):
             data = json.loads(output)
             self.assertEqual(data["status"], "error")
             self.assertEqual(data["exit_code"], EXIT_GATE_FAIL)
+
+    def test_gate_failed_json_mode_preserves_full_issue_list(self):
+        from unittest.mock import Mock
+
+        issues = [f"issue {i}" for i in range(COMPACT_DETAIL_LIMIT + 6)]
+        gate_result = Mock()
+        gate_result.passed = False
+        gate_result.issues = issues
+        gate_result.exit_code = EXIT_GATE_FAIL
+
+        with patch.dict(os.environ, {"R2P_JSON": "1"}):
+            output = format_gate_result(gate_result, "execution-completion")
+
+        data = json.loads(output)
+        self.assertEqual(data["status"], "error")
+        self.assertEqual(data["exit_code"], EXIT_GATE_FAIL)
+        self.assertEqual(data["details"], issues)
 
 
 if __name__ == "__main__":
