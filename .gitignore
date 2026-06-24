@@ -10,7 +10,6 @@ venv/
 .claude/skills/
 !AGENTS.md
 !CLAUDE.md
-!DEVELOPMENT.md
 .claude/settings.json
 .claude/settings.local.json
 .claude/scheduled_tasks.lock

@@ -13,7 +13,6 @@ _MAGIC_COUNT = re.compile(r"\b\d{2,}\s+(?:tests?\s+)?passing\b|baseline[:：]\s*
 
 # Docs that must describe the suite qualitatively, not with a frozen number.
 _GUARDED_DOCS = [
-    "DEVELOPMENT.md",
     "CLAUDE.md",
 ]
 
