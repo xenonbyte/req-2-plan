@@ -485,6 +485,29 @@ class TestStatusRun:
             assert exc.value.code == 2
             assert "WF-20260527-outside" not in capsys.readouterr().out
 
+    def test_rejects_symlinked_run_dir(self, capsys):
+        # Even a read-only command refuses a symlinked .req-to-plan/<id>: the
+        # guard is centralized in _load_run, not per-command.
+        from tools.workflow_cli.state import RunStateManager, create_run_record
+        from tools.workflow_cli.models import WorkId
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            work_id = "WF-20260527-link"
+            outside = base / "outside-run"
+            outside.mkdir()
+            RunStateManager(outside).save(create_run_record(WorkId(work_id)))
+            run_link = base / ".req-to-plan" / work_id
+            run_link.parent.mkdir(parents=True)
+            run_link.symlink_to(outside, target_is_directory=True)
+
+            with pytest.raises(SystemExit) as exc:
+                main(["--base-path", str(base), "status-run", "--work-id", work_id])
+
+            assert exc.value.code == 6
+            assert "symlink" in capsys.readouterr().out.lower()
+            assert run_link.is_symlink()
+
 
 # ---------------------------------------------------------------------------
 # status-next

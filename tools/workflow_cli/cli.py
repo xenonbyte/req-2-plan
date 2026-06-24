@@ -73,8 +73,13 @@ def _get_run_dir(work_id: str, base_path: Path | None = None) -> Path:
 
 
 def _load_run(work_id: str, base_path: Path | None = None):
-    """Load RunRecord; exit with EXIT_NOT_FOUND if not found."""
+    """Load RunRecord; exit with EXIT_NOT_FOUND if not found.
+
+    Rejects a symlinked run directory up front (EXIT_CONFLICT) so no command —
+    read-only or mutating — ever follows `.req-to-plan/<id>` out of the workspace.
+    """
     run_dir = _get_run_dir(work_id, base_path)
+    _reject_symlink_or_exit(run_dir, f"Run directory is a symlink: {run_dir}")
     mgr = RunStateManager(run_dir)
     try:
         return mgr.load(), mgr, run_dir
@@ -541,7 +546,6 @@ def _cmd_run_reopen(args):
 def _cmd_run_archive(args):
     record, mgr, run_dir = _load_run(args.work_id, args.base_path)
     base = args.base_path or Path.cwd()
-    _reject_symlink_or_exit(run_dir, f"Run directory is a symlink: {run_dir}")
     archivable = {RunStatus.CLOSED_AT_PLAN_CHECKPOINT, RunStatus.EXECUTING}
     if record.status not in archivable:
         print_and_exit(
@@ -594,7 +598,6 @@ def _cmd_run_archive(args):
 
 def _cmd_run_execute_start(args):
     record, mgr, run_dir = _load_run(args.work_id, args.base_path)
-    _reject_symlink_or_exit(run_dir, f"Run directory is a symlink: {run_dir}")
     if record.status != RunStatus.CLOSED_AT_PLAN_CHECKPOINT:
         print_and_exit(
             format_error(
