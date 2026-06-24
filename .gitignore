@@ -7,13 +7,10 @@ __pycache__/
 venv/
 *.egg-info/
 !.claude/
-.claude/skills/
 !AGENTS.md
 !CLAUDE.md
-.claude/settings.json
-.claude/settings.local.json
-.claude/scheduled_tasks.lock
+.claude
 .codegraph
 .cursor
 .pytest_cache
-docs/
+docs/archive
