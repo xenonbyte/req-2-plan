@@ -223,7 +223,10 @@ def _cmd_run_start(args):
             EXIT_CLI_ERR,
         )
     repo_path = _validate_repo_path(args.repo_path) if args.repo_path else None
+    base = args.base_path or Path.cwd()
+    _reject_symlink_or_exit(base / ".req-to-plan", "unsafe_workspace_dir_symlink")
     run_dir = _get_run_dir(work_id, args.base_path)
+    _reject_symlink_or_exit(run_dir, f"Run directory is a symlink: {run_dir}")
     mgr = RunStateManager(run_dir)
 
     run_dir_occupied = False
@@ -2000,7 +2003,10 @@ def _cmd_context_build(args):
     from tools.workflow_cli.context_pack import build_context_pack, write_context_pack
 
     work_id = str(_validate_work_id(args.work_id))
+    base = args.base_path or Path.cwd()
+    _reject_symlink_or_exit(base / ".req-to-plan", "unsafe_workspace_dir_symlink")
     run_dir = _get_run_dir(work_id, args.base_path)
+    _reject_symlink_or_exit(run_dir, f"Run directory is a symlink: {run_dir}")
     if not run_dir.exists():
         print_and_exit(
             format_error(f"run not found: {work_id}", exit_code=EXIT_NOT_FOUND),

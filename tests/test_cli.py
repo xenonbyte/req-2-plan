@@ -228,6 +228,55 @@ class TestRunStart:
 
             assert not stale_marker.exists()
 
+    def test_run_start_rejects_symlinked_workspace_dir_without_writing_target(self, capsys):
+        # run-start bootstraps the trusted state root, so it must refuse a
+        # symlinked .req-to-plan exactly like _load_run does for every other
+        # command — otherwise the requirement text is written out-of-workspace.
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            outside = base / "outside-r2p"
+            outside.mkdir()
+            (base / ".req-to-plan").symlink_to(outside, target_is_directory=True)
+
+            with pytest.raises(SystemExit) as exc:
+                main([
+                    "--base-path", str(base),
+                    "run-start",
+                    "--work-id", "WF-20260527-link",
+                    "--requirement", "secret requirement text",
+                ])
+
+            assert exc.value.code == 6  # EXIT_CONFLICT
+            assert "symlink" in capsys.readouterr().out.lower()
+            assert not (outside / "WF-20260527-link" / "00-raw-requirement.md").exists()
+            assert not (outside / "WF-20260527-link" / "run.md").exists()
+
+    def test_run_start_rejects_symlinked_run_dir_without_writing_target(self, capsys):
+        # A symlinked .req-to-plan/<id> must also be refused before any write,
+        # mirroring the second guard in _load_run.
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            work_id = "WF-20260527-link"
+            outside = base / "outside-run"
+            outside.mkdir()
+            run_link = base / ".req-to-plan" / work_id
+            run_link.parent.mkdir(parents=True)
+            run_link.symlink_to(outside, target_is_directory=True)
+
+            with pytest.raises(SystemExit) as exc:
+                main([
+                    "--base-path", str(base),
+                    "run-start",
+                    "--work-id", work_id,
+                    "--requirement", "secret requirement text",
+                ])
+
+            assert exc.value.code == 6  # EXIT_CONFLICT
+            assert "symlink" in capsys.readouterr().out.lower()
+            assert run_link.is_symlink()
+            assert not (outside / "00-raw-requirement.md").exists()
+            assert not (outside / "run.md").exists()
+
 
 # ---------------------------------------------------------------------------
 # run-start --requirement-file
@@ -2873,6 +2922,52 @@ class TestContextBuildCommand:
         assert exc_info.value.code == EXIT_CLI_ERR
         assert "repo path not found or not a directory" in capsys.readouterr().out
         assert not (run_dir / "02-project-context.json").exists()
+
+    def test_context_build_rejects_symlinked_workspace_dir_without_writing_target(self, tmp_path, capsys):
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        (repo / "requirements.txt").write_text("pyyaml>=6.0\n", encoding="utf-8")
+        outside = tmp_path / "outside-r2p"
+        outside.mkdir()
+        (tmp_path / ".req-to-plan").symlink_to(outside, target_is_directory=True)
+
+        with pytest.raises(SystemExit) as exc_info:
+            main([
+                "context-build",
+                "--work-id", "WF-20260605-link",
+                "--repo-path", str(repo),
+                "--base-path", str(tmp_path),
+            ])
+
+        assert exc_info.value.code == 6  # EXIT_CONFLICT
+        assert "symlink" in capsys.readouterr().out.lower()
+        assert not (outside / "WF-20260605-link" / "02-project-context.json").exists()
+        assert not (outside / "WF-20260605-link" / "02-project-context.md").exists()
+
+    def test_context_build_rejects_symlinked_run_dir_without_writing_target(self, tmp_path, capsys):
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        (repo / "requirements.txt").write_text("pyyaml>=6.0\n", encoding="utf-8")
+        work_id = "WF-20260605-link"
+        outside = tmp_path / "outside-run"
+        outside.mkdir()
+        run_link = tmp_path / ".req-to-plan" / work_id
+        run_link.parent.mkdir(parents=True)
+        run_link.symlink_to(outside, target_is_directory=True)
+
+        with pytest.raises(SystemExit) as exc_info:
+            main([
+                "context-build",
+                "--work-id", work_id,
+                "--repo-path", str(repo),
+                "--base-path", str(tmp_path),
+            ])
+
+        assert exc_info.value.code == 6  # EXIT_CONFLICT
+        assert "symlink" in capsys.readouterr().out.lower()
+        assert run_link.is_symlink()
+        assert not (outside / "02-project-context.json").exists()
+        assert not (outside / "02-project-context.md").exists()
 
 
 # ---------------------------------------------------------------------------
