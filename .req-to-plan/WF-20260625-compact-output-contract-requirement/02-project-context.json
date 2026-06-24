@@ -1,0 +1,33 @@
+{
+  "repo_root": "/Users/xubo/x-skills/req-to-plan",
+  "languages": {
+    "Python": 19860,
+    "JavaScript": 31
+  },
+  "package_managers": [
+    "npm",
+    "pip"
+  ],
+  "test_commands": [
+    "npm test"
+  ],
+  "entrypoints": [
+    "tools/workflow_cli/__main__.py"
+  ],
+  "dependencies": [
+    {
+      "name": "pyyaml>=6.0",
+      "version": "",
+      "ecosystem": "pip"
+    }
+  ],
+  "config_files": [
+    "requirements.txt"
+  ],
+  "source_dirs": [
+    "bin",
+    "docs",
+    "tests",
+    "tools"
+  ]
+}
