@@ -6,7 +6,10 @@ The Agent handles semantic quality; this module handles structural validation.
 """
 from __future__ import annotations
 
+import errno
+import os
 import re
+import stat
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -1115,6 +1118,31 @@ _LEDGER_UNCHECKED_RE = re.compile(r"^\s*-\s*\[\s*\]\s*(PLAN-TASK-\d+)\b")
 _LEDGER_CHECKED_RE = re.compile(r"^\s*-\s*\[[xX]\]\s*(PLAN-TASK-\d+)\b")
 
 
+def _read_regular_text_no_symlink(path: Path) -> tuple[str | None, str | None]:
+    """Read a regular file without following a symlink where the OS supports it."""
+    if path.is_symlink():
+        return None, "symlink"
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    fd: int | None = None
+    try:
+        fd = os.open(path, flags)
+        mode = os.fstat(fd).st_mode
+        if not stat.S_ISREG(mode):
+            return None, "not_regular"
+        with os.fdopen(fd, "r", encoding="utf-8") as fh:
+            fd = None
+            return fh.read(), None
+    except FileNotFoundError:
+        return None, "missing"
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            return None, "symlink"
+        raise
+    finally:
+        if fd is not None:
+            os.close(fd)
+
+
 def _plan_task_ids(run_dir: Path) -> list[str]:
     """Task IDs declared in the frozen PLAN artifact."""
     from tools.workflow_cli.artifact import read_artifact
@@ -1139,7 +1167,8 @@ def check_execution_complete(run_dir: Path) -> GateResult:
     (an audit gate, not a correctness gate). The CLI offers --force to override.
     """
     ledger = run_dir / "execution" / "progress.md"
-    if not ledger.exists():
+    ledger_text, ledger_error = _read_regular_text_no_symlink(ledger)
+    if ledger_error == "missing":
         return GateResult(
             passed=False,
             issues=[
@@ -1148,7 +1177,26 @@ def check_execution_complete(run_dir: Path) -> GateResult:
             ],
             exit_code=EXIT_GATE_FAIL,
         )
-    lines = [line for line, _, _ in unfenced_markdown_lines(ledger.read_text(encoding="utf-8"))]
+    if ledger_error == "symlink":
+        return GateResult(
+            passed=False,
+            issues=[
+                "Execution ledger execution/progress.md is a symlink; refusing "
+                "to read outside the run directory."
+            ],
+            exit_code=EXIT_GATE_FAIL,
+        )
+    if ledger_error == "not_regular":
+        return GateResult(
+            passed=False,
+            issues=[
+                "Execution ledger execution/progress.md is not a regular file; "
+                "cannot confirm the PLAN was executed."
+            ],
+            exit_code=EXIT_GATE_FAIL,
+        )
+    assert ledger_text is not None
+    lines = [line for line, _, _ in unfenced_markdown_lines(ledger_text)]
     issues: list[str] = []
     for line in lines:
         if _LEDGER_UNCHECKED_RE.match(line):

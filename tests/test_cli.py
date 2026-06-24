@@ -3513,6 +3513,31 @@ class TestRunArchiveFromExecuting:
             assert not (base / ".req-to-plan" / "archive" / "WF-20260101-exec").exists()
             assert RunStateManager(run_dir).load().status.value == "executing"
 
+    def test_archive_executing_run_rejects_symlinked_ledger(self, capsys):
+        from tools.workflow_cli.state import RunStateManager
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            run_dir = self._executing_run(
+                base,
+                "WF-20260101-exec",
+                None,
+                plan=self._TWO_TASK_PLAN,
+            )
+            outside = base / "outside-progress.md"
+            outside.write_text(self._COMPLETE_LEDGER, encoding="utf-8")
+            exec_dir = run_dir / "execution"
+            exec_dir.mkdir()
+            (exec_dir / "progress.md").symlink_to(outside)
+
+            with pytest.raises(SystemExit) as exc:
+                main(["--base-path", str(base), "run-archive", "--work-id", "WF-20260101-exec"])
+
+            assert exc.value.code == 3  # EXIT_GATE_FAIL
+            assert "symlink" in capsys.readouterr().out.lower()
+            assert run_dir.exists()  # not moved
+            assert not (base / ".req-to-plan" / "archive" / "WF-20260101-exec").exists()
+            assert RunStateManager(run_dir).load().status.value == "executing"
+
     def test_archive_executing_run_rejected_with_unchecked_task(self):
         from tools.workflow_cli.state import RunStateManager
         ledger = (
