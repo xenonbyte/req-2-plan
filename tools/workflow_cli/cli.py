@@ -49,9 +49,13 @@ from tools.workflow_cli.gates import (
     check_execution_complete,
 )
 from tools.workflow_cli.output import (
+    COMPACT_DETAIL_LIMIT,
+    COMPACT_FILE_LIST_LIMIT,
+    compact_human_list,
     format_success,
     format_error,
     format_gate_result,
+    is_json_mode,
     print_and_exit,
     EXIT_OK,
     EXIT_CLI_ERR,
@@ -93,6 +97,53 @@ def _load_run(work_id: str, base_path: Path | None = None):
             format_error(f"Run not found: {work_id}", exit_code=EXIT_NOT_FOUND),
             EXIT_NOT_FOUND,
         )
+
+
+def _write_recovery_list(run_dir: Path, work_id: str, filename: str, items: list[str]) -> str | None:
+    logs_dir = run_dir / "logs"
+    if logs_dir.is_symlink():
+        return None
+    try:
+        logs_dir.mkdir(parents=True, exist_ok=True)
+        recovery_path = logs_dir / filename
+        atomic_write_text(recovery_path, "\n".join(items) + "\n")
+    except OSError:
+        return None
+    return f".req-to-plan/{work_id}/logs/{filename}"
+
+
+def _human_list_payload(
+    *,
+    run_dir: Path,
+    work_id: str,
+    label: str,
+    items: list,
+    limit: int,
+    recovery_filename: str,
+    recovery_items: list[str] | None = None,
+) -> dict:
+    if is_json_mode() or len(items) <= limit:
+        return {label: items}
+
+    recovery_path = _write_recovery_list(
+        run_dir,
+        work_id,
+        recovery_filename,
+        recovery_items if recovery_items is not None else [str(item) for item in items],
+    )
+    if recovery_path is None:
+        return {label: items}
+
+    payload = compact_human_list(
+        label=label,
+        items=items,
+        limit=limit,
+        recovery_path=recovery_path,
+    )
+    payload[f"{label}_summary"] = (
+        f"{payload[f'{label}_shown']} shown, {payload[f'{label}_total']} total"
+    )
+    return payload
 
 
 def _validate_work_id(raw: str) -> WorkId:
@@ -334,6 +385,15 @@ def _cmd_run_start(args):
 def _cmd_run_resume(args):
     record, mgr, run_dir = _load_run(args.work_id, args.base_path)
     rc = record.resume_context
+    reread_targets = list(rc.required_reread_targets)
+    reread_payload = _human_list_payload(
+        run_dir=run_dir,
+        work_id=str(record.work_id),
+        label="required_reread_targets",
+        items=reread_targets,
+        limit=COMPACT_FILE_LIST_LIMIT,
+        recovery_filename="run-resume-reread-targets.txt",
+    )
     print_and_exit(
         format_success(
             {
@@ -344,6 +404,7 @@ def _cmd_run_resume(args):
                 "next_operation": rc.next_allowed_operation,
                 "active_item": rc.active_item,
                 "resume_reason": rc.resume_reason,
+                **reread_payload,
             },
             message="Resume context",
         ),
@@ -1223,6 +1284,22 @@ def _cmd_status_run(args):
         for s in record.stale_artifacts
     ]
     outstanding_stale = [aa.stage.value for aa in record.active_artifacts if aa.status == "stale"]
+    approved_checkpoints = [cp.stage.value for cp in record.approved_checkpoints]
+    approved_payload = _human_list_payload(
+        run_dir=run_dir,
+        work_id=str(record.work_id),
+        label="approved_checkpoints",
+        items=approved_checkpoints,
+        limit=COMPACT_DETAIL_LIMIT,
+        recovery_filename="status-run-approved-checkpoints.txt",
+        recovery_items=[
+            (
+                f"{cp.stage.value}\t{cp.artifact}\tv{cp.version}\t"
+                f"{cp.approved_at}\t{cp.downstream_authorization}\t{cp.bundle_id or ''}"
+            )
+            for cp in record.approved_checkpoints
+        ],
+    )
 
     print_and_exit(
         format_success(
@@ -1237,7 +1314,7 @@ def _cmd_status_run(args):
                 "open_routes_detail": open_routes_detail,
                 "stale_artifacts": stale_artifacts,
                 "outstanding_stale": outstanding_stale,
-                "approved_checkpoints": [cp.stage.value for cp in record.approved_checkpoints],
+                **approved_payload,
             },
             message="Run status",
         ),

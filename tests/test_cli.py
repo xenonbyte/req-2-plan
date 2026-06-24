@@ -557,6 +557,157 @@ class TestStatusRun:
             assert "symlink" in capsys.readouterr().out.lower()
             assert run_link.is_symlink()
 
+    def test_human_caps_approved_checkpoints_with_recovery_file(self, tmp_path, capsys):
+        work_id = "WF-20260625-compact-test"
+        invoke(["run-start", "--work-id", work_id, "--requirement", "Compact status output"], base_path=tmp_path)
+        record = load_record(tmp_path, work_id)
+        stages = list(Stage)
+        record.approved_checkpoints = [
+            CheckpointRecord(
+                stage=stages[i % len(stages)],
+                artifact=f"{i:02d}-artifact.md",
+                version=i,
+                approved_at=f"2026-06-25T00:{i:02d}:00+00:00",
+                downstream_authorization="next_stage",
+            )
+            for i in range(12)
+        ]
+        save_record(tmp_path, record)
+        capsys.readouterr()
+
+        invoke(["status-run", "--work-id", work_id], base_path=tmp_path)
+
+        out = capsys.readouterr().out
+        recovery = tmp_path / ".req-to-plan" / work_id / "logs" / "status-run-approved-checkpoints.txt"
+        assert "approved_checkpoints" in out
+        assert "10 shown" in out
+        assert "12 total" in out
+        assert f".req-to-plan/{work_id}/logs/status-run-approved-checkpoints.txt" in out
+        assert recovery.exists()
+        assert "00-artifact.md" in recovery.read_text(encoding="utf-8")
+
+    def test_human_keeps_short_approved_checkpoints_without_recovery_file(self, tmp_path, capsys):
+        work_id = "WF-20260625-compact-test"
+        invoke(["run-start", "--work-id", work_id, "--requirement", "Compact status output"], base_path=tmp_path)
+        record = load_record(tmp_path, work_id)
+        record.approved_checkpoints = [
+            CheckpointRecord(
+                stage=Stage.RAW_REQUIREMENT,
+                artifact=f"{i:02d}-artifact.md",
+                version=i,
+                approved_at=f"2026-06-25T00:{i:02d}:00+00:00",
+                downstream_authorization="next_stage",
+            )
+            for i in range(3)
+        ]
+        save_record(tmp_path, record)
+        capsys.readouterr()
+
+        invoke(["status-run", "--work-id", work_id], base_path=tmp_path)
+
+        out = capsys.readouterr().out
+        assert "approved_checkpoints" in out
+        assert "shown" not in out
+        assert "total" not in out
+        assert f".req-to-plan/{work_id}/logs/status-run-approved-checkpoints.txt" not in out
+        assert not (tmp_path / ".req-to-plan" / work_id / "logs" / "status-run-approved-checkpoints.txt").exists()
+
+    def test_human_falls_back_to_full_approved_checkpoints_when_recovery_write_fails(self, tmp_path, capsys):
+        work_id = "WF-20260625-compact-test"
+        invoke(["run-start", "--work-id", work_id, "--requirement", "Compact status output"], base_path=tmp_path)
+        record = load_record(tmp_path, work_id)
+        record.approved_checkpoints = [
+            CheckpointRecord(
+                stage=Stage.RAW_REQUIREMENT,
+                artifact=f"{i:02d}-artifact.md",
+                version=i,
+                approved_at=f"2026-06-25T00:{i:02d}:00+00:00",
+                downstream_authorization="next_stage",
+            )
+            for i in range(12)
+        ]
+        save_record(tmp_path, record)
+        logs_path = tmp_path / ".req-to-plan" / work_id / "logs"
+        logs_path.write_text("not a directory", encoding="utf-8")
+        capsys.readouterr()
+
+        invoke(["status-run", "--work-id", work_id], base_path=tmp_path)
+
+        out = capsys.readouterr().out
+        assert "10 shown" not in out
+        assert "12 total" not in out
+        assert f".req-to-plan/{work_id}/logs/status-run-approved-checkpoints.txt" not in out
+        assert out.count("    - raw_requirement") == 12
+
+    def test_json_keeps_full_approved_checkpoints_without_recovery_file(self, tmp_path, capsys, monkeypatch):
+        work_id = "WF-20260625-compact-test"
+        invoke(["run-start", "--work-id", work_id, "--requirement", "Compact status output"], base_path=tmp_path)
+        record = load_record(tmp_path, work_id)
+        record.approved_checkpoints = [
+            CheckpointRecord(
+                stage=Stage.RAW_REQUIREMENT,
+                artifact=f"{i:02d}-artifact.md",
+                version=i,
+                approved_at=f"2026-06-25T00:{i:02d}:00+00:00",
+                downstream_authorization="next_stage",
+            )
+            for i in range(12)
+        ]
+        save_record(tmp_path, record)
+        monkeypatch.setenv("R2P_JSON", "1")
+        capsys.readouterr()
+
+        invoke(["status-run", "--work-id", work_id], base_path=tmp_path)
+
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["approved_checkpoints"] == ["raw_requirement"] * 12
+        assert "approved_checkpoints_full_list" not in payload
+        assert not (tmp_path / ".req-to-plan" / work_id / "logs" / "status-run-approved-checkpoints.txt").exists()
+
+    def test_human_keeps_status_decision_fields_uncapped(self, tmp_path, capsys):
+        from tools.workflow_cli.models import ActiveArtifact, StaleArtifact
+
+        work_id = "WF-20260625-compact-test"
+        invoke(["run-start", "--work-id", work_id, "--requirement", "Compact status output"], base_path=tmp_path)
+        record = load_record(tmp_path, work_id)
+        record.open_routes = [
+            OpenRoute(
+                route_id=f"GAP-{i:03d}",
+                from_stage=Stage.PLAN,
+                owner_stage=Stage.SPEC,
+                required_action=f"repair-{i}",
+                status="open",
+            )
+            for i in range(12)
+        ]
+        record.stale_artifacts = [
+            StaleArtifact(
+                artifact=f"artifact-{i}.md",
+                reason=f"reason-{i}",
+                replaced_by=f"replacement-{i}.md",
+                required_action=f"refresh-{i}",
+            )
+            for i in range(12)
+        ]
+        record.active_artifacts = [
+            ActiveArtifact(
+                stage=Stage.PLAN,
+                artifact=f"active-{i}.md",
+                version=i,
+                status="stale",
+            )
+            for i in range(12)
+        ]
+        save_record(tmp_path, record)
+        capsys.readouterr()
+
+        invoke(["status-run", "--work-id", work_id], base_path=tmp_path)
+
+        out = capsys.readouterr().out
+        assert "GAP-011" in out
+        assert "artifact-11.md" in out
+        assert out.count("plan") >= 12
+
 
 # ---------------------------------------------------------------------------
 # status-next
@@ -576,6 +727,30 @@ class TestStatusNext:
             )
             out = capsys.readouterr().out
             assert len(out.strip()) > 0
+
+    def test_decision_fields_remain_uncapped(self, tmp_path, capsys):
+        from tools.workflow_cli.state import update_resume_context
+
+        work_id = "WF-20260625-compact-test"
+        invoke(["run-start", "--work-id", work_id, "--requirement", "Compact status output"], base_path=tmp_path)
+        record = load_record(tmp_path, work_id)
+        long_targets = ", ".join(f"file-{i}.py" for i in range(20))
+        update_resume_context(
+            record,
+            next_operation=f"next operation requires {long_targets}",
+            active_item=f"active item includes {long_targets}",
+            reason=f"resume because {long_targets}",
+        )
+        save_record(tmp_path, record)
+        capsys.readouterr()
+
+        invoke(["status-next", "--work-id", work_id], base_path=tmp_path)
+
+        out = capsys.readouterr().out
+        assert "file-19.py" in out
+        assert "shown" not in out
+        assert "total" not in out
+        assert "full_list" not in out
 
 
 # ---------------------------------------------------------------------------
@@ -619,6 +794,109 @@ class TestRunResume:
             with pytest.raises(SystemExit) as exc:
                 main(["--base-path", str(tmp), "run-resume", "--work-id", "WF-20260527-nothere"])
             assert exc.value.code != 0
+
+    def test_human_caps_reread_targets_with_recovery_file(self, tmp_path, capsys):
+        from tools.workflow_cli.state import update_resume_context
+
+        work_id = "WF-20260625-compact-test"
+        invoke(["run-start", "--work-id", work_id, "--requirement", "Compact status output"], base_path=tmp_path)
+        record = load_record(tmp_path, work_id)
+        update_resume_context(record, reread_targets=[f"file-{i}.py" for i in range(20)])
+        save_record(tmp_path, record)
+        capsys.readouterr()
+
+        invoke(["run-resume", "--work-id", work_id], base_path=tmp_path)
+
+        out = capsys.readouterr().out
+        recovery = tmp_path / ".req-to-plan" / work_id / "logs" / "run-resume-reread-targets.txt"
+        assert "required_reread_targets" in out
+        assert "15 shown" in out
+        assert "20 total" in out
+        assert f".req-to-plan/{work_id}/logs/run-resume-reread-targets.txt" in out
+        assert recovery.exists()
+        assert "file-19.py" in recovery.read_text(encoding="utf-8")
+
+    def test_human_keeps_short_reread_targets_without_recovery_file(self, tmp_path, capsys):
+        from tools.workflow_cli.state import update_resume_context
+
+        work_id = "WF-20260625-compact-test"
+        invoke(["run-start", "--work-id", work_id, "--requirement", "Compact status output"], base_path=tmp_path)
+        record = load_record(tmp_path, work_id)
+        update_resume_context(record, reread_targets=[f"file-{i}.py" for i in range(3)])
+        save_record(tmp_path, record)
+        capsys.readouterr()
+
+        invoke(["run-resume", "--work-id", work_id], base_path=tmp_path)
+
+        out = capsys.readouterr().out
+        assert "required_reread_targets" in out
+        assert "file-2.py" in out
+        assert "shown" not in out
+        assert "total" not in out
+        assert f".req-to-plan/{work_id}/logs/run-resume-reread-targets.txt" not in out
+        assert not (tmp_path / ".req-to-plan" / work_id / "logs" / "run-resume-reread-targets.txt").exists()
+
+    def test_human_falls_back_to_full_reread_targets_when_recovery_write_fails(self, tmp_path, capsys):
+        from tools.workflow_cli.state import update_resume_context
+
+        work_id = "WF-20260625-compact-test"
+        invoke(["run-start", "--work-id", work_id, "--requirement", "Compact status output"], base_path=tmp_path)
+        record = load_record(tmp_path, work_id)
+        update_resume_context(record, reread_targets=[f"file-{i}.py" for i in range(20)])
+        save_record(tmp_path, record)
+        logs_path = tmp_path / ".req-to-plan" / work_id / "logs"
+        logs_path.write_text("not a directory", encoding="utf-8")
+        capsys.readouterr()
+
+        invoke(["run-resume", "--work-id", work_id], base_path=tmp_path)
+
+        out = capsys.readouterr().out
+        assert "15 shown" not in out
+        assert "20 total" not in out
+        assert f".req-to-plan/{work_id}/logs/run-resume-reread-targets.txt" not in out
+        assert "file-19.py" in out
+
+    def test_json_keeps_full_reread_targets_without_recovery_file(self, tmp_path, capsys, monkeypatch):
+        from tools.workflow_cli.state import update_resume_context
+
+        work_id = "WF-20260625-compact-test"
+        invoke(["run-start", "--work-id", work_id, "--requirement", "Compact status output"], base_path=tmp_path)
+        record = load_record(tmp_path, work_id)
+        update_resume_context(record, reread_targets=[f"file-{i}.py" for i in range(20)])
+        save_record(tmp_path, record)
+        monkeypatch.setenv("R2P_JSON", "1")
+        capsys.readouterr()
+
+        invoke(["run-resume", "--work-id", work_id], base_path=tmp_path)
+
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["required_reread_targets"] == [f"file-{i}.py" for i in range(20)]
+        assert "required_reread_targets_full_list" not in payload
+        assert not (tmp_path / ".req-to-plan" / work_id / "logs" / "run-resume-reread-targets.txt").exists()
+
+    def test_human_keeps_resume_decision_fields_uncapped(self, tmp_path, capsys):
+        from tools.workflow_cli.state import update_resume_context
+
+        work_id = "WF-20260625-compact-test"
+        invoke(["run-start", "--work-id", work_id, "--requirement", "Compact status output"], base_path=tmp_path)
+        record = load_record(tmp_path, work_id)
+        long_targets = ", ".join(f"file-{i}.py" for i in range(20))
+        update_resume_context(
+            record,
+            next_operation=f"next operation requires {long_targets}",
+            active_item=f"active item includes {long_targets}",
+            reason=f"resume because {long_targets}",
+            reread_targets=[f"short-{i}.py" for i in range(3)],
+        )
+        save_record(tmp_path, record)
+        capsys.readouterr()
+
+        invoke(["run-resume", "--work-id", work_id], base_path=tmp_path)
+
+        out = capsys.readouterr().out
+        assert "file-19.py" in out
+        assert "shown" not in out
+        assert "total" not in out
 
 
 # ---------------------------------------------------------------------------
