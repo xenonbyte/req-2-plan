@@ -51,8 +51,6 @@ and provide a clear path to the full raw detail when truncation happens.
 - Do not truncate gate, forced-review, or completion-gate failure issue lists;
   they are the agent's repair checklist and stay complete (failure-first
   ordering only, no caps).
-- Do not force ignored `docs/` content into Git unless the maintainer explicitly
-  changes the repository policy.
 
 ## Target Surfaces
 
