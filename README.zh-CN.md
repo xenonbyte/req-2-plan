@@ -6,35 +6,60 @@
 [![node](https://img.shields.io/node/v/%40xenonbyte%2Freq-2-plan.svg)](https://nodejs.org)
 [![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
 
-> 把原始需求变成一份获批、执行器中立的实现 PLAN——同一套分阶段工作流，在 Claude Code、Codex、Gemini 上一致运行。
+> 把原始需求变成一份获批、执行器中立的实现 PLAN，并在 Claude Code、Codex、Gemini 上一致运行。
 
-`req-2-plan` 为 AI agent 平台安装并管理 `r2p` 需求到 PLAN 的工作流。该工作流是一条
-分阶段、门控的流水线：需求依次经过 **requirement brief → risk discovery → DESIGN →
-SPEC → PLAN**，每个阶段都要先过一道 quality gate 和一个人工/主控 checkpoint 才能交给
-下游。产出是一份另一个 agent 或工程师无需重新决策范围就能执行的计划。
+`req-2-plan` 为 AI coding agent 安装 `r2p` 工作流。它把粗略需求推进到一条分阶段、
+门控的流程中：**requirement brief**、**risk discovery**、**DESIGN**、**SPEC**、
+**PLAN**。最终得到的计划有上下文、有审查记录，也能直接交给另一个 agent 或工程师执行。
 
-这个 npm 包是安装器：它从一份共享源生成各平台的 agent skill 与命令，并安装进
-Claude Code、Codex、Gemini，让工作流在三个平台上表现一致。
+这个 npm 包是生命周期安装器。目前它支持 3 个 agent 平台：**Claude Code**、**Codex**、
+**Gemini**。它从一份共享源生成各平台的 agent skill，安装共享的 `r2p-*` wrapper，
+并维护 owned manifest，确保卸载时只移除 `r2p` 自己管理的文件。
+
+**Contents:** [Why r2p](#why-r2p) · [Features](#features) · [Installation](#installation) · [Quick start](#quick-start) · [Workflow commands](#workflow-commands) · [Development](#development)
+
+## Why r2p
+
+AI agent 执行很快，但模糊需求容易变成含糊计划、隐藏范围决策和反复返工。`r2p`
+把规划阶段显式化：
+
+- 原始需求会作为真值来源被保留；
+- 风险和未知点会在实现计划前暴露；
+- DESIGN、SPEC、PLAN 都要通过结构化 quality gate；
+- 必须由人选择的决定会被记录，而不是由 agent 猜；
+- 执行可以从 PLAN 开始，不需要重新决定范围。
+
+当需求不只是单行修改、会影响重要行为，或需要在多个 agent 之间做稳定交接时，适合使用它。
 
 ## Features
 
-- **分阶段、门控流水线**——每个阶段交接前都通过一道 quality gate 和一个 checkpoint；不靠猜推进。
-- **单一生命周期 CLI**——`r2p install`、`r2p uninstall`、`r2p status`、`r2p version`、`r2p help`，只依赖 Python 标准库。
-- **一份源、多平台**——为 `claude`、`codex`、`gemini` 生成 skill。
-- **owned-only、manifest 背书的安装**——卸载只删 `r2p` 创建的文件；已存在的用户文件会被备份并保留。
-- **紧凑的 agent 技能**——八个 `r2p-*` wrapper 驱动日常循环。
+- **分阶段 requirement-to-PLAN 工作流**：requirement brief、risk discovery、DESIGN、SPEC、PLAN。
+- **Quality gate 与 checkpoint**：每个阶段交接前都要先通过校验。
+- **支持 3 个平台**：为 Claude Code（`claude`）、Codex（`codex`）、Gemini（`gemini`）安装匹配入口。
+- **单一生命周期 CLI**：`r2p install`、`r2p uninstall`、`r2p status`、`r2p version`、`r2p help`。
+- **Manifest-backed 安装安全**：覆盖前备份已存在文件，卸载只删除受管路径。
+- **Project Context Pack**：`--repo-path` 捕获真实仓库事实，用于 tier 估算和 PLAN 校验。
+- **修复路径**：可重开 closed run、路由上游缺口，并关闭已修复的决策路线。
+- **执行交接**：`r2p-execute` 可以把获批 PLAN 接入当前分支上的实现循环。
 
 ## Supported platforms
 
-| 平台 | 技能格式 |
+`r2p` 当前支持 3 个平台。`--platform` 使用下表里的 platform ID。
+
+| Agent platform | Platform ID | Installed surface |
 |---|---|
-| `claude` | 命令文件（`commands/r2p-*.md`） |
-| `codex` | 技能目录（`skills/r2p-*/SKILL.md`） |
-| `gemini` | 命令 TOML（`commands/r2p-*.toml`） |
+| Claude Code | `claude` | `skills/r2p/SKILL.md` plus `commands/r2p-*.md` |
+| Codex | `codex` | `skills/r2p-*/SKILL.md` |
+| Gemini | `gemini` | `commands/r2p-*.toml` |
 
 ## Installation
 
-环境要求：**Node.js 18+** 与 **Python 3**（以 `python3` 或 `python` 提供）。
+环境要求：
+
+- Node.js 18+
+- Python 3，以 `python3` 或 `python` 提供
+
+全局安装：
 
 ```bash
 npm install -g @xenonbyte/req-2-plan
@@ -49,145 +74,157 @@ r2p help
 ```
 
 > [!NOTE]
-> 生命周期命令只需 Python 标准库，但日常 `r2p-*` 技能依赖 `pyyaml`。在仓库 checkout
-> 内用 `python3 -m pip install --user -r requirements.txt` 安装，或直接
+> 生命周期命令只使用 Python 标准库。日常 workflow wrapper 使用 `pyyaml`；在 checkout
+> 内可运行 `python3 -m pip install --user -r requirements.txt`，或直接运行
 > `python3 -m pip install --user "pyyaml>=6.0"`。
 
-`r2p install` 把各平台模板写入对应 agent 的 home 目录、在 `~/.req-to-plan/bin/` 下写入
-共享命令 wrapper，并生成 `~/.req-to-plan/install/<platform>.yaml` 清单。清单记录每个
-受管路径，因此卸载只移除 `r2p` 创建的文件，并为安装前已存在的文件还原备份。
-
-## Usage
-
-### Quick start
-
-先在终端用生命周期 CLI 安装平台技能并确认安装结果：
-
-```bash
-r2p install   # 安装全部平台（默认）
-r2p status    # 查看已安装情况
-```
-
-然后在 agent 里驱动工作流——已安装的平台技能会调用 `r2p-*` 包装器
-（如需在终端手动执行，先把 `~/.req-to-plan/bin` 加入 `PATH`，见下方 tip）：
-
-```text
-/r2p-start --repo-path . "Add rate limiting"    # 需求为内联文本
-/r2p-start --repo-path . --file change-req.md   # 需求为文档文件
-/r2p-continue                                   # 逐阶段推进
-```
-
-需求可以是内联文本，也可以用 `--file <path>` 传入文档（两者互斥）。
-**只要需求以某个代码仓库为上下文，就必须传 `--repo-path`**——当前项目传 `.`，
-跨仓库需求传目标仓库路径；它生成的 Project Context Pack 是 tier 估算与 PLAN
-文件引用校验的真值锚点。选项写在需求文本之前（如上例），这样即使自由文本
-引号写错也不会吞掉选项。若 standard tier 的 PLAN gate 提示 Context Pack
-缺失/不可用，直接执行 gate 打印的
-`PYTHONPATH=... <python> -m tools.workflow_cli context-build ...` 命令中途补建
-（不存在独立的 `context-build` 可执行文件）。
-
-### Lifecycle commands
-
-安装全部平台、单个平台，或逗号分隔的列表：
+安装全部支持的 agent 集成。不传 `--platform` 时，这就是默认行为：
 
 ```bash
 r2p install
+```
+
+用 `--platform` 只安装指定平台：
+
+```bash
 r2p install --platform claude
 r2p install --platform claude,codex,gemini
 ```
 
-按平台报告安装状态——已装版本、漂移（缺文件或版本不匹配）、或 manifest 无效。`status`
-只读；加 `--json` 得到机器可读输出：
-
-```bash
-r2p status
-r2p status --json
-```
-
-卸载单个平台、列表，或全部（省略 `--platform`）：
-
-```bash
-r2p uninstall --platform claude
-r2p uninstall --platform claude,codex,gemini
-```
-
 > [!WARNING]
-> `r2p install` 直接覆盖已有安装——无需确认参数。覆盖前会先备份已存在的用户文件，
-> 而卸载绝不删除非 `r2p` 创建的文件。
+> `r2p install` 会覆盖所选平台的既有 `r2p` 安装。已存在的用户文件会先备份，
+> `r2p uninstall` 也只会移除 install manifest 里记录的路径。
 
-### Workflow skills
+## Quick start
 
-安装后，平台 skill 调用这些共享的 `r2p-*` wrapper——运行一次工作流的每一步各一个：
+安装平台 skill 后，在 agent 里启动一次工作流：
 
-| Skill | 作用 |
-|---|---|
-| `r2p-start` | 从需求启动一次新运行（文本，或用 `--file <path>` 读取文档内容）。 |
-| `r2p-continue` | 继续当前运行——推进到下一个停点（gate、checkpoint 或修复）。 |
-| `r2p-status` | 查看当前运行或全部运行，只读。 |
-| `r2p-switch` | 把活动运行指向另一个 `--work-id`。 |
-| `r2p-tier-lock` | 锁定活动运行的复杂度 tier（`--base light\|standard`）。 |
-| `r2p-reopen` | 从指定 `--stage` 重开一个已关闭或执行中的运行。 |
-| `r2p-gap-open` | 把 open run 的上游缺口路由回其 `--owner-stage`；下游 artifact 失效、需重新派生。 |
-| `r2p-gap-resolve` | owner 阶段重做并通过 `gate-quality` 后，关闭一个 `--route-id` 缺口路由。 |
-| `r2p-archive` | 将已关闭的运行归档到活动工作区外（移至 `.req-to-plan/archive/` 并取消跟踪）。 |
-| `r2p-execute` | 通过子代理驱动的 SDD 循环，在当前分支原地实现已关闭运行的 PLAN，完成后归档。 |
+```text
+/r2p-start --repo-path . "Add rate limiting"
+/r2p-continue
+```
+
+也可以从需求文件启动，而不是传内联文本：
+
+```text
+/r2p-start --repo-path . --file change-req.md
+```
+
+只要需求以代码仓库为上下文，就传 `--repo-path`。当前仓库传 `.`，跨项目需求传目标仓库路径。
+这会构建 Project Context Pack，供 tier 估算和 PLAN 引用校验使用。
+
+工作流会在需要人或 agent 动作时停下：锁定 tier、填写 artifact、修复 quality gate、
+批准 checkpoint、执行 subagent review，或解决 gap。按输出里的 `next:` 命令执行，
+然后继续运行 `r2p-continue`。
 
 > [!TIP]
-> 把 `~/.req-to-plan/bin` 加入 `PATH`，即可直接运行 `r2p-*` wrapper：
+> 把 `~/.req-to-plan/bin` 加入 `PATH`，即可直接运行 wrapper：
 >
 > ```bash
 > export PATH="$HOME/.req-to-plan/bin:$PATH"
 > ```
 
-> [!NOTE]
-> **关闭与归档会自动提交。** 在 PLAN 检查点关闭一个 run、以及归档一个 run 时，都会
-> 执行一次 path-limited `git commit`，范围仅限 `.req-to-plan/.gitignore` 和该 run 的
-> `.req-to-plan/<work-id>` 目录（归档会提交原路径的删除，使其不再被跟踪）。它从不执行
-> `git add -A`、`-f` 或 `git push`，且在 git 工作树之外为 no-op。
+## Workflow commands
 
-### When to use which skill
+安装后，面向 agent 的命令会调用 `~/.req-to-plan/bin` 下的共享 wrapper。
 
-大多数运行只需 `r2p-start`，然后反复 `r2p-continue`。其余技能针对特定情形。
+| Command | Purpose |
+|---|---|
+| `r2p-start` | 从内联需求文本或 `--file <path>` 启动新 run。 |
+| `r2p-continue` | 把活动 run 推进到下一个停点或完成状态。 |
+| `r2p-status` | 只读查看活动 run；加 `--all` 可查看全部 run。 |
+| `r2p-switch` | 切换活动的 `--work-id`。 |
+| `r2p-tier-lock` | 用 `--base light\|standard` 和可选 modifier 锁定 tier。 |
+| `r2p-reopen` | 从指定阶段重开一个 closed 或 executing run。 |
+| `r2p-gap-open` | 把 open run 的上游缺口路由回 owner stage。 |
+| `r2p-gap-resolve` | 关闭一个已修复的上游缺口 route。 |
+| `r2p-archive` | 把 closed run 移到 `.req-to-plan/archive/`，并取消活动路径跟踪。 |
+| `r2p-execute` | 在当前分支原地执行 closed PLAN，然后归档该 run。 |
 
-**锁定 tier**——每个 run 一次，当 `r2p-continue` 停在 `tier_not_locked` 时：
+大多数 run 只需要 `r2p-start`，然后反复 `r2p-continue`。当工作流输出这些命令，
+或你明确需要切换、修复、重开、执行、归档时，再使用对应的专用命令。
 
-```bash
-r2p-tier-lock --work-id <id> --base standard --modifiers migration,safety --confirm
-```
-
-`--base standard` 抬高刚性下限；`migration`、`safety`、`cross_project` 这几个 modifier
-会在 DESIGN / SPEC / PLAN 检查点强制子 agent 审查。
-
-**重开已关闭或执行中的 run**——回到一个已在 PLAN 检查点关闭、或已进入执行中的运行，
-从更早的阶段重新开始（会派生一个带血缘的新 run）：
-
-```bash
-r2p-reopen --from <closed-or-executing-id> --stage spec --reason "spec gap found"
-```
-
-**回路上游缺口**——在一个**开着的** run 上，当后面的阶段发现更早的阶段拥有一个错误或
-缺失的决策时。`gap-open` 把 run 退回 owner 阶段并把所有下游标记 stale；待你把 owner
-重做到通过 `gate-quality`，`gap-resolve` 关闭路由，让 owner 可被重新批准、下游重新派生：
-
-```bash
-r2p-gap-open --work-id <id> --owner-stage design --required-action "fixed-window burst flaw"
-# 然后把 owner 阶段重做到通过 gate-quality（r2p-continue 会引导这步）
-r2p-gap-resolve --work-id <id> --route-id R-1
-```
+> [!IMPORTANT]
+> `r2p-execute` 假设宿主 agent 能派发 subagent。它直接在当前分支工作，不会 push，
+> 也不会打开 pull request。
 
 > [!NOTE]
-> reopen 针对**已关闭或执行中**的 run；gap 路由针对**开着**的 run。`r2p-continue` 会用
-> `needs_repair` 和 `needs_gap_resolve` 停点带你走完这两种修复流程。
+> 在 PLAN checkpoint 关闭 run，以及归档 run 时，`r2p` 会对该 run 的
+> `.req-to-plan/<work-id>` 状态做 best-effort、path-limited commit。它不会运行
+> `git add -A`，不会强制添加 ignored path，也不会 push。
 
-> [!NOTE]
-> **人工决策点（standard DESIGN）。** 当 standard tier 的 DESIGN 涉及必须由人
-> 决定的选择（引入新依赖、迁移策略、API 兼容性）时，agent 会在 `## Decision
-> Requests` 章节写入 `### DECISION-NNN` block（含 `Question:`/`Options:`/
-> `Recommended:`）并标记 `Status: pending` ——存在 pending 决策时
-> `gate-quality` 会失败，直到人选定方案、block 改为 `Status: selected`
-> 并补上 `Selected:` 与 `Rationale:` 行。
-> 无需人工决策时，该章节须恰好写 `none`。
+## Lifecycle commands
 
-## License
+在终端里使用生命周期命令管理已安装的集成：
 
-[MIT](./LICENSE) © xenonbyte
+```bash
+r2p install
+r2p install --platform codex
+
+r2p status
+r2p status --json
+
+r2p uninstall --platform claude
+r2p uninstall
+
+r2p version
+r2p help
+```
+
+`r2p install` 和 `r2p uninstall` 省略 `--platform` 时，都会作用于全部支持平台。
+
+`r2p status` 是只读命令。加 `--json` 后会输出机器可读的平台状态、已安装版本和 manifest
+问题。
+
+## How the workflow works
+
+每个 run 都保存在目标 workspace 的 `.req-to-plan/<work-id>/` 下。agent 负责语义内容；
+CLI 负责状态、文件、gate 和结构化校验。
+
+| Stage | Output |
+|---|---|
+| Raw requirement | 原始用户需求 |
+| Requirement brief | 范围、目标、非目标和验收方向 |
+| Risk discovery | 未知点、约束、依赖和风险区域 |
+| DESIGN | 技术方案和 decision requests |
+| SPEC | 详细行为和接口 |
+| PLAN | 带 verification criteria 的有序实现任务 |
+
+Standard tier 的 DESIGN/SPEC/PLAN 阶段可能要求 subagent review，尤其当存在
+`migration`、`safety`、`cross_project` 等 tier modifier 时。如果后续阶段发现上游决策缺口，
+用 `r2p-gap-open` 路由回 owner stage，修复后再用 `r2p-gap-resolve` 关闭 route。
+
+## Development
+
+安装开发依赖：
+
+```bash
+python3 -m pip install -r requirements-dev.txt
+```
+
+运行测试套件：
+
+```bash
+npm test
+# or, when using the checked-in virtual environment:
+npm run test:local
+```
+
+常用本地检查：
+
+```bash
+node bin/r2p.js version
+node bin/r2p.js help
+.venv/bin/python -m tools.workflow_cli --help
+.venv/bin/python -m tools.workflow_cli.agent_shortcuts --help
+```
+
+项目结构：
+
+| Path | Purpose |
+|---|---|
+| `bin/r2p.js` | 调用 Python 生命周期 CLI 的 npm binary |
+| `tools/r2p-*` | 已安装 workflow wrapper 的源脚本 |
+| `tools/workflow_cli/` | 状态机、gate、template、installer 和命令路由 |
+| `tools/workflow_cli/agent_templates/` | 面向 Claude Code、Codex、Gemini 的生成入口 |
+| `tests/` | 覆盖 CLI 行为、状态、gate、安装安全、打包和 README 一致性的回归测试 |

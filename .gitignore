@@ -9,6 +9,7 @@ venv/
 !.claude/
 !.claude/skills/
 !.claude/skills/*.md
+!AGENTS.md
 !CLAUDE.md
 .claude/settings.json
 .claude/settings.local.json
