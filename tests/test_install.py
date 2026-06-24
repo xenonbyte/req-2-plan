@@ -942,6 +942,16 @@ class TestInstallService:
             service.install(platform)
             assert (ph_root / platform / rel).exists(), f"{platform}:{rel} not installed"
 
+    def test_install_ships_r2p_archive_for_all_platforms(self, tmp_path):
+        service, _manifest_root, ph_root = make_service(tmp_path)
+        for platform, rel in (
+            ("claude", "commands/r2p-archive.md"),
+            ("codex", "skills/r2p-archive/SKILL.md"),
+            ("gemini", "commands/r2p-archive.toml"),
+        ):
+            service.install(platform)
+            assert (ph_root / platform / rel).exists(), f"{platform}:{rel} not installed"
+
 
 # ---------------------------------------------------------------------------
 # Stale shared-wrapper cleanup (Part 2, Task 6)

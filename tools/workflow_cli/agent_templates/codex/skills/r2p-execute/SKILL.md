@@ -30,6 +30,7 @@ Before dispatching Task 1, read `07-plan.md` once and scan for:
 - Items the plan mandates that the review rubric would treat as a defect
 
 Batch all findings into one question to the human **before** execution begins — one interrupt, not one per discovery. If the scan is clean, proceed without comment. The task-reviewer loop catches conflicts that only emerge from implementation.
+If a finding requires PLAN, SPEC, or DESIGN repair, stop and ask the human to reopen from the affected stage rather than patching over it in execution.
 
 ## Per-Task Loop
 
@@ -63,7 +64,7 @@ The implementer must:
 
 The fresh implementer subagent verifies-then-removes ambiguity by evidence and TDD. If it cannot resolve ambiguity:
 - Return `NEEDS_CONTEXT` or `BLOCKED` and escalate to the human — never guess a vague implementation
-- If the ambiguity is an upstream (SPEC or DESIGN) defect, stop and ask the human to choose an upstream repair path (for example, reopening from the affected stage) rather than patching over it in execution. Do not try to open a gap route from an `executing` run.
+- If the ambiguity is an upstream PLAN, SPEC, or DESIGN defect, stop and ask the human to choose an upstream repair path (for example, reopening from the affected stage) rather than patching over it in execution. Do not try to open a gap route from an `executing` run.
 
 ### 5. Write diff and dispatch task-reviewer
 
@@ -114,7 +115,7 @@ Track progress in `execution/progress.md` (not only in todos). On resume, read t
 |---|---|
 | Status not `closed_at_plan_checkpoint` or `executing` | Stop: `plan_not_ready` |
 | Implementer returns `NEEDS_CONTEXT` | Provide missing context, re-dispatch fresh implementer subagent |
-| Upstream SPEC/DESIGN defect found | Stop: ask the human to reopen/repair the upstream stage |
+| Upstream PLAN/SPEC/DESIGN defect found | Stop: ask the human to reopen/repair the upstream stage |
 | Platform lacks subagent capability | Fail explicitly (subagents are a hard prerequisite) |
 
 Use `r2p-status` to inspect progress without making changes.

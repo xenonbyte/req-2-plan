@@ -126,7 +126,7 @@ r2p uninstall --platform claude,codex,gemini
 | `r2p-status` | 查看当前运行或全部运行，只读。 |
 | `r2p-switch` | 把活动运行指向另一个 `--work-id`。 |
 | `r2p-tier-lock` | 锁定活动运行的复杂度 tier（`--base light\|standard`）。 |
-| `r2p-reopen` | 从指定 `--stage` 重开一个已关闭的运行。 |
+| `r2p-reopen` | 从指定 `--stage` 重开一个已关闭或执行中的运行。 |
 | `r2p-gap-open` | 把 open run 的上游缺口路由回其 `--owner-stage`；下游 artifact 失效、需重新派生。 |
 | `r2p-gap-resolve` | owner 阶段重做并通过 `gate-quality` 后，关闭一个 `--route-id` 缺口路由。 |
 | `r2p-archive` | 将已关闭的运行归档到活动工作区外（移至 `.req-to-plan/archive/` 并取消跟踪）。 |
@@ -152,11 +152,11 @@ r2p-tier-lock --work-id <id> --base standard --modifiers migration,safety --conf
 `--base standard` 抬高刚性下限；`migration`、`safety`、`cross_project` 这几个 modifier
 会在 DESIGN / SPEC / PLAN 检查点强制子 agent 审查。
 
-**重开已关闭的 run**——回到一个已在 PLAN 检查点关闭的运行，从更早的阶段重新开始
-（会派生一个带血缘的新 run）：
+**重开已关闭或执行中的 run**——回到一个已在 PLAN 检查点关闭、或已进入执行中的运行，
+从更早的阶段重新开始（会派生一个带血缘的新 run）：
 
 ```bash
-r2p-reopen --from <closed-id> --stage spec --reason "spec gap found"
+r2p-reopen --from <closed-or-executing-id> --stage spec --reason "spec gap found"
 ```
 
 **回路上游缺口**——在一个**开着的** run 上，当后面的阶段发现更早的阶段拥有一个错误或
@@ -170,7 +170,7 @@ r2p-gap-resolve --work-id <id> --route-id R-1
 ```
 
 > [!NOTE]
-> reopen 针对**已关闭**的 run；gap 路由针对**开着**的 run。`r2p-continue` 会用
+> reopen 针对**已关闭或执行中**的 run；gap 路由针对**开着**的 run。`r2p-continue` 会用
 > `needs_repair` 和 `needs_gap_resolve` 停点带你走完这两种修复流程。
 
 > [!NOTE]

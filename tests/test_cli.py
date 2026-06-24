@@ -3058,6 +3058,23 @@ class TestRunArchive:
             assert rec.status.value == "closed_at_plan_checkpoint"
             assert not (base / ".req-to-plan" / "archive" / "WF-20260101-arch").exists()
 
+    def test_archive_save_failure_moves_run_back_with_original_status(self):
+        from unittest.mock import patch
+        from tools.workflow_cli.state import RunStateManager
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            run_dir = self._closed_run(base, "WF-20260101-arch")
+            archive_dir = base / ".req-to-plan" / "archive" / "WF-20260101-arch"
+
+            with patch("tools.workflow_cli.cli.RunStateManager.save", side_effect=OSError("disk full")):
+                with pytest.raises(OSError):
+                    main(["--base-path", str(base), "run-archive", "--work-id", "WF-20260101-arch"])
+
+            assert run_dir.exists()
+            assert not archive_dir.exists()
+            rec = RunStateManager(run_dir).load()
+            assert rec.status.value == "closed_at_plan_checkpoint"
+
 
 class TestRunExecuteStart:
     def _closed_run_with_plan(self, base, wid_str, plan_body):
@@ -3108,6 +3125,61 @@ class TestRunExecuteStart:
             assert rec.status.value == "closed_at_plan_checkpoint"
             assert rec.resume_context.last_completed_operation != "execute_start"
             assert rec.resume_context.next_allowed_operation != "implement_tasks"
+
+    def test_execute_start_rejects_plan_without_task_anchors(self):
+        from tools.workflow_cli.state import RunStateManager
+        plan = "# Plan\n\n## Tasks\n- first task\n- second task\n"
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            run_dir = self._closed_run_with_plan(base, "WF-20260101-exec", plan)
+
+            with pytest.raises(SystemExit) as exc:
+                main([
+                    "--base-path",
+                    str(base),
+                    "run-execute-start",
+                    "--work-id",
+                    "WF-20260101-exec",
+                ])
+
+            assert exc.value.code == 6  # EXIT_CONFLICT
+            rec = RunStateManager(run_dir).load()
+            assert rec.status.value == "closed_at_plan_checkpoint"
+            assert not (run_dir / "execution").exists()
+
+    def test_executing_run_can_be_reopened_for_upstream_repair(self):
+        plan = (
+            "# Plan\n\n## Tasks\n"
+            "### PLAN-TASK-001: first task\nFiles:\n- a.py\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            self._closed_run_with_plan(base, "WF-20260101-exec", plan)
+            with pytest.raises(SystemExit) as exc:
+                main([
+                    "--base-path",
+                    str(base),
+                    "run-execute-start",
+                    "--work-id",
+                    "WF-20260101-exec",
+                ])
+            assert exc.value.code == 0
+
+            with pytest.raises(SystemExit) as exc:
+                main([
+                    "--base-path",
+                    str(base),
+                    "run-reopen",
+                    "--from",
+                    "WF-20260101-exec",
+                    "--stage",
+                    "plan",
+                    "--reason",
+                    "pre-flight found PLAN defect",
+                ])
+
+            assert exc.value.code == 0
+            assert (base / ".req-to-plan" / "WF-20260101-exec-r1" / "run.md").exists()
 
     def test_execute_start_refuses_when_not_closed(self):
         from tools.workflow_cli.state import RunStateManager, create_run_record

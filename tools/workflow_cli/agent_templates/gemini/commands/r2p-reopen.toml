@@ -1,4 +1,4 @@
 name = "r2p-reopen"
-description = "Reopen a closed workflow run from a specific stage"
+description = "Reopen a closed or executing workflow run from a specific stage"
 command = "{{R2P_BIN_DIR}}/r2p-reopen"
 version = "{{R2P_VERSION}}"

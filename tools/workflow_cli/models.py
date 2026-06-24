@@ -277,6 +277,7 @@ ALLOWED_COMMANDS_BY_RUN_STATE: dict[RunStatus, set[str]] = {
         "CMD-TIER-STATUS",
     },
     RunStatus.EXECUTING: {
+        "CMD-RUN-REOPEN",
         "CMD-RUN-ARCHIVE",
         "CMD-TIER-STATUS",
     },

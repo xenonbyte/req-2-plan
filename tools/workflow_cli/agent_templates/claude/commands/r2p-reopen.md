@@ -1,7 +1,7 @@
 ---
-description: Reopen a closed workflow run from a specific stage
+description: Reopen a closed or executing workflow run from a specific stage
 ---
-Run `{{R2P_BIN_DIR}}/r2p-reopen` to reopen a run that was closed at the PLAN checkpoint.
+Run `{{R2P_BIN_DIR}}/r2p-reopen` to reopen a run that was closed at the PLAN checkpoint or is already executing.
 
 Usage: `{{R2P_BIN_DIR}}/r2p-reopen --from <work-id> --stage <stage> --reason "<text>"`
 

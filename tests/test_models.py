@@ -453,6 +453,10 @@ class TestExecutingState(unittest.TestCase):
             is_command_allowed(RunStatus.CLOSED_AT_PLAN_CHECKPOINT, "CMD-RUN-EXECUTE-START")
         )
 
+    def test_reopen_command_allowed_when_executing(self):
+        from tools.workflow_cli.models import RunStatus, is_command_allowed
+        self.assertTrue(is_command_allowed(RunStatus.EXECUTING, "CMD-RUN-REOPEN"))
+
 
 if __name__ == "__main__":
     unittest.main()

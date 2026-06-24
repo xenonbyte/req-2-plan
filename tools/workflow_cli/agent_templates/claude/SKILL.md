@@ -18,7 +18,7 @@ Run each via Bash using the scripts in `{{R2P_BIN_DIR}}`:
 | `{{R2P_BIN_DIR}}/r2p-tier-lock --work-id <id> --base <light\|standard> --confirm` | Lock the tier for a run |
 | `{{R2P_BIN_DIR}}/r2p-status [--all]` | Inspect run state (read-only) |
 | `{{R2P_BIN_DIR}}/r2p-switch --work-id <id>` | Switch active run pointer |
-| `{{R2P_BIN_DIR}}/r2p-reopen --from <work-id> --stage <stage> --reason "<text>"` | Reopen a closed run |
+| `{{R2P_BIN_DIR}}/r2p-reopen --from <work-id> --stage <stage> --reason "<text>"` | Reopen a closed or executing run |
 | `{{R2P_BIN_DIR}}/r2p-gap-open --work-id <id> --owner-stage <stage> --required-action "<text>"` | Route an upstream gap back to its owner stage |
 | `{{R2P_BIN_DIR}}/r2p-gap-resolve --work-id <id> --route-id <route-id>` | Resolve an open upstream-gap route after the owner stage re-passes gate-quality |
 

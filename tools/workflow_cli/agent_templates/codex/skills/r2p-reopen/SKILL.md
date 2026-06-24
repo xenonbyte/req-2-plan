@@ -1,11 +1,11 @@
 ---
 name: r2p-reopen
-description: Reopen a closed requirement-to-PLAN workflow run from a specific stage. Use when the user asks to run r2p-reopen or reopen an r2p run because an upstream stage needs repair.
+description: Reopen a closed or executing requirement-to-PLAN workflow run from a specific stage. Use when the user asks to run r2p-reopen or reopen an r2p run because an upstream stage needs repair.
 ---
 
 # r2p-reopen
 
-Run `{{R2P_BIN_DIR}}/r2p-reopen` to reopen a run that was closed at the PLAN checkpoint.
+Run `{{R2P_BIN_DIR}}/r2p-reopen` to reopen a run that was closed at the PLAN checkpoint or is already executing.
 
 Usage: `{{R2P_BIN_DIR}}/r2p-reopen --from <work-id> --stage <stage> --reason "<text>"`
 

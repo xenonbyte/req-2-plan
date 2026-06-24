@@ -410,11 +410,13 @@ def _cmd_run_reopen(args):
             EXIT_NOT_FOUND,
         )
 
-    if source_record.status != RunStatus.CLOSED_AT_PLAN_CHECKPOINT:
+    reopenable_statuses = {RunStatus.CLOSED_AT_PLAN_CHECKPOINT, RunStatus.EXECUTING}
+    if source_record.status not in reopenable_statuses:
         print_and_exit(
             format_error(
-                f"Source run {source_id!r} is not CLOSED_AT_PLAN_CHECKPOINT "
-                f"(status={source_record.status.value!r})",
+                f"Source run {source_id!r} is not reopenable "
+                f"(status={source_record.status.value!r}); must be "
+                "closed_at_plan_checkpoint or executing",
                 exit_code=EXIT_CONFLICT,
             ),
             EXIT_CONFLICT,
@@ -474,7 +476,12 @@ def _cmd_run_reopen(args):
     new_record = create_run_record(new_work_id)
     new_record.tier_estimate = source_record.tier_estimate
     new_record.tier_locked = source_record.tier_locked
-    new_record.reopen_lineage = f"reopened_from: {source_id}@plan_checkpoint reason: {args.reason}"
+    source_phase = (
+        "execution"
+        if source_record.status == RunStatus.EXECUTING
+        else "plan_checkpoint"
+    )
+    new_record.reopen_lineage = f"reopened_from: {source_id}@{source_phase} reason: {args.reason}"
     new_record.current_stage = target_stage
 
     # Copy approved checkpoints before target stage
@@ -550,7 +557,12 @@ def _cmd_run_archive(args):
     archive_dir.parent.mkdir(parents=True, exist_ok=True)
     # 4. Move the run dir into the (ignored) archive, then persist ARCHIVED there.
     shutil.move(str(run_dir), str(archive_dir))
-    RunStateManager(archive_dir).save(archived_record)
+    try:
+        RunStateManager(archive_dir).save(archived_record)
+    except Exception:
+        if archive_dir.exists() and not run_dir.exists():
+            shutil.move(str(archive_dir), str(run_dir))
+        raise
     # 5. Commit the removal of the original path (untracks the dir). spec §4.6
     commit_requirement_dir(
         base, str(archived_record.work_id), f"chore(r2p): archive {archived_record.work_id}"
@@ -585,6 +597,15 @@ def _cmd_run_execute_start(args):
     # Seed the structural progress ledger (IDs + checkboxes = structure, not
     # semantics; the agent appends progress). CLI never generates artifact text.
     anchors = plan_task_anchors(plan_text)
+    if not anchors:
+        print_and_exit(
+            format_error(
+                "PLAN contains no PLAN-TASK anchors; repair PLAN with "
+                "### PLAN-TASK-NNN headings before execution",
+                exit_code=EXIT_CONFLICT,
+            ),
+            EXIT_CONFLICT,
+        )
     lines = ["# Execution Progress", "", f"work_id: {record.work_id}", ""]
     lines += [f"- [ ] {tid} {title}".rstrip() for tid, title in anchors]
     exec_dir = run_dir / "execution"
@@ -1471,7 +1492,10 @@ def _register_run_commands(subparsers):
     p.set_defaults(func=_cmd_run_close)
 
     # run-reopen
-    p = subparsers.add_parser("run-reopen", help="Reopen a closed workflow run")
+    p = subparsers.add_parser(
+        "run-reopen",
+        help="Reopen a closed or executing workflow run",
+    )
     p.add_argument("--from", dest="from_id", required=True, help="Source work-id to reopen from")
     p.add_argument("--stage", required=True, help="Target stage to reopen at")
     p.add_argument("--reason", required=True, help="Reason for reopening")

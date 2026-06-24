@@ -138,7 +138,7 @@ step of running a workflow:
 | `r2p-status` | Inspect the current run, or all runs, read-only. |
 | `r2p-switch` | Point the active run at a different `--work-id`. |
 | `r2p-tier-lock` | Lock the active run's complexity tier (`--base light\|standard`). |
-| `r2p-reopen` | Reopen a closed run from a specific `--stage`. |
+| `r2p-reopen` | Reopen a closed or executing run from a specific `--stage`. |
 | `r2p-gap-open` | Route an upstream gap on an open run back to its `--owner-stage`; downstream artifacts become stale and must be re-derived. |
 | `r2p-gap-resolve` | Close a gap `--route-id` after the owner stage is re-worked and passes `gate-quality`. |
 | `r2p-archive` | Archive a closed run out of the active workspace (moves it under `.req-to-plan/archive/` and untracks it). |
@@ -166,11 +166,12 @@ r2p-tier-lock --work-id <id> --base standard --modifiers migration,safety --conf
 `cross_project` modifiers force a subagent review at the DESIGN / SPEC / PLAN
 checkpoints.
 
-**Reopen a closed run** — revisit a run that was closed at the PLAN checkpoint,
-restarting from an earlier stage (this seeds a new linked run):
+**Reopen a closed or executing run** — revisit a run that was closed at the
+PLAN checkpoint, or one already in execution, restarting from an earlier stage
+(this seeds a new linked run):
 
 ```bash
-r2p-reopen --from <closed-id> --stage spec --reason "spec gap found"
+r2p-reopen --from <closed-or-executing-id> --stage spec --reason "spec gap found"
 ```
 
 **Route an upstream gap** — on an *open* run, when a later stage finds that an
