@@ -126,6 +126,13 @@ on re-run, and are removed with the run on archive (covered by the existing
 path-scoped archive commit). They are local runtime state — never global user
 state, never committed.
 
+Because close/archive use path-scoped commits for `.req-to-plan/.gitignore` plus
+the run directory, recovery logs must be explicitly excluded from those commits.
+Use an entry such as `/*/logs/` in `.req-to-plan/.gitignore` (patterns there are
+relative to `.req-to-plan/`), or make the path-scoped commit helper omit
+`.req-to-plan/<work-id>/logs/`. The chosen implementation must be tested so
+capped-output recovery files are not staged or committed.
+
 Truncation without a recovery path is not acceptable.
 
 ### FR4: Failure-First Ordering
@@ -173,6 +180,8 @@ too sparse or still too noisy.
   `status-next`, and `run-resume` cases caps long non-actionable lists, keeps the
   next action and other decision-bearing fields visible, and provides a recovery
   path or full-output fallback.
+- Recovery log files for capped status/resume output are excluded from
+  path-scoped close/archive commits and are not staged or committed.
 - Any capped output includes a recovery path or falls back to full output.
 - Existing exit codes remain unchanged.
 - Existing docs consistency tests remain green.
@@ -180,6 +189,8 @@ too sparse or still too noisy.
   - short output is not unnecessarily changed;
   - long status/resume noise is capped;
   - capped status/resume output provides a recovery path or full-output fallback;
+  - recovery log files are not staged or committed by the path-scoped
+    close/archive commit flow;
   - decision-bearing status fields (next action, open routes) are never capped;
   - JSON mode bypasses compaction;
   - gate and completion-gate failures keep their full issue list (no truncation);
@@ -211,6 +222,9 @@ model or the quality of any gated decision.
 - Capping a decision-bearing status field (next action, open routes) would change
   behavior; tests must assert these fields are never capped.
 - Recovery files can become another state surface if their ownership is unclear.
+- Recovery files under `.req-to-plan/<work-id>/logs/` could be accidentally
+  included by path-scoped run commits unless the implementation explicitly
+  ignores or excludes them.
 - Changing shared formatters can affect many commands at once.
 - Human-readable output tests may become brittle if they assert too much exact
   prose.
