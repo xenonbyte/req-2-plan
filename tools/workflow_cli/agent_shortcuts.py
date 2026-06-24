@@ -787,7 +787,10 @@ def _cmd_archive(ns: argparse.Namespace, base_path: Path) -> None:
             sys.exit(1)
         work_id = pointer["selected_work_id"]
     work_id = _validate_work_id(work_id)
-    exit_code = _run_cli(["run-archive", "--work-id", work_id], base_path)
+    archive_args = ["run-archive", "--work-id", work_id]
+    if getattr(ns, "force", False):
+        archive_args.append("--force")
+    exit_code = _run_cli(archive_args, base_path)
     if exit_code != 0:
         sys.exit(exit_code)
     pointer = read_active_pointer(base_path)
@@ -937,6 +940,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     p_archive = sub.add_parser("archive")
     p_archive.add_argument("--work-id", dest="work_id", default=None)
+    p_archive.add_argument("--force", action="store_true")
 
     p_tier_lock = sub.add_parser("tier-lock")
     p_tier_lock.add_argument("--work-id", dest="work_id", required=True)

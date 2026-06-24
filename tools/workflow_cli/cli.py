@@ -42,7 +42,12 @@ from tools.workflow_cli.artifact import (
     get_artifact_version,
     update_artifact_status,
 )
-from tools.workflow_cli.gates import check_entry_gate, check_quality_gate, check_forced_subagent_review
+from tools.workflow_cli.gates import (
+    check_entry_gate,
+    check_quality_gate,
+    check_forced_subagent_review,
+    check_execution_complete,
+)
 from tools.workflow_cli.output import (
     format_success,
     format_error,
@@ -569,6 +574,20 @@ def _cmd_run_archive(args):
             ),
             EXIT_CONFLICT,
         )
+    # 0. Completion gate: an executing run must show every PLAN-TASK done in its
+    # ledger before it can be archived. --force overrides (abandoned/superseded run).
+    if record.status == RunStatus.EXECUTING and not args.force:
+        gate = check_execution_complete(run_dir)
+        if not gate.passed:
+            detail = " ".join(gate.issues)
+            print_and_exit(
+                format_error(
+                    f"Execution incomplete: {detail} "
+                    "Re-run with --force to archive an unfinished run.",
+                    exit_code=gate.exit_code,
+                ),
+                gate.exit_code,
+            )
     # 1. Refuse to clobber an existing archived copy before mutating state.
     archive_dir = base / ".req-to-plan" / "archive" / str(record.work_id)
     if archive_dir.exists():
@@ -1538,6 +1557,11 @@ def _register_run_commands(subparsers):
     # run-archive
     p = subparsers.add_parser("run-archive", help="Archive a closed run out of the active workspace")
     p.add_argument("--work-id", required=True)
+    p.add_argument(
+        "--force",
+        action="store_true",
+        help="Archive an executing run even if its execution ledger is missing or has unfinished tasks",
+    )
     p.set_defaults(func=_cmd_run_archive)
 
     # run-execute-start

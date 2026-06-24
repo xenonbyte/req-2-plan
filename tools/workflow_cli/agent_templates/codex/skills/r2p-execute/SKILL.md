@@ -103,6 +103,8 @@ When all tasks are done and the final whole-branch review is clean, call:
 {{R2P_BIN_DIR}}/r2p-archive --work-id <work_id from the precondition output>
 ```
 
+Archiving is gated: `r2p-archive` refuses unless every PLAN-TASK from the PLAN is checked off (`- [x]`) in the ledger. Add `--force` only to archive an abandoned or superseded run.
+
 Commits are already on the **current branch**. `push` and PR creation still require an explicit user request.
 
 ## Durable Progress

@@ -23,6 +23,7 @@ from tools.workflow_cli.models import (
 from tools.workflow_cli.markdown import (
     heading_bounded_bodies,
     heading_level,
+    plan_task_anchors,
     PLAN_TASK_ANCHOR_RE as _PLAN_TASK_RE,
     strip_readonly_sections,
     unfenced_markdown_lines,
@@ -1103,4 +1104,76 @@ def check_forced_subagent_review(
             f"(the filename must match {subagent_file.name!r}), then retry checkpoint approval."
         ],
         exit_code=5,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Execution Completion Gate
+# ---------------------------------------------------------------------------
+
+_LEDGER_UNCHECKED_RE = re.compile(r"^\s*-\s*\[\s*\]\s*(PLAN-TASK-\d+)\b")
+_LEDGER_CHECKED_RE = re.compile(r"^\s*-\s*\[[xX]\]\s*(PLAN-TASK-\d+)\b")
+
+
+def _plan_task_ids(run_dir: Path) -> list[str]:
+    """Task IDs declared in the (frozen) PLAN artifact; [] when it is unreadable."""
+    from tools.workflow_cli.artifact import read_artifact
+    try:
+        plan_text = read_artifact(run_dir, Stage.PLAN)
+    except FileNotFoundError:
+        return []
+    return [tid for tid, _ in plan_task_anchors(plan_text)]
+
+
+def check_execution_complete(run_dir: Path) -> GateResult:
+    """Completion gate for archiving an EXECUTING run.
+
+    The execution ledger (execution/progress.md, seeded by run-execute-start)
+    is the structural evidence that every PLAN-TASK was implemented. Archiving
+    an executing run requires the ledger to exist and report every task done:
+
+    - missing ledger              -> fail (execution never recorded progress)
+    - any `- [ ] PLAN-TASK-*`     -> fail (unfinished tasks remain)
+    - a frozen PLAN task with no   -> fail (truncated ledger dropped a task line
+      `- [x] PLAN-TASK-*` line             instead of completing it)
+    - no `- [x] PLAN-TASK-*` at all -> fail (cleared/empty ledger asserts nothing)
+
+    This is structural validation only: it trusts the agent's checkbox flips
+    (an audit gate, not a correctness gate). The CLI offers --force to override.
+    """
+    ledger = run_dir / "execution" / "progress.md"
+    if not ledger.exists():
+        return GateResult(
+            passed=False,
+            issues=[
+                "Execution ledger execution/progress.md is missing; cannot "
+                "confirm the PLAN was executed."
+            ],
+            exit_code=EXIT_GATE_FAIL,
+        )
+    lines = [line for line, _, _ in unfenced_markdown_lines(ledger.read_text(encoding="utf-8"))]
+    issues: list[str] = []
+    for line in lines:
+        if _LEDGER_UNCHECKED_RE.match(line):
+            issues.append(f"Unfinished execution task: {line.strip()}")
+    if not issues:
+        checked_ids = {m.group(1) for line in lines if (m := _LEDGER_CHECKED_RE.match(line))}
+        # Cross-check the ledger against the frozen PLAN: every declared PLAN-TASK
+        # must be checked off, so a truncated ledger (a dropped task line) cannot
+        # pass as complete. Both inputs are CLI-owned artifacts; no new trust.
+        for tid in _plan_task_ids(run_dir):
+            if tid not in checked_ids:
+                issues.append(
+                    f"PLAN task {tid} is not marked complete in the execution ledger "
+                    "(its '- [x] PLAN-TASK-*' line is missing)."
+                )
+        if not issues and not checked_ids:
+            issues.append(
+                "Execution ledger lists no completed PLAN-TASK entries "
+                "('- [x] PLAN-TASK-*'); nothing to confirm."
+            )
+    return GateResult(
+        passed=len(issues) == 0,
+        issues=issues,
+        exit_code=EXIT_GATE_FAIL if issues else 0,
     )

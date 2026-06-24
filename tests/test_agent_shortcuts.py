@@ -1483,6 +1483,49 @@ class TestArchiveShortcut(unittest.TestCase):
             self.assertFalse(ash._pointer_path(base).exists())
             self.assertTrue((base / ".req-to-plan" / "archive" / "WF-20260101-arch" / "run.md").exists())
 
+    def _executing_run_incomplete(self, base, wid_str):
+        from tools.workflow_cli.state import RunStateManager, create_run_record
+        from tools.workflow_cli.models import RunStatus, Stage, WorkId
+        wid = WorkId(wid_str)
+        run_dir = base / ".req-to-plan" / wid_str
+        run_dir.mkdir(parents=True)
+        rec = create_run_record(wid)
+        rec.status = RunStatus.EXECUTING
+        rec.current_stage = Stage.CLOSED
+        RunStateManager(run_dir).save(rec)
+        exec_dir = run_dir / "execution"
+        exec_dir.mkdir(parents=True)
+        (exec_dir / "progress.md").write_text(
+            "# Execution Progress\n\n- [ ] PLAN-TASK-001 t\n", encoding="utf-8"
+        )
+        return run_dir
+
+    def test_archive_shortcut_blocks_incomplete_executing_run(self):
+        import argparse, tempfile
+        from pathlib import Path
+        from tools.workflow_cli import agent_shortcuts as ash
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            run_dir = self._executing_run_incomplete(base, "WF-20260101-exec")
+            ns = argparse.Namespace(work_id="WF-20260101-exec", force=False)
+            with self.assertRaises(SystemExit) as cm:
+                ash._cmd_archive(ns, base)
+            self.assertEqual(cm.exception.code, 3)  # EXIT_GATE_FAIL
+            self.assertTrue(run_dir.exists())  # not moved
+
+    def test_archive_shortcut_force_passes_through(self):
+        import argparse, tempfile
+        from pathlib import Path
+        from tools.workflow_cli import agent_shortcuts as ash
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            self._executing_run_incomplete(base, "WF-20260101-exec")
+            ns = argparse.Namespace(work_id="WF-20260101-exec", force=True)
+            with self.assertRaises(SystemExit) as cm:
+                ash._cmd_archive(ns, base)
+            self.assertEqual(cm.exception.code, 0)
+            self.assertTrue((base / ".req-to-plan" / "archive" / "WF-20260101-exec" / "run.md").exists())
+
 
 class TestIsTerminalExecuting(unittest.TestCase):
     def test_executing_is_not_terminal(self):

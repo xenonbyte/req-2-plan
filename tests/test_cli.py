@@ -3373,18 +3373,130 @@ class TestRunExecuteStart:
 
 
 class TestRunArchiveFromExecuting:
-    def test_archive_executing_run(self):
+    _COMPLETE_LEDGER = (
+        "# Execution Progress\n\nwork_id: WF-20260101-exec\n\n"
+        "- [x] PLAN-TASK-001 first task\n- [x] PLAN-TASK-002 second task\n"
+    )
+
+    def _executing_run(self, base, wid_str, ledger, plan=None):
+        """An EXECUTING run; ledger=None seeds no execution/progress.md.
+        plan=<text> writes an approved 07-plan.md artifact for anchor cross-check."""
         from tools.workflow_cli.state import RunStateManager, create_run_record
         from tools.workflow_cli.models import RunStatus, Stage, WorkId
+        wid = WorkId(wid_str)
+        run_dir = base / ".req-to-plan" / wid_str
+        run_dir.mkdir(parents=True)
+        rec = create_run_record(wid)
+        rec.status = RunStatus.EXECUTING
+        rec.current_stage = Stage.CLOSED
+        RunStateManager(run_dir).save(rec)
+        if plan is not None:
+            from tools.workflow_cli.artifact import write_artifact
+            write_artifact(run_dir, Stage.PLAN, plan, version=1, status="approved")
+        if ledger is not None:
+            exec_dir = run_dir / "execution"
+            exec_dir.mkdir(parents=True, exist_ok=True)
+            (exec_dir / "progress.md").write_text(ledger, encoding="utf-8")
+        return run_dir
+
+    def test_archive_executing_run_with_complete_ledger(self):
+        from tools.workflow_cli.state import RunStateManager
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
-            wid = WorkId("WF-20260101-exec")
-            run_dir = base / ".req-to-plan" / "WF-20260101-exec"
-            run_dir.mkdir(parents=True)
-            rec = create_run_record(wid)
-            rec.status = RunStatus.EXECUTING
-            rec.current_stage = Stage.CLOSED
-            RunStateManager(run_dir).save(rec)
+            self._executing_run(base, "WF-20260101-exec", self._COMPLETE_LEDGER)
+            with pytest.raises(SystemExit) as exc:
+                main(["--base-path", str(base), "run-archive", "--work-id", "WF-20260101-exec"])
+            assert exc.value.code == 0
+            assert (base / ".req-to-plan" / "archive" / "WF-20260101-exec" / "run.md").exists()
+            rec = RunStateManager(base / ".req-to-plan" / "archive" / "WF-20260101-exec").load()
+            assert rec.status.value == "archived"
+
+    def test_archive_executing_run_rejected_when_ledger_missing(self):
+        from tools.workflow_cli.state import RunStateManager
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            run_dir = self._executing_run(base, "WF-20260101-exec", None)
+            with pytest.raises(SystemExit) as exc:
+                main(["--base-path", str(base), "run-archive", "--work-id", "WF-20260101-exec"])
+            assert exc.value.code == 3  # EXIT_GATE_FAIL
+            assert run_dir.exists()  # not moved
+            assert not (base / ".req-to-plan" / "archive" / "WF-20260101-exec").exists()
+            assert RunStateManager(run_dir).load().status.value == "executing"
+
+    def test_archive_executing_run_rejected_with_unchecked_task(self):
+        from tools.workflow_cli.state import RunStateManager
+        ledger = (
+            "# Execution Progress\n\nwork_id: WF-20260101-exec\n\n"
+            "- [x] PLAN-TASK-001 first task\n- [ ] PLAN-TASK-002 second task\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            run_dir = self._executing_run(base, "WF-20260101-exec", ledger)
+            with pytest.raises(SystemExit) as exc:
+                main(["--base-path", str(base), "run-archive", "--work-id", "WF-20260101-exec"])
+            assert exc.value.code == 3  # EXIT_GATE_FAIL
+            assert run_dir.exists()  # not moved
+            assert RunStateManager(run_dir).load().status.value == "executing"
+
+    def test_archive_executing_run_rejected_when_ledger_has_no_tasks(self):
+        ledger = "# Execution Progress\n\nwork_id: WF-20260101-exec\n\n"
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            run_dir = self._executing_run(base, "WF-20260101-exec", ledger)
+            with pytest.raises(SystemExit) as exc:
+                main(["--base-path", str(base), "run-archive", "--work-id", "WF-20260101-exec"])
+            assert exc.value.code == 3  # EXIT_GATE_FAIL
+            assert run_dir.exists()  # not moved
+
+    def test_archive_executing_run_force_overrides_incomplete_ledger(self):
+        ledger = (
+            "# Execution Progress\n\nwork_id: WF-20260101-exec\n\n"
+            "- [ ] PLAN-TASK-001 first task\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            self._executing_run(base, "WF-20260101-exec", ledger)
+            with pytest.raises(SystemExit) as exc:
+                main(["--base-path", str(base), "run-archive", "--work-id", "WF-20260101-exec", "--force"])
+            assert exc.value.code == 0
+            assert (base / ".req-to-plan" / "archive" / "WF-20260101-exec" / "run.md").exists()
+
+    def test_archive_force_overrides_missing_ledger(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            self._executing_run(base, "WF-20260101-exec", None)
+            with pytest.raises(SystemExit) as exc:
+                main(["--base-path", str(base), "run-archive", "--work-id", "WF-20260101-exec", "--force"])
+            assert exc.value.code == 0
+            assert (base / ".req-to-plan" / "archive" / "WF-20260101-exec" / "run.md").exists()
+
+    _TWO_TASK_PLAN = (
+        "# Plan\n\n## Tasks\n"
+        "### PLAN-TASK-001: first task\nFiles:\n- a.py\n"
+        "### PLAN-TASK-002: second task\nFiles:\n- b.py\n"
+    )
+
+    def test_archive_rejected_when_ledger_drops_a_plan_task(self):
+        from tools.workflow_cli.state import RunStateManager
+        # PLAN has 001 and 002; ledger dropped the 002 line entirely (no unchecked box).
+        ledger = "# Execution Progress\n\nwork_id: WF-20260101-exec\n\n- [x] PLAN-TASK-001 first task\n"
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            run_dir = self._executing_run(base, "WF-20260101-exec", ledger, plan=self._TWO_TASK_PLAN)
+            with pytest.raises(SystemExit) as exc:
+                main(["--base-path", str(base), "run-archive", "--work-id", "WF-20260101-exec"])
+            assert exc.value.code == 3  # EXIT_GATE_FAIL
+            assert run_dir.exists()  # not moved
+            assert RunStateManager(run_dir).load().status.value == "executing"
+
+    def test_archive_passes_when_ledger_covers_all_plan_tasks(self):
+        ledger = (
+            "# Execution Progress\n\nwork_id: WF-20260101-exec\n\n"
+            "- [x] PLAN-TASK-001 first task\n- [x] PLAN-TASK-002 second task\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            self._executing_run(base, "WF-20260101-exec", ledger, plan=self._TWO_TASK_PLAN)
             with pytest.raises(SystemExit) as exc:
                 main(["--base-path", str(base), "run-archive", "--work-id", "WF-20260101-exec"])
             assert exc.value.code == 0
