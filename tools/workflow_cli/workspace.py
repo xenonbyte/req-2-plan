@@ -14,7 +14,7 @@ from pathlib import Path
 
 from tools.workflow_cli.atomic import atomic_write_text
 
-_WORKSPACE_GITIGNORE_LINES = ("/archive", "/.workflow-active")
+_WORKSPACE_GITIGNORE_LINES = ("/archive", "/.workflow-active", "/*/logs/")
 
 
 def ensure_workspace_gitignore(base_path: Path) -> None:

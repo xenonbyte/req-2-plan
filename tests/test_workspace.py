@@ -15,6 +15,15 @@ class TestEnsureWorkspaceGitignore(unittest.TestCase):
             lines = gi.read_text(encoding="utf-8").splitlines()
             self.assertIn("/archive", lines)
             self.assertIn("/.workflow-active", lines)
+            self.assertIn("/*/logs/", lines)
+
+    def test_workspace_gitignore_includes_run_logs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            ensure_workspace_gitignore(base)
+            gitignore = base / ".req-to-plan" / ".gitignore"
+
+            self.assertIn("/*/logs/", gitignore.read_text(encoding="utf-8").splitlines())
 
     def test_appends_archive_line_when_missing(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -26,6 +35,22 @@ class TestEnsureWorkspaceGitignore(unittest.TestCase):
             self.assertIn("*.log", lines)
             self.assertIn("/archive", lines)
             self.assertIn("/.workflow-active", lines)
+            self.assertIn("/*/logs/", lines)
+
+    def test_appends_run_logs_line_without_dropping_existing_entries(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            gitignore = base / ".req-to-plan" / ".gitignore"
+            gitignore.parent.mkdir(parents=True)
+            gitignore.write_text("*.tmp\n/archive\n/.workflow-active\n", encoding="utf-8")
+
+            ensure_workspace_gitignore(base)
+
+            lines = gitignore.read_text(encoding="utf-8").splitlines()
+            self.assertIn("*.tmp", lines)
+            self.assertIn("/archive", lines)
+            self.assertIn("/.workflow-active", lines)
+            self.assertIn("/*/logs/", lines)
 
     def test_appends_active_pointer_line_when_archive_line_present(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -36,6 +61,7 @@ class TestEnsureWorkspaceGitignore(unittest.TestCase):
             lines = (base / ".req-to-plan" / ".gitignore").read_text(encoding="utf-8").splitlines()
             self.assertIn("/archive", lines)
             self.assertIn("/.workflow-active", lines)
+            self.assertIn("/*/logs/", lines)
 
     def test_idempotent_when_line_present(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -45,6 +71,7 @@ class TestEnsureWorkspaceGitignore(unittest.TestCase):
             text = (base / ".req-to-plan" / ".gitignore").read_text(encoding="utf-8")
             self.assertEqual(text.count("/archive"), 1)
             self.assertEqual(text.count("/.workflow-active"), 1)
+            self.assertEqual(text.count("/*/logs/"), 1)
 
     def test_rejects_symlinked_req_to_plan_dir_without_writing_target(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -188,3 +215,25 @@ class TestCommitRequirementDir(unittest.TestCase):
             tracked = _git(base, "ls-files", ".req-to-plan/WF-20260101-demo").stdout
             self.assertIn("WF-20260101-demo/run.md", tracked)
             self.assertFalse((base / "unrelated.txt").exists())
+
+    def test_path_scoped_commit_does_not_stage_recovery_logs(self):
+        from tools.workflow_cli.workspace import commit_requirement_dir, ensure_workspace_gitignore
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            _init_repo(base)
+            work_id = "WF-20260625-compact-test"
+            run_dir = base / ".req-to-plan" / work_id
+            (run_dir / "logs").mkdir(parents=True)
+            (run_dir / "logs" / "status-run-approved-checkpoints.txt").write_text(
+                "full list\n",
+                encoding="utf-8",
+            )
+
+            ensure_workspace_gitignore(base)
+            commit_requirement_dir(base, work_id, "chore(r2p): plan compact test")
+
+            staged_or_tracked = _git(base, "ls-files", ".req-to-plan").stdout
+            self.assertNotIn(
+                f".req-to-plan/{work_id}/logs/status-run-approved-checkpoints.txt",
+                staged_or_tracked,
+            )
