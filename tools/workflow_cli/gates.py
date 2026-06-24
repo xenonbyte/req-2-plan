@@ -1122,7 +1122,10 @@ def _read_regular_text_no_symlink(path: Path) -> tuple[str | None, str | None]:
     """Read a regular file without following a symlink where the OS supports it."""
     if path.is_symlink():
         return None, "symlink"
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    # O_NONBLOCK so opening a non-regular file (e.g. a writerless FIFO) returns
+    # immediately and is rejected by the S_ISREG check below instead of blocking.
+    # It has no effect on regular-file reads.
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
     fd: int | None = None
     try:
         fd = os.open(path, flags)
