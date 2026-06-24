@@ -129,6 +129,27 @@ class TestReadWriteActivePointer:
             assert "updated_at" in data
             assert data["updated_at"]
 
+    def test_write_rejects_symlinked_gitignore_with_clean_blocked(self):
+        from tools.workflow_cli.output import EXIT_CONFLICT
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            (base / ".req-to-plan").mkdir()
+            secret = base / "secret.txt"
+            secret.write_text("PRIVATE\n", encoding="utf-8")
+            gitignore = base / ".req-to-plan" / ".gitignore"
+            gitignore.symlink_to(secret)
+
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                with pytest.raises(SystemExit) as exc:
+                    write_active_pointer(base, "WF-20260527-link")
+
+            assert exc.value.code == EXIT_CONFLICT
+            assert "blocked:" in buf.getvalue()
+            assert gitignore.is_symlink()
+            assert secret.read_text(encoding="utf-8") == "PRIVATE\n"
+            assert not (base / ".req-to-plan" / ".workflow-active").exists()
+
 
 # ---------------------------------------------------------------------------
 # TestScanOpenRuns

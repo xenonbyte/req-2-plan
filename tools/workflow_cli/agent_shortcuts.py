@@ -47,7 +47,15 @@ def write_active_pointer(base_path: Path, work_id: str, reason: str = "workflow_
     work_id = _validate_work_id(work_id)
     path = _pointer_path(base_path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    ensure_workspace_gitignore(base_path)
+    try:
+        ensure_workspace_gitignore(base_path)
+    except ValueError as exc:
+        print(
+            "blocked: unsafe_workspace_gitignore\n"
+            f"work_id: {work_id}\n"
+            f"reason: {exc}\n"
+        )
+        sys.exit(EXIT_CONFLICT)
     run_rel = f".req-to-plan/{work_id}/run.md"
     updated_at = datetime.now(timezone.utc).astimezone().isoformat()
     content = (
