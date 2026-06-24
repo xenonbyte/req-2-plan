@@ -84,10 +84,7 @@ def _load_run(work_id: str, base_path: Path | None = None):
     no command — read-only or mutating — ever follows `.req-to-plan` or
     `.req-to-plan/<id>` out of the workspace.
     """
-    root = base_path or Path.cwd()
-    _reject_symlink_or_exit(root / ".req-to-plan", "unsafe_workspace_dir_symlink")
-    run_dir = _get_run_dir(work_id, base_path)
-    _reject_symlink_or_exit(run_dir, f"Run directory is a symlink: {run_dir}")
+    run_dir = _reject_symlinked_run_paths(work_id, base_path)
     mgr = RunStateManager(run_dir)
     try:
         return mgr.load(), mgr, run_dir
@@ -116,6 +113,20 @@ def _ensure_workspace_gitignore_or_exit(base_path: Path) -> None:
 def _reject_symlink_or_exit(path: Path, message: str) -> None:
     if path.is_symlink():
         print_and_exit(format_error(message, exit_code=EXIT_CONFLICT), EXIT_CONFLICT)
+
+
+def _reject_symlinked_run_paths(work_id, base_path: Path | None) -> Path:
+    """Reject a symlinked workspace or run directory, then return the run dir.
+
+    Guards `.req-to-plan` and `.req-to-plan/<id>` up front (EXIT_CONFLICT) so no
+    command — read-only or mutating — ever follows either out of the workspace.
+    Call before any filesystem mutation that targets the run dir.
+    """
+    root = base_path or Path.cwd()
+    _reject_symlink_or_exit(root / ".req-to-plan", "unsafe_workspace_dir_symlink")
+    run_dir = _get_run_dir(work_id, base_path)
+    _reject_symlink_or_exit(run_dir, f"Run directory is a symlink: {run_dir}")
+    return run_dir
 
 
 def _validate_repo_path(raw: str) -> Path:
@@ -223,10 +234,7 @@ def _cmd_run_start(args):
             EXIT_CLI_ERR,
         )
     repo_path = _validate_repo_path(args.repo_path) if args.repo_path else None
-    base = args.base_path or Path.cwd()
-    _reject_symlink_or_exit(base / ".req-to-plan", "unsafe_workspace_dir_symlink")
-    run_dir = _get_run_dir(work_id, args.base_path)
-    _reject_symlink_or_exit(run_dir, f"Run directory is a symlink: {run_dir}")
+    run_dir = _reject_symlinked_run_paths(work_id, args.base_path)
     mgr = RunStateManager(run_dir)
 
     run_dir_occupied = False
@@ -2003,10 +2011,7 @@ def _cmd_context_build(args):
     from tools.workflow_cli.context_pack import build_context_pack, write_context_pack
 
     work_id = str(_validate_work_id(args.work_id))
-    base = args.base_path or Path.cwd()
-    _reject_symlink_or_exit(base / ".req-to-plan", "unsafe_workspace_dir_symlink")
-    run_dir = _get_run_dir(work_id, args.base_path)
-    _reject_symlink_or_exit(run_dir, f"Run directory is a symlink: {run_dir}")
+    run_dir = _reject_symlinked_run_paths(work_id, args.base_path)
     if not run_dir.exists():
         print_and_exit(
             format_error(f"run not found: {work_id}", exit_code=EXIT_NOT_FOUND),
