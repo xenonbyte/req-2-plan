@@ -151,6 +151,14 @@ step of running a workflow:
 > export PATH="$HOME/.req-to-plan/bin:$PATH"
 > ```
 
+> [!NOTE]
+> **Closing and archiving auto-commit your work.** Closing a run at the PLAN
+> checkpoint, and archiving a run, each make a path-limited `git commit` scoped
+> to `.req-to-plan/.gitignore` and that run's `.req-to-plan/<work-id>` directory
+> (archiving commits the removal of the original path so it stops being tracked).
+> It never runs `git add -A`, `-f`, or `git push`, and is a no-op outside a git
+> work tree.
+
 ### When to use which skill
 
 Most runs only need `r2p-start`, then repeated `r2p-continue`. The other skills

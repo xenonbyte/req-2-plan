@@ -139,6 +139,12 @@ r2p uninstall --platform claude,codex,gemini
 > export PATH="$HOME/.req-to-plan/bin:$PATH"
 > ```
 
+> [!NOTE]
+> **关闭与归档会自动提交。** 在 PLAN 检查点关闭一个 run、以及归档一个 run 时，都会
+> 执行一次 path-limited `git commit`，范围仅限 `.req-to-plan/.gitignore` 和该 run 的
+> `.req-to-plan/<work-id>` 目录（归档会提交原路径的删除，使其不再被跟踪）。它从不执行
+> `git add -A`、`-f` 或 `git push`，且在 git 工作树之外为 no-op。
+
 ### When to use which skill
 
 大多数运行只需 `r2p-start`，然后反复 `r2p-continue`。其余技能针对特定情形。

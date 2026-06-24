@@ -43,7 +43,7 @@
 | `tools/workflow_cli/gates.py` | check_entry_gate, check_quality_gate, check_forced_subagent_review |
 | `tools/workflow_cli/output.py` | Exit code constants, format_success/error/gate_result, is_json_mode |
 | `tools/workflow_cli/cli.py` | argparse router: run/tier/gate/status/stage/context command groups |
-| `tools/workflow_cli/agent_shortcuts.py` | r2p-* shortcut surface: start/continue/status/switch/reopen/gap |
+| `tools/workflow_cli/agent_shortcuts.py` | r2p-* shortcut surface: start/continue/status/switch/reopen/gap/archive/execute |
 | `tools/workflow_cli/install.py` | InstallService: install/uninstall/status |
 | `tools/workflow_cli/install_cli.py` | r2p lifecycle binary (delegates to InstallService) |
 | `tools/workflow_cli/agent_templates/` | Install templates for claude/codex/gemini |
