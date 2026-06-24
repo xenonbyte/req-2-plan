@@ -135,7 +135,7 @@ r2p install --platform claude,codex,gemini
 | `r2p-status` | 只读查看活动 run；加 `--all` 可查看全部 run。 |
 | `r2p-switch` | 切换活动的 `--work-id`。 |
 | `r2p-tier-lock` | 用 `--base light\|standard` 和可选 modifier 锁定 tier。 |
-| `r2p-reopen` | 从指定阶段重开一个 closed 或 executing run。 |
+| `r2p-reopen` | 从指定阶段重开一个 closed 或 executing run，并选择新重开的 run。 |
 | `r2p-gap-open` | 把 open run 的上游缺口路由回 owner stage。 |
 | `r2p-gap-resolve` | 关闭一个已修复的上游缺口 route。 |
 | `r2p-archive` | 把 closed run 移到 `.req-to-plan/archive/`，并取消活动路径跟踪。 |

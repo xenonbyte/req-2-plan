@@ -7,6 +7,9 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import contextlib
+import io
+import json
 import re
 import shutil
 import shlex
@@ -193,6 +196,25 @@ def _run_cli(args_list: list[str], base_path: Path) -> int:
 
 def _shell_join(parts: list[str | Path]) -> str:
     return " ".join(shlex.quote(str(part)) for part in parts)
+
+
+def _extract_cli_output_value(output: str, key: str) -> str | None:
+    stripped = output.strip()
+    if stripped.startswith("{"):
+        try:
+            payload = json.loads(stripped)
+        except json.JSONDecodeError:
+            payload = {}
+        value = payload.get(key)
+        if isinstance(value, str):
+            return value
+
+    prefix = f"{key}:"
+    for line in output.splitlines():
+        line = line.strip()
+        if line.startswith(prefix):
+            return line.partition(":")[2].strip()
+    return None
 
 
 def _repo_root() -> Path:
@@ -729,16 +751,31 @@ def _cmd_switch(ns: argparse.Namespace, base_path: Path) -> None:
 
 def _cmd_reopen(ns: argparse.Namespace, base_path: Path) -> None:
     from_id = _validate_work_id(ns.from_id)
-    exit_code = _run_cli(
-        [
-            "run-reopen",
-            "--from", from_id,
-            "--stage", ns.stage,
-            "--reason", ns.reason,
-        ],
-        base_path,
-    )
-    sys.exit(exit_code)
+    output = io.StringIO()
+    with contextlib.redirect_stdout(output):
+        exit_code = _run_cli(
+            [
+                "run-reopen",
+                "--from", from_id,
+                "--stage", ns.stage,
+                "--reason", ns.reason,
+            ],
+            base_path,
+        )
+    cli_output = output.getvalue()
+    if cli_output:
+        print(cli_output, end="" if cli_output.endswith("\n") else "\n")
+    if exit_code != 0:
+        sys.exit(exit_code)
+
+    new_work_id = _extract_cli_output_value(cli_output, "new_work_id")
+    if not new_work_id:
+        print("blocked: reopen_output_missing_new_work_id\n")
+        sys.exit(EXIT_CONFLICT)
+
+    write_active_pointer(base_path, new_work_id, reason="workflow_reopen")
+    print(f"selected_run: .req-to-plan/{new_work_id}/run.md\nnext: r2p-continue\n")
+    sys.exit(0)
 
 
 def _cmd_archive(ns: argparse.Namespace, base_path: Path) -> None:

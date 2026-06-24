@@ -529,6 +529,19 @@ def _cmd_run_reopen(args):
     new_mgr = RunStateManager(new_run_dir)
     new_mgr.save(new_record)
 
+    if source_record.status == RunStatus.EXECUTING:
+        try:
+            source_record = update_run_status(source_record, RunStatus.CLOSED_AT_PLAN_CHECKPOINT)
+        except ValueError as e:
+            print_and_exit(format_error(str(e), exit_code=EXIT_CONFLICT), EXIT_CONFLICT)
+        source_record.current_stage = Stage.CLOSED
+        update_resume_context(
+            source_record,
+            last_operation="reopen_from_execution",
+            next_operation=f"continue_reopened_run:{new_work_id}",
+        )
+        source_mgr.save(source_record)
+
     print_and_exit(
         format_success(
             {

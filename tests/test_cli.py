@@ -3354,6 +3354,9 @@ class TestRunExecuteStart:
 
             assert exc.value.code == 0
             assert (base / ".req-to-plan" / "WF-20260101-exec-r1" / "run.md").exists()
+            assert load_record(base, "WF-20260101-exec").status == RunStatus.CLOSED_AT_PLAN_CHECKPOINT
+            from tools.workflow_cli.agent_shortcuts import scan_open_runs
+            assert scan_open_runs(base) == ["WF-20260101-exec-r1"]
 
     def test_execute_start_refuses_when_not_closed(self):
         from tools.workflow_cli.state import RunStateManager, create_run_record

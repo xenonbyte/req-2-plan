@@ -5,7 +5,7 @@ description: Reopen a closed or executing requirement-to-PLAN workflow run from 
 
 # r2p-reopen
 
-Run `{{R2P_BIN_DIR}}/r2p-reopen` to reopen a run that was closed at the PLAN checkpoint or is already executing.
+Run `{{R2P_BIN_DIR}}/r2p-reopen` to reopen a run that was closed at the PLAN checkpoint or is already executing. On success, it selects the reopened run as the active run.
 
 Usage: `{{R2P_BIN_DIR}}/r2p-reopen --from <work-id> --stage <stage> --reason "<text>"`
 

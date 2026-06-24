@@ -559,10 +559,15 @@ class TestCmdStatus:
 
 
 class TestCmdReopen:
-    def test_delegates_to_run_reopen(self, capsys):
+    def test_delegates_to_run_reopen_and_selects_reopened_run(self, capsys):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
-            with patch("tools.workflow_cli.agent_shortcuts._run_cli", return_value=0) as mock_cli:
+
+            def fake_run_cli(args_list, base_path):
+                print("  new_work_id: WF-20260527-source-r1")
+                return 0
+
+            with patch("tools.workflow_cli.agent_shortcuts._run_cli", side_effect=fake_run_cli) as mock_cli:
                 _invoke(
                     [
                         "reopen",
@@ -576,6 +581,9 @@ class TestCmdReopen:
             assert "run-reopen" in called_args
             assert "--from" in called_args
             assert "WF-20260527-source" in called_args
+            pointer = read_active_pointer(base)
+            assert pointer is not None
+            assert pointer["selected_work_id"] == "WF-20260527-source-r1"
 
 
 # ---------------------------------------------------------------------------

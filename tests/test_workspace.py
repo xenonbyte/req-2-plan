@@ -118,3 +118,25 @@ class TestCommitRequirementDir(unittest.TestCase):
             committed = _git(base, "show", "--name-only", "--format=", "HEAD").stdout
             self.assertNotIn("unrelated.txt", committed)
             self.assertIn("WF-20260101-demo/run.md", committed)
+
+    def test_auto_commit_bypasses_repo_hooks(self):
+        from tools.workflow_cli.workspace import commit_requirement_dir, ensure_workspace_gitignore
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            _init_repo(base)
+            hook = base / ".git" / "hooks" / "pre-commit"
+            hook.write_text(
+                "#!/bin/sh\nprintf hook-ran > unrelated.txt\nexit 1\n",
+                encoding="utf-8",
+            )
+            hook.chmod(0o755)
+            ensure_workspace_gitignore(base)
+            run_dir = base / ".req-to-plan" / "WF-20260101-demo"
+            run_dir.mkdir(parents=True)
+            (run_dir / "run.md").write_text("# run\n", encoding="utf-8")
+
+            commit_requirement_dir(base, "WF-20260101-demo", "chore(r2p): plan x")
+
+            tracked = _git(base, "ls-files", ".req-to-plan/WF-20260101-demo").stdout
+            self.assertIn("WF-20260101-demo/run.md", tracked)
+            self.assertFalse((base / "unrelated.txt").exists())

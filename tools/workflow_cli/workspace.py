@@ -81,7 +81,7 @@ def commit_requirement_dir(base_path: Path, work_id: str, message: str) -> None:
             _warn(f"skipped commit for {run_rel}: nothing staged (ignored or unchanged)")
             return
 
-        committed = _git(base_path, "commit", "-m", message, "--", gitignore_rel, run_rel)
+        committed = _git(base_path, "commit", "--no-verify", "-m", message, "--", gitignore_rel, run_rel)
         if committed.returncode != 0:
             unstaged = _git(base_path, "reset", "-q", "--", gitignore_rel, run_rel)
             _warn(f"git commit failed for {run_rel}: {committed.stderr.strip()}")

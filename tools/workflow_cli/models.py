@@ -151,7 +151,11 @@ ALLOWED_TRANSITIONS: dict[RunStatus, set[RunStatus]] = {
         RunStatus.ENTRY_GATE_FAILED,
     },
     RunStatus.CLOSED_AT_PLAN_CHECKPOINT: {RunStatus.EXECUTING, RunStatus.ARCHIVED},
-    RunStatus.EXECUTING: {RunStatus.EXECUTING, RunStatus.ARCHIVED},
+    RunStatus.EXECUTING: {
+        RunStatus.EXECUTING,
+        RunStatus.CLOSED_AT_PLAN_CHECKPOINT,
+        RunStatus.ARCHIVED,
+    },
     RunStatus.ARCHIVED: set(),
 }
 

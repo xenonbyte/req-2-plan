@@ -146,7 +146,7 @@ After installation, the agent-facing commands call shared wrappers under
 | `r2p-status` | Inspect the active run, or all runs with `--all`, without changing state. |
 | `r2p-switch` | Select a different active `--work-id`. |
 | `r2p-tier-lock` | Lock the tier with `--base light\|standard` and optional modifiers. |
-| `r2p-reopen` | Reopen a closed or executing run from a specific stage. |
+| `r2p-reopen` | Reopen a closed or executing run from a specific stage and select the reopened run. |
 | `r2p-gap-open` | Route an upstream gap on an open run back to the owner stage. |
 | `r2p-gap-resolve` | Close a repaired upstream-gap route. |
 | `r2p-archive` | Move a closed run under `.req-to-plan/archive/` and untrack its active path. |
