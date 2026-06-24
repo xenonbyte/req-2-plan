@@ -1,6 +1,6 @@
 {
   "name": "@xenonbyte/req-2-plan",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "description": "Requirement-to-PLAN workflow CLI and agent integration installer.",
   "bin": {
     "r2p": "bin/r2p.js"
