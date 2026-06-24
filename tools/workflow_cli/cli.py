@@ -93,6 +93,18 @@ def _validate_work_id(raw: str) -> WorkId:
         print_and_exit(format_error(str(e), exit_code=EXIT_CLI_ERR), EXIT_CLI_ERR)
 
 
+def _ensure_workspace_gitignore_or_exit(base_path: Path) -> None:
+    try:
+        ensure_workspace_gitignore(base_path)
+    except ValueError as e:
+        print_and_exit(format_error(str(e), exit_code=EXIT_CONFLICT), EXIT_CONFLICT)
+
+
+def _reject_symlink_or_exit(path: Path, message: str) -> None:
+    if path.is_symlink():
+        print_and_exit(format_error(message, exit_code=EXIT_CONFLICT), EXIT_CONFLICT)
+
+
 def _validate_repo_path(raw: str) -> Path:
     """Return a repo path only when it is an existing directory."""
     repo_path = Path(raw)
@@ -374,6 +386,8 @@ def _cmd_run_close(args):
             ),
             EXIT_CONFLICT,
         )
+    base = args.base_path or Path.cwd()
+    _ensure_workspace_gitignore_or_exit(base)
     try:
         record = update_run_status(record, RunStatus.CLOSED_AT_PLAN_CHECKPOINT)
     except ValueError as e:
@@ -383,9 +397,8 @@ def _cmd_run_close(args):
     mgr.save(record)
     # PLAN complete → land the requirement directory in version control
     # (best-effort, path-limited; never touches unrelated changes). spec §4.5
-    ensure_workspace_gitignore(args.base_path or Path.cwd())
     commit_requirement_dir(
-        args.base_path or Path.cwd(),
+        base,
         str(record.work_id),
         f"chore(r2p): plan {record.work_id}",
     )
@@ -441,7 +454,8 @@ def _cmd_run_reopen(args):
         except ValueError as e:
             print_and_exit(format_error(str(e), exit_code=EXIT_CLI_ERR), EXIT_CLI_ERR)
         candidate_dir = _get_run_dir(candidate, args.base_path)
-        if not candidate_dir.exists():
+        candidate_archive_dir = (args.base_path or Path.cwd()) / ".req-to-plan" / "archive" / candidate
+        if not candidate_dir.exists() and not candidate_archive_dir.exists():
             new_work_id = candidate_work_id
             new_work_id_str = candidate
             new_run_dir = candidate_dir
@@ -548,12 +562,13 @@ def _cmd_run_archive(args):
             EXIT_CONFLICT,
         )
     # 2. Ensure /archive is ignored before anything lands under it.
-    ensure_workspace_gitignore(base)
+    _ensure_workspace_gitignore_or_exit(base)
     # 3. Build the archived record, but do not persist it until the move succeeds.
     try:
         archived_record = update_run_status(record, RunStatus.ARCHIVED)
     except ValueError as e:
         print_and_exit(format_error(str(e), exit_code=EXIT_CONFLICT), EXIT_CONFLICT)
+    _reject_symlink_or_exit(archive_dir.parent, f"Archive parent is a symlink: {archive_dir.parent}")
     archive_dir.parent.mkdir(parents=True, exist_ok=True)
     # 4. Move the run dir into the (ignored) archive, then persist ARCHIVED there.
     shutil.move(str(run_dir), str(archive_dir))
@@ -609,6 +624,7 @@ def _cmd_run_execute_start(args):
     lines = ["# Execution Progress", "", f"work_id: {record.work_id}", ""]
     lines += [f"- [ ] {tid} {title}".rstrip() for tid, title in anchors]
     exec_dir = run_dir / "execution"
+    _reject_symlink_or_exit(exec_dir, "unsafe_execution_dir_symlink")
     exec_dir.mkdir(parents=True, exist_ok=True)
     atomic_write_text(exec_dir / "progress.md", "\n".join(lines) + "\n")
     record = update_run_status(record, RunStatus.EXECUTING)

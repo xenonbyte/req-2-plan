@@ -20,12 +20,14 @@ def ensure_workspace_gitignore(base_path: Path) -> None:
     """Ensure `<base>/.req-to-plan/.gitignore` ignores the archive dir.
 
     Creates the file with `/archive` if absent; appends the line if the file
-    exists without it; no-op if already present. Deliberately does no merging
-    or sorting.
+    exists without it; no-op if already present. Refuses symlinks so this helper
+    never reads external target contents into the workspace file.
     """
     r2p_dir = base_path / ".req-to-plan"
     r2p_dir.mkdir(parents=True, exist_ok=True)
     gitignore = r2p_dir / ".gitignore"
+    if gitignore.is_symlink():
+        raise ValueError("unsafe_workspace_gitignore_symlink")
     if not gitignore.exists():
         atomic_write_text(gitignore, _ARCHIVE_IGNORE_LINE + "\n")
         return

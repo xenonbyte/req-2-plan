@@ -1499,6 +1499,8 @@ class TestExecuteShortcutAndRouting(unittest.TestCase):
             out, code = self._capture(ash._cmd_execute, argparse.Namespace(work_id="WF-20260101-exec"), base)
             self.assertEqual(code, 0)
             self.assertIn("stop: execute_plan", out)
+            self.assertIn(f"plan: {run_dir / '07-plan.md'}\n", out)
+            self.assertIn(f"ledger: {run_dir / 'execution' / 'progress.md'}\n", out)
             self.assertIn("r2p-archive --work-id WF-20260101-exec", out)
             self.assertEqual(RunStateManager(run_dir).load().status, RunStatus.EXECUTING)
             pointer = ash.read_active_pointer(base)
@@ -1529,9 +1531,11 @@ class TestExecuteShortcutAndRouting(unittest.TestCase):
         from tools.workflow_cli.models import RunStatus
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
-            self._run(base, "WF-20260101-exec", RunStatus.EXECUTING)
+            run_dir = self._run(base, "WF-20260101-exec", RunStatus.EXECUTING)
             out, code = self._capture(ash._cmd_execute, argparse.Namespace(work_id="WF-20260101-exec"), base)
             self.assertIn("stop: resume_execution", out)
+            self.assertIn(f"plan: {run_dir / '07-plan.md'}\n", out)
+            self.assertIn(f"ledger: {run_dir / 'execution' / 'progress.md'}\n", out)
             self.assertIn("r2p-archive --work-id WF-20260101-exec", out)
 
     def test_continue_routes_executing_to_resume(self):

@@ -682,6 +682,26 @@ class TestRunReopen:
             assert (Path(tmp) / ".req-to-plan" / f"{source}-r1").exists()
             assert (Path(tmp) / ".req-to-plan" / f"{source}-r2").exists()
 
+    def test_reopen_skips_suffix_reserved_by_archived_run(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            source = "WF-20260527-test"
+            invoke(["run-start", "--work-id", source, "--requirement", "foo"], base_path=base)
+            record = load_record(base, source)
+            record.status = RunStatus.CLOSED_AT_PLAN_CHECKPOINT
+            record.current_stage = Stage.CLOSED
+            record.approved_checkpoints = [plan_checkpoint()]
+            save_record(base, record)
+            (base / ".req-to-plan" / "archive" / f"{source}-r1").mkdir(parents=True)
+
+            invoke(
+                ["run-reopen", "--from", source, "--stage", "spec", "--reason", "fix gap"],
+                base_path=base,
+            )
+
+            assert not (base / ".req-to-plan" / f"{source}-r1").exists()
+            assert (base / ".req-to-plan" / f"{source}-r2").exists()
+
     def test_rejects_closed_as_target_stage(self):
         with tempfile.TemporaryDirectory() as tmp:
             source = "WF-20260527-test"
@@ -2907,6 +2927,25 @@ class TestRunStartBuildsContextPack:
 
 
 class TestRunCloseCommitsRequirementDir:
+    def test_close_rejects_symlinked_workspace_gitignore_without_copying_target(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            work_id, _ = _seed_plan_approved_run(base, "WF-20260101-gitignore-link")
+            secret = base / "secret.txt"
+            secret.write_text("PRIVATE\n", encoding="utf-8")
+            gitignore = base / ".req-to-plan" / ".gitignore"
+            gitignore.symlink_to(secret)
+
+            with pytest.raises(SystemExit) as exc:
+                main(["--base-path", str(base), "run-close", "--work-id", work_id])
+
+            assert exc.value.code == 6
+            assert gitignore.is_symlink()
+            assert secret.read_text(encoding="utf-8") == "PRIVATE\n"
+            rec = load_record(base, work_id)
+            assert rec.status == RunStatus.CHECKPOINT_APPROVED
+            assert rec.current_stage == Stage.PLAN
+
     def test_close_json_stdout_remains_parseable_when_auto_commit_skips(self, monkeypatch, capsys):
         with tempfile.TemporaryDirectory() as tmp:
             work_id, _ = _seed_plan_approved_run(tmp, "WF-20260101-json")
@@ -3043,6 +3082,25 @@ class TestRunArchive:
             rec = RunStateManager(base / ".req-to-plan" / "WF-20260101-arch").load()
             assert rec.status.value == "closed_at_plan_checkpoint"  # no partial archive state
 
+    def test_archive_rejects_symlinked_archive_parent_without_moving(self):
+        from tools.workflow_cli.state import RunStateManager
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            work_id = "WF-20260101-arch"
+            run_dir = self._closed_run(base, work_id)
+            outside = base / "outside"
+            outside.mkdir()
+            (base / ".req-to-plan" / "archive").symlink_to(outside, target_is_directory=True)
+
+            with pytest.raises(SystemExit) as exc:
+                main(["--base-path", str(base), "run-archive", "--work-id", work_id])
+
+            assert exc.value.code == 6  # EXIT_CONFLICT
+            assert run_dir.exists()
+            assert not (outside / work_id).exists()
+            rec = RunStateManager(run_dir).load()
+            assert rec.status.value == "closed_at_plan_checkpoint"
+
     def test_archive_move_failure_leaves_original_status_closed(self):
         from unittest.mock import patch
         from tools.workflow_cli.state import RunStateManager
@@ -3121,6 +3179,26 @@ class TestRunExecuteStart:
             with pytest.raises(FileExistsError):
                 main(["--base-path", str(base), "run-execute-start", "--work-id", "WF-20260101-exec"])
 
+            rec = RunStateManager(run_dir).load()
+            assert rec.status.value == "closed_at_plan_checkpoint"
+            assert rec.resume_context.last_completed_operation != "execute_start"
+            assert rec.resume_context.next_allowed_operation != "implement_tasks"
+
+    def test_execute_start_rejects_symlinked_execution_dir_without_writing_ledger(self):
+        from tools.workflow_cli.state import RunStateManager
+        plan = "# Plan\n\n## Tasks\n### PLAN-TASK-001: first task\nFiles:\n- a.py\n"
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            run_dir = self._closed_run_with_plan(base, "WF-20260101-exec", plan)
+            outside = base / "outside"
+            outside.mkdir()
+            (run_dir / "execution").symlink_to(outside, target_is_directory=True)
+
+            with pytest.raises(SystemExit) as exc:
+                main(["--base-path", str(base), "run-execute-start", "--work-id", "WF-20260101-exec"])
+
+            assert exc.value.code == 6
+            assert not (outside / "progress.md").exists()
             rec = RunStateManager(run_dir).load()
             assert rec.status.value == "closed_at_plan_checkpoint"
             assert rec.resume_context.last_completed_operation != "execute_start"

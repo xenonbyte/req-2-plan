@@ -768,6 +768,7 @@ def _cmd_execute(ns: argparse.Namespace, base_path: Path) -> None:
 
     from tools.workflow_cli.state import RunStateManager
     record = RunStateManager(run_path.parent).load()
+    plan = run_path.parent / "07-plan.md"
     ledger = run_path.parent / "execution" / "progress.md"
 
     if record.status == RunStatus.CLOSED_AT_PLAN_CHECKPOINT:
@@ -778,7 +779,7 @@ def _cmd_execute(ns: argparse.Namespace, base_path: Path) -> None:
         print(
             "stop: execute_plan\n"
             f"work_id: {work_id}\n"
-            "plan: 07-plan.md\n"
+            f"plan: {plan}\n"
             f"ledger: {ledger}\n"
             "next: drive the r2p-execute skill (subagent-driven SDD loop) to "
             "implement each PLAN-TASK in place on the current branch, then "
@@ -791,6 +792,7 @@ def _cmd_execute(ns: argparse.Namespace, base_path: Path) -> None:
         print(
             "stop: resume_execution\n"
             f"work_id: {work_id}\n"
+            f"plan: {plan}\n"
             f"ledger: {ledger}\n"
             "next: resume the r2p-execute loop from the first unchecked task in "
             "the ledger, then "
