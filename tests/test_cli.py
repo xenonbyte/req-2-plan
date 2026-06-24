@@ -743,6 +743,32 @@ class TestRunReopen:
 
             assert not (Path(tmp) / ".req-to-plan" / f"{source}-r1").exists()
 
+    def test_reopen_executing_rejects_symlinked_source_without_writing_target(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp) / "workspace"
+            base.mkdir()
+            outside = Path(tmp) / "outside-run"
+            source = "WF-20260527-executing"
+            invoke(["run-start", "--work-id", source, "--requirement", "foo"], base_path=base)
+            record = load_record(base, source)
+            record.status = RunStatus.EXECUTING
+            save_record(base, record)
+
+            source_dir = base / ".req-to-plan" / source
+            source_dir.rename(outside)
+            source_dir.symlink_to(outside, target_is_directory=True)
+            target_run_md_before = (outside / "run.md").read_text(encoding="utf-8")
+
+            invoke(
+                ["run-reopen", "--from", source, "--stage", "spec", "--reason", "repair spec"],
+                base_path=base,
+                expect_exit=6,
+            )
+
+            assert source_dir.is_symlink()
+            assert (outside / "run.md").read_text(encoding="utf-8") == target_run_md_before
+            assert not (base / ".req-to-plan" / f"{source}-r1").exists()
+
 
 # ---------------------------------------------------------------------------
 # tier-lock
@@ -3200,6 +3226,15 @@ class TestRunArchive:
 
 
 class TestRunExecuteStart:
+    _PLAN_WITH_READONLY_PHANTOM_TASK = (
+        "# Plan\n\n## Tasks\n"
+        "### PLAN-TASK-001: real task\nFiles:\n- a.py\n"
+        "\n## Project Context (read-only)\n"
+        "copied context that mentions an old task\n"
+        "### PLAN-TASK-999: phantom task\nFiles:\n- ghost.py\n"
+        "<!-- /r2p-read-only -->\n"
+    )
+
     def _closed_run_with_plan(self, base, wid_str, plan_body):
         from tools.workflow_cli.state import RunStateManager, create_run_record
         from tools.workflow_cli.models import RunStatus, Stage, WorkId
@@ -3232,6 +3267,22 @@ class TestRunExecuteStart:
             ledger = (run_dir / "execution" / "progress.md").read_text(encoding="utf-8")
             assert "- [ ] PLAN-TASK-001 first task" in ledger
             assert "- [ ] PLAN-TASK-002 second task" in ledger
+
+    def test_execute_start_ignores_readonly_plan_task_headings(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            run_dir = self._closed_run_with_plan(
+                base,
+                "WF-20260101-exec",
+                self._PLAN_WITH_READONLY_PHANTOM_TASK,
+            )
+            with pytest.raises(SystemExit) as exc:
+                main(["--base-path", str(base), "run-execute-start", "--work-id", "WF-20260101-exec"])
+
+            assert exc.value.code == 0
+            ledger = (run_dir / "execution" / "progress.md").read_text(encoding="utf-8")
+            assert "- [ ] PLAN-TASK-001 real task" in ledger
+            assert "PLAN-TASK-999" not in ledger
 
     def test_execute_start_ledger_failure_leaves_status_closed(self):
         from tools.workflow_cli.state import RunStateManager
@@ -3403,13 +3454,30 @@ class TestRunArchiveFromExecuting:
         from tools.workflow_cli.state import RunStateManager
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
-            self._executing_run(base, "WF-20260101-exec", self._COMPLETE_LEDGER)
+            self._executing_run(
+                base,
+                "WF-20260101-exec",
+                self._COMPLETE_LEDGER,
+                plan=self._TWO_TASK_PLAN,
+            )
             with pytest.raises(SystemExit) as exc:
                 main(["--base-path", str(base), "run-archive", "--work-id", "WF-20260101-exec"])
             assert exc.value.code == 0
             assert (base / ".req-to-plan" / "archive" / "WF-20260101-exec" / "run.md").exists()
             rec = RunStateManager(base / ".req-to-plan" / "archive" / "WF-20260101-exec").load()
             assert rec.status.value == "archived"
+
+    def test_archive_executing_run_rejected_when_plan_missing(self):
+        from tools.workflow_cli.state import RunStateManager
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            run_dir = self._executing_run(base, "WF-20260101-exec", self._COMPLETE_LEDGER)
+            with pytest.raises(SystemExit) as exc:
+                main(["--base-path", str(base), "run-archive", "--work-id", "WF-20260101-exec"])
+            assert exc.value.code == 3  # EXIT_GATE_FAIL
+            assert run_dir.exists()  # not moved
+            assert not (base / ".req-to-plan" / "archive" / "WF-20260101-exec").exists()
+            assert RunStateManager(run_dir).load().status.value == "executing"
 
     def test_archive_executing_run_rejected_when_ledger_missing(self):
         from tools.workflow_cli.state import RunStateManager
@@ -3475,6 +3543,14 @@ class TestRunArchiveFromExecuting:
         "### PLAN-TASK-001: first task\nFiles:\n- a.py\n"
         "### PLAN-TASK-002: second task\nFiles:\n- b.py\n"
     )
+    _PLAN_WITH_READONLY_PHANTOM_TASK = (
+        "# Plan\n\n## Tasks\n"
+        "### PLAN-TASK-001: real task\nFiles:\n- a.py\n"
+        "\n## Upstream Summary (read-only)\n"
+        "copied upstream plan fragment\n"
+        "### PLAN-TASK-999: phantom task\nFiles:\n- ghost.py\n"
+        "<!-- /r2p-read-only -->\n"
+    )
 
     def test_archive_rejected_when_ledger_drops_a_plan_task(self):
         from tools.workflow_cli.state import RunStateManager
@@ -3488,6 +3564,21 @@ class TestRunArchiveFromExecuting:
             assert exc.value.code == 3  # EXIT_GATE_FAIL
             assert run_dir.exists()  # not moved
             assert RunStateManager(run_dir).load().status.value == "executing"
+
+    def test_archive_ignores_readonly_plan_task_headings(self):
+        ledger = "# Execution Progress\n\nwork_id: WF-20260101-exec\n\n- [x] PLAN-TASK-001 real task\n"
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            self._executing_run(
+                base,
+                "WF-20260101-exec",
+                ledger,
+                plan=self._PLAN_WITH_READONLY_PHANTOM_TASK,
+            )
+            with pytest.raises(SystemExit) as exc:
+                main(["--base-path", str(base), "run-archive", "--work-id", "WF-20260101-exec"])
+            assert exc.value.code == 0
+            assert (base / ".req-to-plan" / "archive" / "WF-20260101-exec" / "run.md").exists()
 
     def test_archive_passes_when_ledger_covers_all_plan_tasks(self):
         ledger = (

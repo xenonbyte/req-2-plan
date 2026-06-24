@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import contextlib
 import io
+import json
 import os
 import shlex
 import subprocess
@@ -581,6 +582,35 @@ class TestCmdReopen:
             assert "run-reopen" in called_args
             assert "--from" in called_args
             assert "WF-20260527-source" in called_args
+            pointer = read_active_pointer(base)
+            assert pointer is not None
+            assert pointer["selected_work_id"] == "WF-20260527-source-r1"
+
+    def test_reopen_preserves_json_mode_output(self, capsys, monkeypatch):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            monkeypatch.setenv("R2P_JSON", "1")
+
+            def fake_run_cli(args_list, base_path):
+                print(json.dumps({"status": "ok", "new_work_id": "WF-20260527-source-r1"}))
+                return 0
+
+            with patch("tools.workflow_cli.agent_shortcuts._run_cli", side_effect=fake_run_cli):
+                _invoke(
+                    [
+                        "reopen",
+                        "--from", "WF-20260527-source",
+                        "--stage", "plan",
+                        "--reason", "fix spec gap",
+                    ],
+                    base,
+                )
+
+            out = capsys.readouterr().out
+            payload = json.loads(out)
+            assert payload["new_work_id"] == "WF-20260527-source-r1"
+            assert payload["selected_run"] == ".req-to-plan/WF-20260527-source-r1/run.md"
+            assert payload["next"] == "r2p-continue"
             pointer = read_active_pointer(base)
             assert pointer is not None
             assert pointer["selected_work_id"] == "WF-20260527-source-r1"
@@ -1526,6 +1556,27 @@ class TestArchiveShortcut(unittest.TestCase):
             self.assertEqual(cm.exception.code, 0)
             self.assertTrue((base / ".req-to-plan" / "archive" / "WF-20260101-exec" / "run.md").exists())
 
+    def test_archive_json_mode_emits_single_payload(self):
+        import argparse, tempfile
+        from pathlib import Path
+        from tools.workflow_cli import agent_shortcuts as ash
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            self._closed_run(base, "WF-20260101-arch")
+            ash.write_active_pointer(base, "WF-20260101-arch", reason="test")
+            ns = argparse.Namespace(work_id="WF-20260101-arch", force=False)
+            buf = io.StringIO()
+            with patch.dict(os.environ, {"R2P_JSON": "1"}):
+                with contextlib.redirect_stdout(buf):
+                    with self.assertRaises(SystemExit) as cm:
+                        ash._cmd_archive(ns, base)
+
+            self.assertEqual(cm.exception.code, 0)
+            payload = json.loads(buf.getvalue())
+            self.assertEqual(payload["work_id"], "WF-20260101-arch")
+            self.assertEqual(payload["status"], "archived")
+            self.assertEqual(payload["next"], "r2p-status --all")
+
 
 class TestIsTerminalExecuting(unittest.TestCase):
     def test_executing_is_not_terminal(self):
@@ -1578,6 +1629,30 @@ class TestExecuteShortcutAndRouting(unittest.TestCase):
             pointer = ash.read_active_pointer(base)
             self.assertEqual(pointer["selected_work_id"], "WF-20260101-exec")
 
+    def test_execute_json_mode_start_emits_single_payload(self):
+        import tempfile, argparse
+        from pathlib import Path
+        from tools.workflow_cli import agent_shortcuts as ash
+        from tools.workflow_cli.models import RunStatus
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            run_dir = self._run(base, "WF-20260101-exec", RunStatus.CLOSED_AT_PLAN_CHECKPOINT)
+            with patch.dict(os.environ, {"R2P_JSON": "1"}):
+                out, code = self._capture(
+                    ash._cmd_execute,
+                    argparse.Namespace(work_id="WF-20260101-exec"),
+                    base,
+                )
+
+            self.assertEqual(code, 0)
+            payload = json.loads(out)
+            self.assertEqual(payload["status"], "stop")
+            self.assertEqual(payload["reason"], "execute_plan")
+            self.assertEqual(payload["work_id"], "WF-20260101-exec")
+            self.assertEqual(payload["plan"], str(run_dir / "07-plan.md"))
+            self.assertEqual(payload["ledger"], str(run_dir / "execution" / "progress.md"))
+            self.assertIn("r2p-archive --work-id WF-20260101-exec", payload["next"])
+
     def test_execute_explicit_work_id_overrides_different_active_pointer(self):
         import tempfile, argparse
         from pathlib import Path
@@ -1609,6 +1684,30 @@ class TestExecuteShortcutAndRouting(unittest.TestCase):
             self.assertIn(f"plan: {run_dir / '07-plan.md'}\n", out)
             self.assertIn(f"ledger: {run_dir / 'execution' / 'progress.md'}\n", out)
             self.assertIn("r2p-archive --work-id WF-20260101-exec", out)
+
+    def test_execute_json_mode_resume_emits_single_payload(self):
+        import tempfile, argparse
+        from pathlib import Path
+        from tools.workflow_cli import agent_shortcuts as ash
+        from tools.workflow_cli.models import RunStatus
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            run_dir = self._run(base, "WF-20260101-exec", RunStatus.EXECUTING)
+            with patch.dict(os.environ, {"R2P_JSON": "1"}):
+                out, code = self._capture(
+                    ash._cmd_execute,
+                    argparse.Namespace(work_id="WF-20260101-exec"),
+                    base,
+                )
+
+            self.assertEqual(code, 0)
+            payload = json.loads(out)
+            self.assertEqual(payload["status"], "stop")
+            self.assertEqual(payload["reason"], "resume_execution")
+            self.assertEqual(payload["work_id"], "WF-20260101-exec")
+            self.assertEqual(payload["plan"], str(run_dir / "07-plan.md"))
+            self.assertEqual(payload["ledger"], str(run_dir / "execution" / "progress.md"))
+            self.assertIn("r2p-archive --work-id WF-20260101-exec", payload["next"])
 
     def test_continue_routes_executing_to_resume(self):
         import tempfile, argparse

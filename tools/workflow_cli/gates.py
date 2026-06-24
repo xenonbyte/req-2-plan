@@ -1116,13 +1116,10 @@ _LEDGER_CHECKED_RE = re.compile(r"^\s*-\s*\[[xX]\]\s*(PLAN-TASK-\d+)\b")
 
 
 def _plan_task_ids(run_dir: Path) -> list[str]:
-    """Task IDs declared in the (frozen) PLAN artifact; [] when it is unreadable."""
+    """Task IDs declared in the frozen PLAN artifact."""
     from tools.workflow_cli.artifact import read_artifact
-    try:
-        plan_text = read_artifact(run_dir, Stage.PLAN)
-    except FileNotFoundError:
-        return []
-    return [tid for tid, _ in plan_task_anchors(plan_text)]
+    plan_text = read_artifact(run_dir, Stage.PLAN)
+    return [tid for tid, _ in plan_task_anchors(strip_readonly_sections(plan_text))]
 
 
 def check_execution_complete(run_dir: Path) -> GateResult:
@@ -1161,12 +1158,20 @@ def check_execution_complete(run_dir: Path) -> GateResult:
         # Cross-check the ledger against the frozen PLAN: every declared PLAN-TASK
         # must be checked off, so a truncated ledger (a dropped task line) cannot
         # pass as complete. Both inputs are CLI-owned artifacts; no new trust.
-        for tid in _plan_task_ids(run_dir):
-            if tid not in checked_ids:
-                issues.append(
-                    f"PLAN task {tid} is not marked complete in the execution ledger "
-                    "(its '- [x] PLAN-TASK-*' line is missing)."
-                )
+        try:
+            plan_task_ids = _plan_task_ids(run_dir)
+        except FileNotFoundError:
+            issues.append(
+                "Frozen PLAN artifact 07-plan.md is missing; cannot cross-check "
+                "the execution ledger."
+            )
+        else:
+            for tid in plan_task_ids:
+                if tid not in checked_ids:
+                    issues.append(
+                        f"PLAN task {tid} is not marked complete in the execution ledger "
+                        "(its '- [x] PLAN-TASK-*' line is missing)."
+                    )
         if not issues and not checked_ids:
             issues.append(
                 "Execution ledger lists no completed PLAN-TASK entries "

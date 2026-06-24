@@ -24,7 +24,11 @@ def ensure_workspace_gitignore(base_path: Path) -> None:
     never reads external target contents into the workspace file.
     """
     r2p_dir = base_path / ".req-to-plan"
+    if r2p_dir.is_symlink():
+        raise ValueError("unsafe_workspace_dir_symlink")
     r2p_dir.mkdir(parents=True, exist_ok=True)
+    if r2p_dir.is_symlink():
+        raise ValueError("unsafe_workspace_dir_symlink")
     gitignore = r2p_dir / ".gitignore"
     if gitignore.is_symlink():
         raise ValueError("unsafe_workspace_gitignore_symlink")

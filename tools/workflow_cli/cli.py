@@ -63,7 +63,7 @@ from tools.workflow_cli.output import (
 from tools.workflow_cli.tier import estimate_tier, scan_keywords
 from tools.workflow_cli.workspace import ensure_workspace_gitignore, commit_requirement_dir
 from tools.workflow_cli.atomic import atomic_write_text
-from tools.workflow_cli.markdown import plan_task_anchors
+from tools.workflow_cli.markdown import plan_task_anchors, strip_readonly_sections
 
 
 # ---------------------------------------------------------------------------
@@ -422,16 +422,9 @@ def _cmd_run_reopen(args):
     source_id = str(_validate_work_id(args.from_id))
     target_stage = _parse_reopen_stage(args.stage)
 
-    # Load source run
-    source_dir = _get_run_dir(source_id, args.base_path)
-    source_mgr = RunStateManager(source_dir)
-    try:
-        source_record = source_mgr.load()
-    except FileNotFoundError:
-        print_and_exit(
-            format_error(f"Source run not found: {source_id}", exit_code=EXIT_NOT_FOUND),
-            EXIT_NOT_FOUND,
-        )
+    # Load source run through the shared guard so reopen cannot follow a
+    # symlinked .req-to-plan/<work-id> outside the workspace.
+    source_record, source_mgr, source_dir = _load_run(source_id, args.base_path)
 
     reopenable_statuses = {RunStatus.CLOSED_AT_PLAN_CHECKPOINT, RunStatus.EXECUTING}
     if source_record.status not in reopenable_statuses:
@@ -648,7 +641,7 @@ def _cmd_run_execute_start(args):
         )
     # Seed the structural progress ledger (IDs + checkboxes = structure, not
     # semantics; the agent appends progress). CLI never generates artifact text.
-    anchors = plan_task_anchors(plan_text)
+    anchors = plan_task_anchors(strip_readonly_sections(plan_text))
     if not anchors:
         print_and_exit(
             format_error(

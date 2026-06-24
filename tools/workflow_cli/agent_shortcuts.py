@@ -19,7 +19,7 @@ from pathlib import Path
 
 from tools.workflow_cli.atomic import atomic_write_text
 from tools.workflow_cli.models import RunStatus, WorkId
-from tools.workflow_cli.output import EXIT_CONFLICT
+from tools.workflow_cli.output import EXIT_CONFLICT, is_json_mode
 from tools.workflow_cli.workspace import ensure_workspace_gitignore
 
 ACTIVE_POINTER_FILE = ".workflow-active"
@@ -215,6 +215,17 @@ def _extract_cli_output_value(output: str, key: str) -> str | None:
         if line.startswith(prefix):
             return line.partition(":")[2].strip()
     return None
+
+
+def _json_payload_from_cli_output(output: str) -> dict[str, object]:
+    stripped = output.strip()
+    if not stripped:
+        return {}
+    try:
+        parsed = json.loads(stripped)
+    except json.JSONDecodeError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
 
 
 def _repo_root() -> Path:
@@ -763,7 +774,8 @@ def _cmd_reopen(ns: argparse.Namespace, base_path: Path) -> None:
             base_path,
         )
     cli_output = output.getvalue()
-    if cli_output:
+    json_mode = is_json_mode()
+    if cli_output and (exit_code != 0 or not json_mode):
         print(cli_output, end="" if cli_output.endswith("\n") else "\n")
     if exit_code != 0:
         sys.exit(exit_code)
@@ -774,7 +786,24 @@ def _cmd_reopen(ns: argparse.Namespace, base_path: Path) -> None:
         sys.exit(EXIT_CONFLICT)
 
     write_active_pointer(base_path, new_work_id, reason="workflow_reopen")
-    print(f"selected_run: .req-to-plan/{new_work_id}/run.md\nnext: r2p-continue\n")
+    selected_run = f".req-to-plan/{new_work_id}/run.md"
+    if json_mode:
+        payload: dict[str, object] = {}
+        stripped = cli_output.strip()
+        if stripped:
+            try:
+                parsed = json.loads(stripped)
+            except json.JSONDecodeError:
+                parsed = {}
+            if isinstance(parsed, dict):
+                payload.update(parsed)
+        payload["selected_work_id"] = new_work_id
+        payload["selected_run"] = selected_run
+        payload["next"] = "r2p-continue"
+        print(json.dumps(payload, indent=2))
+        sys.exit(0)
+
+    print(f"selected_run: {selected_run}\nnext: r2p-continue\n")
     sys.exit(0)
 
 
@@ -790,12 +819,28 @@ def _cmd_archive(ns: argparse.Namespace, base_path: Path) -> None:
     archive_args = ["run-archive", "--work-id", work_id]
     if getattr(ns, "force", False):
         archive_args.append("--force")
-    exit_code = _run_cli(archive_args, base_path)
+    json_mode = is_json_mode()
+    cli_output = ""
+    if json_mode:
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            exit_code = _run_cli(archive_args, base_path)
+        cli_output = output.getvalue()
+    else:
+        exit_code = _run_cli(archive_args, base_path)
     if exit_code != 0:
+        if json_mode and cli_output:
+            print(cli_output, end="" if cli_output.endswith("\n") else "\n")
         sys.exit(exit_code)
     pointer = read_active_pointer(base_path)
     if pointer and pointer.get("selected_work_id") == work_id:
         _pointer_path(base_path).unlink(missing_ok=True)
+    if json_mode:
+        payload = _json_payload_from_cli_output(cli_output)
+        payload.setdefault("work_id", work_id)
+        payload["next"] = "r2p-status --all"
+        print(json.dumps(payload, indent=2))
+        sys.exit(0)
     print(f"archived: {work_id}\nnext: r2p-status --all\n")
     sys.exit(0)
 
@@ -820,31 +865,79 @@ def _cmd_execute(ns: argparse.Namespace, base_path: Path) -> None:
     ledger = run_path.parent / "execution" / "progress.md"
 
     if record.status == RunStatus.CLOSED_AT_PLAN_CHECKPOINT:
-        code = _run_cli(["run-execute-start", "--work-id", work_id], base_path)
+        json_mode = is_json_mode()
+        cli_output = ""
+        if json_mode:
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                code = _run_cli(["run-execute-start", "--work-id", work_id], base_path)
+            cli_output = output.getvalue()
+        else:
+            code = _run_cli(["run-execute-start", "--work-id", work_id], base_path)
         if code != 0:
+            if json_mode and cli_output:
+                print(cli_output, end="" if cli_output.endswith("\n") else "\n")
             sys.exit(code)
         write_active_pointer(base_path, work_id, reason="execute_start")
+        next_step = (
+            "drive the r2p-execute skill (subagent-driven SDD loop) to "
+            "implement each PLAN-TASK in place on the current branch, then "
+            f"r2p-archive --work-id {work_id} when done"
+        )
+        if json_mode:
+            payload = _json_payload_from_cli_output(cli_output)
+            run_status = payload.get("status")
+            payload.update(
+                {
+                    "status": "stop",
+                    "reason": "execute_plan",
+                    "work_id": work_id,
+                    "plan": str(plan),
+                    "ledger": str(ledger),
+                    "next": next_step,
+                }
+            )
+            if isinstance(run_status, str):
+                payload["run_status"] = run_status
+            print(json.dumps(payload, indent=2))
+            sys.exit(0)
         print(
             "stop: execute_plan\n"
             f"work_id: {work_id}\n"
             f"plan: {plan}\n"
             f"ledger: {ledger}\n"
-            "next: drive the r2p-execute skill (subagent-driven SDD loop) to "
-            "implement each PLAN-TASK in place on the current branch, then "
-            f"r2p-archive --work-id {work_id} when done\n"
+            f"next: {next_step}\n"
         )
         sys.exit(0)
 
     if record.status == RunStatus.EXECUTING:
         write_active_pointer(base_path, work_id, reason="execute_resume")
+        next_step = (
+            "resume the r2p-execute loop from the first unchecked task in "
+            f"the ledger, then r2p-archive --work-id {work_id} when done"
+        )
+        if is_json_mode():
+            print(
+                json.dumps(
+                    {
+                        "status": "stop",
+                        "reason": "resume_execution",
+                        "work_id": work_id,
+                        "run_status": record.status.value,
+                        "plan": str(plan),
+                        "ledger": str(ledger),
+                        "next": next_step,
+                    },
+                    indent=2,
+                )
+            )
+            sys.exit(0)
         print(
             "stop: resume_execution\n"
             f"work_id: {work_id}\n"
             f"plan: {plan}\n"
             f"ledger: {ledger}\n"
-            "next: resume the r2p-execute loop from the first unchecked task in "
-            "the ledger, then "
-            f"r2p-archive --work-id {work_id} when done\n"
+            f"next: {next_step}\n"
         )
         sys.exit(0)
 

@@ -32,6 +32,18 @@ class TestEnsureWorkspaceGitignore(unittest.TestCase):
             text = (base / ".req-to-plan" / ".gitignore").read_text(encoding="utf-8")
             self.assertEqual(text.count("/archive"), 1)
 
+    def test_rejects_symlinked_req_to_plan_dir_without_writing_target(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            outside = base / "outside"
+            outside.mkdir()
+            (base / ".req-to-plan").symlink_to(outside, target_is_directory=True)
+
+            with self.assertRaisesRegex(ValueError, "unsafe_workspace_dir_symlink"):
+                ensure_workspace_gitignore(base)
+
+            self.assertFalse((outside / ".gitignore").exists())
+
 
 import subprocess
 
