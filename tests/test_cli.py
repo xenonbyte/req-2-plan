@@ -3351,6 +3351,28 @@ class TestRunExecuteStart:
             assert rec.resume_context.last_completed_operation != "execute_start"
             assert rec.resume_context.next_allowed_operation != "implement_tasks"
 
+    def test_execute_start_rejects_symlinked_workspace_dir_without_writing_ledger(self):
+        from tools.workflow_cli.state import RunStateManager
+
+        plan = "# Plan\n\n## Tasks\n### PLAN-TASK-001: first task\nFiles:\n- a.py\n"
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            outside = base / "outside-r2p"
+            outside.mkdir()
+            (base / ".req-to-plan").symlink_to(outside, target_is_directory=True)
+            work_id = "WF-20260101-exec"
+            self._closed_run_with_plan(base, work_id, plan)
+
+            with pytest.raises(SystemExit) as exc:
+                main(["--base-path", str(base), "run-execute-start", "--work-id", work_id])
+
+            assert exc.value.code == 6
+            assert not (outside / work_id / "execution" / "progress.md").exists()
+            rec = RunStateManager(outside / work_id).load()
+            assert rec.status.value == "closed_at_plan_checkpoint"
+            assert rec.resume_context.last_completed_operation != "execute_start"
+            assert rec.resume_context.next_allowed_operation != "implement_tasks"
+
     def test_execute_start_rejects_plan_without_task_anchors(self):
         from tools.workflow_cli.state import RunStateManager
         plan = "# Plan\n\n## Tasks\n- first task\n- second task\n"

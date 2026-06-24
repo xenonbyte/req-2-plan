@@ -80,9 +80,12 @@ def _get_run_dir(work_id: str, base_path: Path | None = None) -> Path:
 def _load_run(work_id: str, base_path: Path | None = None):
     """Load RunRecord; exit with EXIT_NOT_FOUND if not found.
 
-    Rejects a symlinked run directory up front (EXIT_CONFLICT) so no command —
-    read-only or mutating — ever follows `.req-to-plan/<id>` out of the workspace.
+    Rejects a symlinked workspace or run directory up front (EXIT_CONFLICT) so
+    no command — read-only or mutating — ever follows `.req-to-plan` or
+    `.req-to-plan/<id>` out of the workspace.
     """
+    root = base_path or Path.cwd()
+    _reject_symlink_or_exit(root / ".req-to-plan", "unsafe_workspace_dir_symlink")
     run_dir = _get_run_dir(work_id, base_path)
     _reject_symlink_or_exit(run_dir, f"Run directory is a symlink: {run_dir}")
     mgr = RunStateManager(run_dir)

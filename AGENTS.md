@@ -8,10 +8,10 @@ only captures what an agent would otherwise guess wrong.
 ## What this is
 
 `@xenonbyte/req-2-plan` (npm) ships a Python CLI + installer that generates
-per-platform agent skills (`claude` / `codex` / `gemini`) for a staged, gated
-requirement→PLAN workflow. Runtime is Python 3.11/3.12 (stdlib + `pyyaml`
-only). Node 18+ is used solely by the thin launcher `bin/r2p.js`, which sets
-`PYTHONPATH` and execs `python3 -m tools.workflow_cli.install_cli`.
+per-platform agent surfaces (`claude` / `codex` / `gemini` / `opencode`) for a
+staged, gated requirement→PLAN workflow. Runtime is Python 3.11/3.12 (stdlib +
+`pyyaml` only). Node 18+ is used solely by the thin launcher `bin/r2p.js`, which
+sets `PYTHONPATH` and execs `python3 -m tools.workflow_cli.install_cli`.
 
 ## Commands — use exactly these
 

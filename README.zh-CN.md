@@ -6,15 +6,15 @@
 [![node](https://img.shields.io/node/v/%40xenonbyte%2Freq-2-plan.svg)](https://nodejs.org)
 [![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
 
-> 把原始需求变成一份获批、执行器中立的实现 PLAN，并在 Claude Code、Codex、Gemini 上一致运行。
+> 把原始需求变成一份获批、执行器中立的实现 PLAN，并在 Claude Code、Codex、Gemini、opencode 上一致运行。
 
 `req-2-plan` 为 AI coding agent 安装 `r2p` 工作流。它把粗略需求推进到一条分阶段、
 门控的流程中：**requirement brief**、**risk discovery**、**DESIGN**、**SPEC**、
 **PLAN**。最终得到的计划有上下文、有审查记录，也能直接交给另一个 agent 或工程师执行。
 
-这个 npm 包是生命周期安装器。目前它支持 3 个 agent 平台：**Claude Code**、**Codex**、
-**Gemini**。它从一份共享源生成各平台的 agent skill，安装共享的 `r2p-*` wrapper，
-并维护 owned manifest，确保卸载时只移除 `r2p` 自己管理的文件。
+这个 npm 包是生命周期安装器。目前它支持 4 个 agent 平台：**Claude Code**、**Codex**、
+**Gemini**、**opencode**。它从一份共享源生成各平台的 agent 入口，安装共享的
+`r2p-*` wrapper，并维护 owned manifest，确保卸载时只移除 `r2p` 自己管理的文件。
 
 **Contents:** [Why r2p](#why-r2p) · [Features](#features) · [Installation](#installation) · [Quick start](#quick-start) · [Workflow commands](#workflow-commands) · [Development](#development)
 
@@ -35,7 +35,7 @@ AI agent 执行很快，但模糊需求容易变成含糊计划、隐藏范围�
 
 - **分阶段 requirement-to-PLAN 工作流**：requirement brief、risk discovery、DESIGN、SPEC、PLAN。
 - **Quality gate 与 checkpoint**：每个阶段交接前都要先通过校验。
-- **支持 3 个平台**：为 Claude Code（`claude`）、Codex（`codex`）、Gemini（`gemini`）安装匹配入口。
+- **支持 4 个平台**：为 Claude Code（`claude`）、Codex（`codex`）、Gemini（`gemini`）、opencode（`opencode`）安装匹配入口。
 - **单一生命周期 CLI**：`r2p install`、`r2p uninstall`、`r2p status`、`r2p version`、`r2p help`。
 - **Manifest-backed 安装安全**：覆盖前备份已存在文件，卸载只删除受管路径。
 - **Project Context Pack**：`--repo-path` 捕获真实仓库事实，用于 tier 估算和 PLAN 校验。
@@ -44,13 +44,14 @@ AI agent 执行很快，但模糊需求容易变成含糊计划、隐藏范围�
 
 ## Supported platforms
 
-`r2p` 当前支持 3 个平台。`--platform` 使用下表里的 platform ID。
+`r2p` 当前支持 4 个平台。`--platform` 使用下表里的 platform ID。
 
 | Agent platform | Platform ID | Installed surface |
-|---|---|
+|---|---|---|
 | Claude Code | `claude` | `skills/r2p/SKILL.md` plus `commands/r2p-*.md` |
 | Codex | `codex` | `skills/r2p-*/SKILL.md` |
 | Gemini | `gemini` | `commands/r2p-*.toml` |
+| opencode | `opencode` | `commands/r2p-*.md` |
 
 ## Installation
 
@@ -88,7 +89,7 @@ r2p install
 
 ```bash
 r2p install --platform claude
-r2p install --platform claude,codex,gemini
+r2p install --platform claude,codex,gemini,opencode
 ```
 
 > [!WARNING]

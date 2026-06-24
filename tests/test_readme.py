@@ -10,6 +10,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from tools.workflow_cli.install import SUPPORTED_PLATFORMS
+
 REPO = Path(__file__).resolve().parents[1]
 EN = REPO / "README.md"
 ZH = REPO / "README.zh-CN.md"
@@ -26,6 +28,15 @@ def _headings(text: str) -> list[str]:
         if not in_fence and line.startswith("#"):
             out.append(line.strip())
     return out
+
+
+def _section(text: str, heading: str) -> str:
+    start = text.index(heading)
+    rest = text[start + len(heading) :]
+    next_heading = rest.find("\n## ")
+    if next_heading == -1:
+        return rest
+    return rest[:next_heading]
 
 
 def test_readme_files_exist():
@@ -64,10 +75,23 @@ def test_key_literals_appear_in_both():
         "claude",
         "codex",
         "gemini",
+        "opencode",
         "MIT",
     ):
         assert literal in en, f"{literal!r} missing from README.md"
         assert literal in zh, f"{literal!r} missing from README.zh-CN.md"
+
+
+def test_supported_platform_tables_match_supported_platforms():
+    expected_count = len(SUPPORTED_PLATFORMS)
+    en_section = _section(EN.read_text(encoding="utf-8"), "## Supported platforms")
+    zh_section = _section(ZH.read_text(encoding="utf-8"), "## Supported platforms")
+
+    assert f"currently supports {expected_count} platforms" in en_section
+    assert f"当前支持 {expected_count} 个平台" in zh_section
+    for platform in SUPPORTED_PLATFORMS:
+        assert f"`{platform}`" in en_section, f"{platform!r} missing from README.md platform table"
+        assert f"`{platform}`" in zh_section, f"{platform!r} missing from README.zh-CN.md platform table"
 
 
 def test_doctor_and_confirm_not_resurrected():

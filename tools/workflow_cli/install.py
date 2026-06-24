@@ -1,7 +1,7 @@
 """
 InstallService — multi-platform install/uninstall for the r2p skill.
 
-Supports: claude, codex, gemini
+Supports: claude, codex, gemini, opencode
 """
 from __future__ import annotations
 
@@ -25,12 +25,13 @@ from tools.workflow_cli.version import R2P_VERSION
 
 SCHEMA_VERSION = 1
 
-SUPPORTED_PLATFORMS = ("claude", "codex", "gemini")
+SUPPORTED_PLATFORMS = ("claude", "codex", "gemini", "opencode")
 
 DEFAULT_PLATFORM_HOMES = {
     "claude": Path.home() / ".claude",
     "codex": Path.home() / ".codex",
     "gemini": Path.home() / ".gemini",
+    "opencode": Path.home() / ".config" / "opencode",
 }
 
 KNOWN_OBSOLETE_SHARED_WRAPPERS = frozenset({"r2p-adapt"})
@@ -173,6 +174,23 @@ class InstallService:
                 for src in sorted(cmd_dir.glob("r2p-*.toml")):
                     dest = platform_home / "commands" / src.name
                     content = _render(src.read_text(), R2P_VERSION, str(bin_dir))
+                    self._write_managed_file(
+                        dest, content, backups, installed_paths, written, backup_dir
+                    )
+
+            elif platform == "opencode":
+                # opencode custom commands use Markdown files with `description:`
+                # frontmatter and the filename as the command name. Reuse claude's
+                # command bodies, then inject opencode's argument placeholder so
+                # slash-command invocation args are not dropped.
+                cmd_dir = self._opencode_command_source()
+                for src in sorted(cmd_dir.glob("r2p-*.md")):
+                    dest = platform_home / "commands" / src.name
+                    content = _render_opencode_command(
+                        src.read_text(),
+                        R2P_VERSION,
+                        str(bin_dir),
+                    )
                     self._write_managed_file(
                         dest, content, backups, installed_paths, written, backup_dir
                     )
@@ -562,8 +580,23 @@ class InstallService:
         elif platform == "gemini":
             for src in sorted((template_dir / "commands").glob("r2p-*.toml")):
                 targets.append(platform_home / "commands" / src.name)
+        elif platform == "opencode":
+            # opencode reuses claude's command templates (see install()).
+            for src in sorted(self._opencode_command_source().glob("r2p-*.md")):
+                targets.append(platform_home / "commands" / src.name)
 
         return targets
+
+    def _opencode_command_source(self) -> Path:
+        """Source dir for opencode commands, shared with claude to avoid drift."""
+        return (
+            self.repo_root
+            / "tools"
+            / "workflow_cli"
+            / "agent_templates"
+            / "claude"
+            / "commands"
+        )
 
     def _cleanup_obsolete_managed_wrappers(
         self, preserve_paths: set[str] | None = None
@@ -856,6 +889,20 @@ def _render(content: str, version: str, bin_dir: str) -> str:
     content = content.replace("{{R2P_VERSION}}", version)
     content = content.replace("{{R2P_BIN_DIR}}", bin_dir)
     return content
+
+
+def _render_opencode_command(content: str, version: str, bin_dir: str) -> str:
+    """Render a Markdown command with opencode invocation arguments preserved."""
+    rendered = _render(content, version, bin_dir)
+    if "$ARGUMENTS" in rendered:
+        return rendered
+    return (
+        rendered.rstrip()
+        + "\n\n## opencode invocation arguments\n\n"
+        + "Use these arguments when running the wrapper above:\n\n"
+        + "```text\n$ARGUMENTS\n```\n\n"
+        + "If no arguments were supplied, follow the default usage.\n"
+    )
 
 
 def _render_bin_script(content: str, repo_root: Path) -> str:

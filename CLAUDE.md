@@ -27,10 +27,12 @@ higher-level `r2p-*` surface the agent drives. The agent writes all semantic
 artifact content; the CLI never does (see Key Invariants).
 
 **Distribution.** Three entry surfaces: `python -m tools.workflow_cli` (the
-Python CLI); `tools/r2p-*` shell wrappers that installed agent skills call; and
+Python CLI); `tools/r2p-*` shell wrappers that installed agent surfaces call; and
 `bin/r2p.js`, the npm `r2p` binary that delegates to `install_cli` to install /
 uninstall the per-platform skill templates (`agent_templates/{claude,codex,
-gemini}`) into `~/.req-to-plan/`.
+gemini}`) into `~/.req-to-plan/`. opencode derives commands from claude's
+Markdown templates, injects the opencode `$ARGUMENTS` placeholder, and installs
+them under `~/.config/opencode/commands/`.
 
 ## Dev Commands
 
@@ -78,7 +80,7 @@ gemini}`) into `~/.req-to-plan/`.
 | `tools/workflow_cli/agent_shortcuts.py` | r2p-* shortcut surface: start/continue/status/switch/reopen/gap/archive/execute |
 | `tools/workflow_cli/install.py` | InstallService: install/uninstall/status |
 | `tools/workflow_cli/install_cli.py` | r2p lifecycle binary (delegates to InstallService) |
-| `tools/workflow_cli/agent_templates/` | Install templates for claude/codex/gemini |
+| `tools/workflow_cli/agent_templates/` | Install templates for claude/codex/gemini (opencode derives commands from claude templates) |
 | `.claude/skills/req-to-plan.md` | Dev-view skill for contributors (this project) |
 
 ## Extending

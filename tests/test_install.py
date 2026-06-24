@@ -29,6 +29,7 @@ def make_service(tmp_path: Path) -> tuple[InstallService, Path, Path]:
         "claude": ph_root / "claude",
         "codex": ph_root / "codex",
         "gemini": ph_root / "gemini",
+        "opencode": ph_root / "opencode",
     }
     svc = InstallService(
         repo_root=REPO_ROOT,
@@ -1290,3 +1291,119 @@ class TestStaleWrapperCleanup:
             str(bk.get("target")) != str(stale)
             for bk in codex_manifest.get("backups", [])
         )
+
+
+# ---------------------------------------------------------------------------
+# opencode platform — reuses claude's command templates, installed under
+# ~/.config/opencode/commands/ (no SKILL.md; opencode has no skills concept)
+# ---------------------------------------------------------------------------
+
+
+def _claude_command_names() -> set[str]:
+    cmd_dir = REPO_ROOT / "tools" / "workflow_cli" / "agent_templates" / "claude" / "commands"
+    return {p.name for p in cmd_dir.glob("r2p-*.md")}
+
+
+OPENCODE_COMMANDS_WITH_ARGS = {
+    "r2p-archive.md",
+    "r2p-gap-open.md",
+    "r2p-gap-resolve.md",
+    "r2p-reopen.md",
+    "r2p-start.md",
+    "r2p-status.md",
+    "r2p-switch.md",
+    "r2p-tier-lock.md",
+}
+
+
+class TestInstallOpencode:
+    def test_install_copies_command_files(self, tmp_path):
+        svc, _, ph_root = make_service(tmp_path)
+        svc.install("opencode")
+        cmds = list((ph_root / "opencode" / "commands").glob("r2p-*.md"))
+        assert {p.name for p in cmds} == _claude_command_names()
+        assert len(cmds) > 0
+
+    def test_install_does_not_create_skill_md(self, tmp_path):
+        svc, _, ph_root = make_service(tmp_path)
+        svc.install("opencode")
+        assert not (ph_root / "opencode" / "skills").exists()
+
+    def test_install_command_names_match_claude(self, tmp_path):
+        svc, _, ph_root = make_service(tmp_path)
+        svc.install("opencode")
+        opencode_names = {p.name for p in (ph_root / "opencode" / "commands").glob("r2p-*.md")}
+        assert opencode_names == _claude_command_names()
+
+    def test_install_renders_placeholders(self, tmp_path):
+        svc, manifest_root, ph_root = make_service(tmp_path)
+        svc.install("opencode")
+        content = (ph_root / "opencode" / "commands" / "r2p-start.md").read_text()
+        assert "{{R2P_BIN_DIR}}" not in content
+        assert "{{R2P_VERSION}}" not in content
+        assert str(manifest_root / "bin") in content
+
+    def test_argument_taking_commands_preserve_invocation_arguments(self, tmp_path):
+        svc, _, ph_root = make_service(tmp_path)
+        svc.install("opencode")
+        command_dir = ph_root / "opencode" / "commands"
+
+        for name in OPENCODE_COMMANDS_WITH_ARGS:
+            content = (command_dir / name).read_text(encoding="utf-8")
+            assert "$ARGUMENTS" in content, f"{name} must receive opencode invocation args"
+
+    def test_manifest_lists_command_paths(self, tmp_path):
+        svc, manifest_root, ph_root = make_service(tmp_path)
+        svc.install("opencode")
+        manifest = yaml.safe_load(
+            (manifest_root / "install" / "opencode.yaml").read_text()
+        )
+        assert manifest["platform"] == "opencode"
+        cmd_dir = ph_root / "opencode" / "commands"
+        for name in _claude_command_names():
+            assert str(cmd_dir / name) in manifest["installed_paths"]
+
+    def test_uninstall_removes_command_files(self, tmp_path):
+        svc, _, ph_root = make_service(tmp_path)
+        svc.install("opencode")
+        svc.uninstall("opencode")
+        assert not list((ph_root / "opencode" / "commands").glob("r2p-*.md"))
+
+    def test_uninstall_restores_backup(self, tmp_path):
+        svc, _, ph_root = make_service(tmp_path)
+        dest = ph_root / "opencode" / "commands" / "r2p-start.md"
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text("old content", encoding="utf-8")
+        svc.install("opencode")
+        svc.uninstall("opencode")
+        assert dest.read_text(encoding="utf-8") == "old content"
+
+    def test_status_reports_ok(self, tmp_path):
+        svc, _, _ = make_service(tmp_path)
+        svc.install("opencode")
+        row = next(r for r in svc.status() if r["platform"] == "opencode")
+        assert row["status"] == "ok"
+        assert row["issues"] == []
+
+    def test_uninstall_preserves_shared_bin_when_claude_installed(self, tmp_path):
+        svc, manifest_root, _ = make_service(tmp_path)
+        svc.install("claude")
+        svc.install("opencode")
+        script = manifest_root / "bin" / "r2p-start"
+        assert script.exists()
+        svc.uninstall("opencode")
+        assert script.exists(), "shared bin scripts should remain for the claude install"
+
+    def test_install_rejects_symlinked_managed_target(self, tmp_path):
+        svc, manifest_root, ph_root = make_service(tmp_path)
+        dest = ph_root / "opencode" / "commands" / "r2p-start.md"
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        victim = tmp_path / "victim.txt"
+        victim.write_text("do not overwrite", encoding="utf-8")
+        dest.symlink_to(victim)
+
+        with pytest.raises(ValueError, match="unsafe_install"):
+            svc.install("opencode")
+
+        assert victim.read_text(encoding="utf-8") == "do not overwrite"
+        assert not (manifest_root / "install" / "opencode.yaml").exists()

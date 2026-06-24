@@ -6,17 +6,18 @@ English | [简体中文](README.zh-CN.md)
 [![node](https://img.shields.io/node/v/%40xenonbyte%2Freq-2-plan.svg)](https://nodejs.org)
 [![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
 
-> Turn a raw requirement into an approved, executor-neutral implementation PLAN across Claude Code, Codex, and Gemini.
+> Turn a raw requirement into an approved, executor-neutral implementation PLAN across Claude Code, Codex, Gemini, and opencode.
 
 `req-2-plan` installs the `r2p` workflow for AI coding agents. It takes a rough
 requirement through a staged, gated process - **requirement brief**, **risk
 discovery**, **DESIGN**, **SPEC**, and **PLAN** - so the final plan is grounded,
 reviewed, and ready for another agent or engineer to execute.
 
-The npm package is the lifecycle installer. It currently supports three agent
-platforms - **Claude Code**, **Codex**, and **Gemini**. From one shared source it
-generates platform-specific agent skills, installs the shared `r2p-*` wrappers,
-and keeps an owned manifest so uninstall only removes files managed by `r2p`.
+The npm package is the lifecycle installer. It currently supports four agent
+platforms - **Claude Code**, **Codex**, **Gemini**, and **opencode**. From one
+shared source it generates platform-specific agent surfaces, installs the shared
+`r2p-*` wrappers, and keeps an owned manifest so uninstall only removes files
+managed by `r2p`.
 
 **Contents:** [Why r2p](#why-r2p) · [Features](#features) · [Installation](#installation) · [Quick start](#quick-start) · [Workflow commands](#workflow-commands) · [Development](#development)
 
@@ -39,7 +40,7 @@ important behavior, or when you want a durable handoff between agents.
 
 - **Staged requirement-to-PLAN workflow**: requirement brief, risk discovery, DESIGN, SPEC, and PLAN.
 - **Quality gates and checkpoints**: each stage must clear validation before handoff.
-- **Three supported platforms**: installs matching surfaces for Claude Code (`claude`), Codex (`codex`), and Gemini (`gemini`).
+- **Four supported platforms**: installs matching surfaces for Claude Code (`claude`), Codex (`codex`), Gemini (`gemini`), and opencode (`opencode`).
 - **One lifecycle CLI**: `r2p install`, `r2p uninstall`, `r2p status`, `r2p version`, and `r2p help`.
 - **Manifest-backed install safety**: pre-existing files are backed up, and uninstall removes only managed paths.
 - **Project Context Pack**: `--repo-path` captures real repository facts for tiering and PLAN checks.
@@ -48,13 +49,14 @@ important behavior, or when you want a durable handoff between agents.
 
 ## Supported platforms
 
-`r2p` currently supports 3 platforms. Use the platform ID with `--platform`.
+`r2p` currently supports 4 platforms. Use the platform ID with `--platform`.
 
 | Agent platform | Platform ID | Installed surface |
-|---|---|
+|---|---|---|
 | Claude Code | `claude` | `skills/r2p/SKILL.md` plus `commands/r2p-*.md` |
 | Codex | `codex` | `skills/r2p-*/SKILL.md` |
 | Gemini | `gemini` | `commands/r2p-*.toml` |
+| opencode | `opencode` | `commands/r2p-*.md` |
 
 ## Installation
 
@@ -94,7 +96,7 @@ Install only selected platforms with `--platform`:
 
 ```bash
 r2p install --platform claude
-r2p install --platform claude,codex,gemini
+r2p install --platform claude,codex,gemini,opencode
 ```
 
 > [!WARNING]
