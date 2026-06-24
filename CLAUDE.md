@@ -1,5 +1,37 @@
 # req-to-plan — CLAUDE.md
 
+## Architecture
+
+req-to-plan turns a requirement into an executable PLAN through a gated
+pipeline, then optionally executes that PLAN in place. The entire workflow is
+filesystem state under `.req-to-plan/<work-id>/` — no database, no server.
+
+**Pipeline.** A run advances stage by stage, each producing one numbered
+artifact: RAW_REQUIREMENT (`00`) → REQUIREMENT_BRIEF (`03`) → RISK_DISCOVERY
+(`04`) → DESIGN (`05`) → SPEC (`06`) → PLAN (`07`). Each stage clears an entry
+gate, then a quality gate plus a human checkpoint, before the next is seeded.
+After PLAN the run is `CLOSED_AT_PLAN_CHECKPOINT`; from there it can go
+`EXECUTING` (in-place subagent-driven implementation of each PLAN-TASK) then
+`ARCHIVED`. `reopen` forks a closed/executing run back to an earlier stage;
+`gap-open`/`gap-resolve` route an upstream defect on an open run.
+
+**State vs. artifacts.** `run.md` (owned by `state.py`) holds status, stage,
+approved checkpoints, open routes, and resume context. Each `NN-*.md` artifact
+(owned by `artifact.py`) carries YAML frontmatter (version + ready/stale).
+`models.py` owns the enums plus `ALLOWED_TRANSITIONS` and
+`ALLOWED_COMMANDS_BY_RUN_STATE`.
+
+**CLI ⇄ Agent split.** `cli.py` is the internal command router — it validates
+state and seeds structural templates only. `agent_shortcuts.py` is the
+higher-level `r2p-*` surface the agent drives. The agent writes all semantic
+artifact content; the CLI never does (see Key Invariants).
+
+**Distribution.** Three entry surfaces: `python -m tools.workflow_cli` (the
+Python CLI); `tools/r2p-*` shell wrappers that installed agent skills call; and
+`bin/r2p.js`, the npm `r2p` binary that delegates to `install_cli` to install /
+uninstall the per-platform skill templates (`agent_templates/{claude,codex,
+gemini}`) into `~/.req-to-plan/`.
+
 ## Dev Commands
 
 ```bash
@@ -42,7 +74,7 @@
 | `tools/workflow_cli/trace.py` | Derived trace model: SPEC consumption, scope/risk closure, scope-out violations |
 | `tools/workflow_cli/gates.py` | check_entry_gate, check_quality_gate, check_forced_subagent_review |
 | `tools/workflow_cli/output.py` | Exit code constants, format_success/error/gate_result, is_json_mode |
-| `tools/workflow_cli/cli.py` | argparse router: run/tier/gate/status/stage/context command groups |
+| `tools/workflow_cli/cli.py` | argparse router: run/tier/gate/status/stage/checkpoint/route/context command groups |
 | `tools/workflow_cli/agent_shortcuts.py` | r2p-* shortcut surface: start/continue/status/switch/reopen/gap/archive/execute |
 | `tools/workflow_cli/install.py` | InstallService: install/uninstall/status |
 | `tools/workflow_cli/install_cli.py` | r2p lifecycle binary (delegates to InstallService) |
@@ -71,6 +103,7 @@
 - **Exit codes**: 0=ok, 2=cli-err, 3=gate-fail, 4=dry-run, 5=review-required, 6=conflict, 7=not-found.
 - **Manifest safety**: Uninstall only removes `installed_paths` listed in manifest. Backup before any overwrite.
 - **JSON mode**: Set `R2P_JSON=1` to get machine-readable JSON output instead of human-readable text.
+- **Auto-commit on close/archive**: `run-close` (at the PLAN checkpoint) and `run-archive` make a path-limited, best-effort `git commit` of `.req-to-plan/.gitignore` + the run dir — never `-A`/`-f`/push, and a no-op outside a git work tree. See `workspace.py:commit_requirement_dir`.
 
 ## Workflow Docs
 
