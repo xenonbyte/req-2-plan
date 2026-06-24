@@ -541,6 +541,7 @@ def _cmd_run_reopen(args):
 def _cmd_run_archive(args):
     record, mgr, run_dir = _load_run(args.work_id, args.base_path)
     base = args.base_path or Path.cwd()
+    _reject_symlink_or_exit(run_dir, f"Run directory is a symlink: {run_dir}")
     archivable = {RunStatus.CLOSED_AT_PLAN_CHECKPOINT, RunStatus.EXECUTING}
     if record.status not in archivable:
         print_and_exit(
@@ -593,6 +594,7 @@ def _cmd_run_archive(args):
 
 def _cmd_run_execute_start(args):
     record, mgr, run_dir = _load_run(args.work_id, args.base_path)
+    _reject_symlink_or_exit(run_dir, f"Run directory is a symlink: {run_dir}")
     if record.status != RunStatus.CLOSED_AT_PLAN_CHECKPOINT:
         print_and_exit(
             format_error(

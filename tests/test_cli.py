@@ -2962,6 +2962,22 @@ class TestRunCloseCommitsRequirementDir:
             assert payload["work_id"] == work_id
             assert "warning: skipped commit" in captured.err
 
+    def test_close_treats_missing_git_as_best_effort_warning(self, monkeypatch, capsys):
+        def raise_missing_git(*args, **kwargs):
+            raise FileNotFoundError("git")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            work_id, _ = _seed_plan_approved_run(tmp, "WF-20260101-no-git")
+            monkeypatch.setattr("tools.workflow_cli.workspace.subprocess.run", raise_missing_git)
+
+            with pytest.raises(SystemExit) as exc:
+                main(["--base-path", str(tmp), "run-close", "--work-id", work_id])
+
+            assert exc.value.code == 0
+            rec = load_record(tmp, work_id)
+            assert rec.status == RunStatus.CLOSED_AT_PLAN_CHECKPOINT
+            assert "warning: skipped commit" in capsys.readouterr().err
+
     def test_failed_auto_commit_unstages_r2p_paths(self):
         import subprocess
 
@@ -3101,6 +3117,32 @@ class TestRunArchive:
             rec = RunStateManager(run_dir).load()
             assert rec.status.value == "closed_at_plan_checkpoint"
 
+    def test_archive_rejects_symlinked_run_dir_without_writing_target(self):
+        from tools.workflow_cli.state import RunStateManager, create_run_record
+        from tools.workflow_cli.models import RunStatus, Stage, WorkId
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            work_id = "WF-20260101-arch"
+            outside = base / "outside-run"
+            outside.mkdir()
+            rec = create_run_record(WorkId(work_id))
+            rec.status = RunStatus.CLOSED_AT_PLAN_CHECKPOINT
+            rec.current_stage = Stage.CLOSED
+            RunStateManager(outside).save(rec)
+            run_link = base / ".req-to-plan" / work_id
+            run_link.parent.mkdir(parents=True)
+            run_link.symlink_to(outside, target_is_directory=True)
+
+            with pytest.raises(SystemExit) as exc:
+                main(["--base-path", str(base), "run-archive", "--work-id", work_id])
+
+            assert exc.value.code == 6
+            assert run_link.is_symlink()
+            assert not (base / ".req-to-plan" / "archive" / work_id).exists()
+            rec = RunStateManager(outside).load()
+            assert rec.status.value == "closed_at_plan_checkpoint"
+
     def test_archive_move_failure_leaves_original_status_closed(self):
         from unittest.mock import patch
         from tools.workflow_cli.state import RunStateManager
@@ -3200,6 +3242,37 @@ class TestRunExecuteStart:
             assert exc.value.code == 6
             assert not (outside / "progress.md").exists()
             rec = RunStateManager(run_dir).load()
+            assert rec.status.value == "closed_at_plan_checkpoint"
+            assert rec.resume_context.last_completed_operation != "execute_start"
+            assert rec.resume_context.next_allowed_operation != "implement_tasks"
+
+    def test_execute_start_rejects_symlinked_run_dir_without_writing_ledger(self):
+        from tools.workflow_cli.artifact import write_artifact
+        from tools.workflow_cli.state import RunStateManager, create_run_record
+        from tools.workflow_cli.models import RunStatus, Stage, WorkId
+
+        plan = "# Plan\n\n## Tasks\n### PLAN-TASK-001: first task\nFiles:\n- a.py\n"
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            work_id = "WF-20260101-exec"
+            outside = base / "outside-run"
+            outside.mkdir()
+            rec = create_run_record(WorkId(work_id))
+            rec.status = RunStatus.CLOSED_AT_PLAN_CHECKPOINT
+            rec.current_stage = Stage.CLOSED
+            write_artifact(outside, Stage.PLAN, plan, version=1, status="approved")
+            RunStateManager(outside).save(rec)
+            run_link = base / ".req-to-plan" / work_id
+            run_link.parent.mkdir(parents=True)
+            run_link.symlink_to(outside, target_is_directory=True)
+
+            with pytest.raises(SystemExit) as exc:
+                main(["--base-path", str(base), "run-execute-start", "--work-id", work_id])
+
+            assert exc.value.code == 6
+            assert run_link.is_symlink()
+            assert not (outside / "execution" / "progress.md").exists()
+            rec = RunStateManager(outside).load()
             assert rec.status.value == "closed_at_plan_checkpoint"
             assert rec.resume_context.last_completed_operation != "execute_start"
             assert rec.resume_context.next_allowed_operation != "implement_tasks"
