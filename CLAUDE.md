@@ -140,8 +140,10 @@ doubt, read the module, not this file.
 
 ## Repo-layout gotchas
 
-- `docs/` and `.req-to-plan/` are **gitignored** local runtime/design state — do
-  not commit either.
+- `.req-to-plan/` is **gitignored** local runtime state — never commit it. `docs/`
+  is **tracked** design state (committed; e.g. requirement docs live here); only
+  `docs/archive/` is gitignored local history. Check `.gitignore` before assuming
+  a path is ignored.
 - `.claude/skills/` is local tool state, not the canonical project guide; the
   user-facing Claude install template is
   `tools/workflow_cli/agent_templates/claude/SKILL.md`.
