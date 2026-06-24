@@ -334,6 +334,29 @@ class TestCmdStart:
             data = read_active_pointer(base)
             assert data["selected_work_id"] == "WF-20260527-add-rate-limiting"
 
+    def test_start_preflights_workspace_gitignore_before_creating_run(self, capsys):
+        from tools.workflow_cli.output import EXIT_CONFLICT
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            (base / ".req-to-plan").mkdir()
+            secret = base / "secret.txt"
+            secret.write_text("PRIVATE\n", encoding="utf-8")
+            gitignore = base / ".req-to-plan" / ".gitignore"
+            gitignore.symlink_to(secret)
+            work_id = "WF-20260527-add-rate-limiting"
+
+            with patch(
+                "tools.workflow_cli.agent_shortcuts.generate_work_id",
+                return_value=work_id,
+            ):
+                _invoke(["start", "add rate limiting"], base, expect_exit=EXIT_CONFLICT)
+
+            out = capsys.readouterr().out
+            assert "unsafe_workspace_gitignore" in out
+            assert not (base / ".req-to-plan" / work_id).exists()
+            assert not (base / ".req-to-plan" / ".workflow-active").exists()
+            assert secret.read_text(encoding="utf-8") == "PRIVATE\n"
+
     def test_blocks_when_active_run_exists_no_separate(self, capsys):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
@@ -585,6 +608,41 @@ class TestCmdReopen:
             pointer = read_active_pointer(base)
             assert pointer is not None
             assert pointer["selected_work_id"] == "WF-20260527-source-r1"
+
+    def test_reopen_preflights_workspace_gitignore_before_creating_reopened_run(self, capsys):
+        from tests.test_cli import _seed_plan_approved_run
+        from tools.workflow_cli.cli import main as cli_main
+        from tools.workflow_cli.output import EXIT_CONFLICT
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            work_id, _ = _seed_plan_approved_run(base, "WF-20260527-source")
+            with pytest.raises(SystemExit) as exc:
+                cli_main(["--base-path", str(base), "run-close", "--work-id", work_id])
+            assert exc.value.code == 0
+
+            secret = base / "secret.txt"
+            secret.write_text("PRIVATE\n", encoding="utf-8")
+            gitignore = base / ".req-to-plan" / ".gitignore"
+            gitignore.unlink()
+            gitignore.symlink_to(secret)
+
+            _invoke(
+                [
+                    "reopen",
+                    "--from", work_id,
+                    "--stage", "plan",
+                    "--reason", "fix spec gap",
+                ],
+                base,
+                expect_exit=EXIT_CONFLICT,
+            )
+
+            out = capsys.readouterr().out
+            assert "unsafe_workspace_gitignore" in out
+            assert not (base / ".req-to-plan" / "WF-20260527-source-r1").exists()
+            assert read_active_pointer(base) is None
+            assert secret.read_text(encoding="utf-8") == "PRIVATE\n"
 
     def test_reopen_preserves_json_mode_output(self, capsys, monkeypatch):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1628,6 +1686,30 @@ class TestExecuteShortcutAndRouting(unittest.TestCase):
             self.assertEqual(RunStateManager(run_dir).load().status, RunStatus.EXECUTING)
             pointer = ash.read_active_pointer(base)
             self.assertEqual(pointer["selected_work_id"], "WF-20260101-exec")
+
+    def test_execute_preflights_workspace_gitignore_before_transitioning_closed_run(self):
+        import tempfile, argparse
+        from pathlib import Path
+        from tools.workflow_cli import agent_shortcuts as ash
+        from tools.workflow_cli.models import RunStatus
+        from tools.workflow_cli.output import EXIT_CONFLICT
+        from tools.workflow_cli.state import RunStateManager
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            run_dir = self._run(base, "WF-20260101-exec", RunStatus.CLOSED_AT_PLAN_CHECKPOINT)
+            secret = base / "secret.txt"
+            secret.write_text("PRIVATE\n", encoding="utf-8")
+            gitignore = base / ".req-to-plan" / ".gitignore"
+            gitignore.unlink()
+            gitignore.symlink_to(secret)
+
+            out, code = self._capture(ash._cmd_execute, argparse.Namespace(work_id="WF-20260101-exec"), base)
+
+            self.assertEqual(code, EXIT_CONFLICT)
+            self.assertIn("unsafe_workspace_gitignore", out)
+            self.assertEqual(RunStateManager(run_dir).load().status, RunStatus.CLOSED_AT_PLAN_CHECKPOINT)
+            self.assertFalse((run_dir / "execution" / "progress.md").exists())
+            self.assertEqual(secret.read_text(encoding="utf-8"), "PRIVATE\n")
 
     def test_execute_json_mode_start_emits_single_payload(self):
         import tempfile, argparse

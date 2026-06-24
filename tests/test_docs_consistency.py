@@ -103,6 +103,33 @@ class TestExecuteTemplateContent(unittest.TestCase):
             + ", ".join(offenders),
         )
 
+    def test_execute_surfaces_block_dirty_code_tree_before_task_loop(self):
+        surfaces = [
+            "tools/workflow_cli/agent_templates/claude/commands/r2p-execute.md",
+            "tools/workflow_cli/agent_templates/codex/skills/r2p-execute/SKILL.md",
+        ]
+        missing = []
+        offenders = []
+        required = (
+            "stop before dispatching Task 1",
+            "Do not commit unrelated work",
+            "git status --short -- ':!.req-to-plan'",
+        )
+        forbidden = (
+            "do NOT block execution",
+            "warn the user but do NOT block execution",
+        )
+        for rel in surfaces:
+            text = (REPO_ROOT / rel).read_text(encoding="utf-8")
+            for tok in required:
+                if tok not in text:
+                    missing.append(f"{rel}:{tok}")
+            for tok in forbidden:
+                if tok in text:
+                    offenders.append(f"{rel}:{tok}")
+        self.assertEqual(missing, [], f"missing dirty-tree block guidance: {missing}")
+        self.assertEqual(offenders, [], f"unsafe dirty-tree guidance remains: {offenders}")
+
     def test_gemini_execute_toml_mentions_in_place_and_archive(self):
         text = (REPO_ROOT / "tools/workflow_cli/agent_templates/gemini/commands/r2p-execute.toml").read_text(encoding="utf-8")
         self.assertIn("r2p-execute", text)

@@ -46,10 +46,7 @@ def read_active_pointer(base_path: Path) -> dict | None:
     return data if data else None
 
 
-def write_active_pointer(base_path: Path, work_id: str, reason: str = "workflow_start") -> None:
-    work_id = _validate_work_id(work_id)
-    path = _pointer_path(base_path)
-    path.parent.mkdir(parents=True, exist_ok=True)
+def _ensure_workspace_gitignore_or_exit(base_path: Path, work_id: str) -> None:
     try:
         ensure_workspace_gitignore(base_path)
     except ValueError as exc:
@@ -59,6 +56,12 @@ def write_active_pointer(base_path: Path, work_id: str, reason: str = "workflow_
             f"reason: {exc}\n"
         )
         sys.exit(EXIT_CONFLICT)
+
+
+def write_active_pointer(base_path: Path, work_id: str, reason: str = "workflow_start") -> None:
+    work_id = _validate_work_id(work_id)
+    _ensure_workspace_gitignore_or_exit(base_path, work_id)
+    path = _pointer_path(base_path)
     run_rel = f".req-to-plan/{work_id}/run.md"
     updated_at = datetime.now(timezone.utc).astimezone().isoformat()
     content = (
@@ -490,6 +493,7 @@ def _cmd_start(ns: argparse.Namespace, base_path: Path) -> None:
 
     work_id = generate_work_id(requirement, base_path)
     run_args = _build_run_start_args(work_id, requirement, file_path, getattr(ns, "repo_path", None))
+    _ensure_workspace_gitignore_or_exit(base_path, work_id)
     exit_code = _run_cli(run_args, base_path)
     if exit_code != 0:
         sys.exit(exit_code)
@@ -762,6 +766,7 @@ def _cmd_switch(ns: argparse.Namespace, base_path: Path) -> None:
 
 def _cmd_reopen(ns: argparse.Namespace, base_path: Path) -> None:
     from_id = _validate_work_id(ns.from_id)
+    _ensure_workspace_gitignore_or_exit(base_path, from_id)
     output = io.StringIO()
     with contextlib.redirect_stdout(output):
         exit_code = _run_cli(
@@ -865,6 +870,7 @@ def _cmd_execute(ns: argparse.Namespace, base_path: Path) -> None:
     ledger = run_path.parent / "execution" / "progress.md"
 
     if record.status == RunStatus.CLOSED_AT_PLAN_CHECKPOINT:
+        _ensure_workspace_gitignore_or_exit(base_path, work_id)
         json_mode = is_json_mode()
         cli_output = ""
         if json_mode:
@@ -911,6 +917,7 @@ def _cmd_execute(ns: argparse.Namespace, base_path: Path) -> None:
         sys.exit(0)
 
     if record.status == RunStatus.EXECUTING:
+        _ensure_workspace_gitignore_or_exit(base_path, work_id)
         write_active_pointer(base_path, work_id, reason="execute_resume")
         next_step = (
             "resume the r2p-execute loop from the first unchecked task in "

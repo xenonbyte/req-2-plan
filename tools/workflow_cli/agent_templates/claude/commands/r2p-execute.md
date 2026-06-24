@@ -20,7 +20,7 @@ Run `{{R2P_BIN_DIR}}/r2p-execute` and read its stop output. On a `closed_at_plan
 
 Work directly on the **current branch** — do NOT create a new branch, worktree, or protection boundary.
 
-Before task 1, run `git status --short -- ':!.req-to-plan'` to check the code working tree (excluding `.req-to-plan/` state). If there are uncommitted changes, warn the user but do NOT block execution — they may have intentional in-progress work. `push` and PR creation are out of scope; request them explicitly from the user.
+Before task 1, run `git status --short -- ':!.req-to-plan'` to check the code working tree (excluding `.req-to-plan/` state). If there are uncommitted changes, stop before dispatching Task 1 and ask the user to clean, stash, or commit that work, or to explicitly identify which dirty paths belong to this execution and approve task-only staging. Do not commit unrelated work. `push` and PR creation are out of scope; request them explicitly from the user.
 
 ## Pre-flight Plan Review
 
@@ -50,7 +50,7 @@ Provide the subagent with:
 The implementer must:
 1. Implement exactly what the task specifies, following TDD
 2. Satisfy the task's `Verification` criteria and attach evidence (test output, assertions)
-3. Commit the work
+3. Commit the work, staging only files intentionally changed for this PLAN-TASK
 4. Self-review and report back
 
 ### 3. Handle implementer status
