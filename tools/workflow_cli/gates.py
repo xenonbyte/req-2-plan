@@ -1120,7 +1120,7 @@ _LEDGER_CHECKED_RE = re.compile(r"^\s*-\s*\[[xX]\]\s*(PLAN-TASK-\d+)\b")
 
 def _read_regular_text_no_symlink(path: Path) -> tuple[str | None, str | None]:
     """Read a regular file without following a symlink where the OS supports it."""
-    if path.is_symlink():
+    if path.parent.is_symlink() or path.is_symlink():
         return None, "symlink"
     # O_NONBLOCK so opening a non-regular file (e.g. a writerless FIFO) returns
     # immediately and is rejected by the S_ISREG check below instead of blocking.

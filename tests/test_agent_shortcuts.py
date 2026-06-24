@@ -1767,6 +1767,47 @@ class TestExecuteShortcutAndRouting(unittest.TestCase):
             self.assertIn(f"ledger: {run_dir / 'execution' / 'progress.md'}\n", out)
             self.assertIn("r2p-archive --work-id WF-20260101-exec", out)
 
+    def test_execute_resume_rejects_symlinked_run_dir(self):
+        import tempfile, argparse
+        from pathlib import Path
+        from tools.workflow_cli import agent_shortcuts as ash
+        from tools.workflow_cli.artifact import write_artifact
+        from tools.workflow_cli.models import RunStatus, Stage, WorkId
+        from tools.workflow_cli.output import EXIT_CONFLICT
+        from tools.workflow_cli.state import RunStateManager, create_run_record
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            work_id = "WF-20260101-exec"
+            outside = base / "outside-run"
+            outside.mkdir()
+            rec = create_run_record(WorkId(work_id))
+            rec.status = RunStatus.EXECUTING
+            rec.current_stage = Stage.CLOSED
+            write_artifact(
+                outside,
+                Stage.PLAN,
+                "# Plan\n\n## Tasks\n### PLAN-TASK-001: t\n",
+                version=1,
+                status="approved",
+            )
+            RunStateManager(outside).save(rec)
+            run_link = base / ".req-to-plan" / work_id
+            run_link.parent.mkdir(parents=True)
+            run_link.symlink_to(outside, target_is_directory=True)
+
+            out, code = self._capture(
+                ash._cmd_execute,
+                argparse.Namespace(work_id=work_id),
+                base,
+            )
+
+            self.assertEqual(code, EXIT_CONFLICT)
+            self.assertIn("symlink", out.lower())
+            self.assertNotIn("resume_execution", out)
+            self.assertIsNone(ash.read_active_pointer(base))
+            self.assertTrue(run_link.is_symlink())
+
     def test_execute_json_mode_resume_emits_single_payload(self):
         import tempfile, argparse
         from pathlib import Path

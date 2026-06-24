@@ -12,7 +12,9 @@ class TestEnsureWorkspaceGitignore(unittest.TestCase):
             ensure_workspace_gitignore(base)
             gi = base / ".req-to-plan" / ".gitignore"
             self.assertTrue(gi.exists())
-            self.assertIn("/archive", gi.read_text(encoding="utf-8").splitlines())
+            lines = gi.read_text(encoding="utf-8").splitlines()
+            self.assertIn("/archive", lines)
+            self.assertIn("/.workflow-active", lines)
 
     def test_appends_archive_line_when_missing(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -23,6 +25,17 @@ class TestEnsureWorkspaceGitignore(unittest.TestCase):
             lines = (base / ".req-to-plan" / ".gitignore").read_text(encoding="utf-8").splitlines()
             self.assertIn("*.log", lines)
             self.assertIn("/archive", lines)
+            self.assertIn("/.workflow-active", lines)
+
+    def test_appends_active_pointer_line_when_archive_line_present(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            (base / ".req-to-plan").mkdir(parents=True)
+            (base / ".req-to-plan" / ".gitignore").write_text("/archive\n", encoding="utf-8")
+            ensure_workspace_gitignore(base)
+            lines = (base / ".req-to-plan" / ".gitignore").read_text(encoding="utf-8").splitlines()
+            self.assertIn("/archive", lines)
+            self.assertIn("/.workflow-active", lines)
 
     def test_idempotent_when_line_present(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -31,6 +44,7 @@ class TestEnsureWorkspaceGitignore(unittest.TestCase):
             ensure_workspace_gitignore(base)
             text = (base / ".req-to-plan" / ".gitignore").read_text(encoding="utf-8")
             self.assertEqual(text.count("/archive"), 1)
+            self.assertEqual(text.count("/.workflow-active"), 1)
 
     def test_rejects_symlinked_req_to_plan_dir_without_writing_target(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -139,6 +153,28 @@ class TestCommitRequirementDir(unittest.TestCase):
             hook = base / ".git" / "hooks" / "pre-commit"
             hook.write_text(
                 "#!/bin/sh\nprintf hook-ran > unrelated.txt\nexit 1\n",
+                encoding="utf-8",
+            )
+            hook.chmod(0o755)
+            ensure_workspace_gitignore(base)
+            run_dir = base / ".req-to-plan" / "WF-20260101-demo"
+            run_dir.mkdir(parents=True)
+            (run_dir / "run.md").write_text("# run\n", encoding="utf-8")
+
+            commit_requirement_dir(base, "WF-20260101-demo", "chore(r2p): plan x")
+
+            tracked = _git(base, "ls-files", ".req-to-plan/WF-20260101-demo").stdout
+            self.assertIn("WF-20260101-demo/run.md", tracked)
+            self.assertFalse((base / "unrelated.txt").exists())
+
+    def test_auto_commit_bypasses_post_commit_hook(self):
+        from tools.workflow_cli.workspace import commit_requirement_dir, ensure_workspace_gitignore
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            _init_repo(base)
+            hook = base / ".git" / "hooks" / "post-commit"
+            hook.write_text(
+                "#!/bin/sh\nprintf hook-ran > unrelated.txt\n",
                 encoding="utf-8",
             )
             hook.chmod(0o755)

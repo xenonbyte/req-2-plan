@@ -9,18 +9,19 @@ from __future__ import annotations
 
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 from tools.workflow_cli.atomic import atomic_write_text
 
-_ARCHIVE_IGNORE_LINE = "/archive"
+_WORKSPACE_GITIGNORE_LINES = ("/archive", "/.workflow-active")
 
 
 def ensure_workspace_gitignore(base_path: Path) -> None:
-    """Ensure `<base>/.req-to-plan/.gitignore` ignores the archive dir.
+    """Ensure `<base>/.req-to-plan/.gitignore` ignores local workspace files.
 
-    Creates the file with `/archive` if absent; appends the line if the file
-    exists without it; no-op if already present. Refuses symlinks so this helper
+    Creates the file with required entries if absent; appends missing lines if
+    the file exists; no-op if already complete. Refuses symlinks so this helper
     never reads external target contents into the workspace file.
     """
     r2p_dir = base_path / ".req-to-plan"
@@ -33,13 +34,15 @@ def ensure_workspace_gitignore(base_path: Path) -> None:
     if gitignore.is_symlink():
         raise ValueError("unsafe_workspace_gitignore_symlink")
     if not gitignore.exists():
-        atomic_write_text(gitignore, _ARCHIVE_IGNORE_LINE + "\n")
+        atomic_write_text(gitignore, "".join(f"{line}\n" for line in _WORKSPACE_GITIGNORE_LINES))
         return
     existing = gitignore.read_text(encoding="utf-8")
-    if _ARCHIVE_IGNORE_LINE in [ln.strip() for ln in existing.splitlines()]:
+    existing_lines = [ln.strip() for ln in existing.splitlines()]
+    missing_lines = [line for line in _WORKSPACE_GITIGNORE_LINES if line not in existing_lines]
+    if not missing_lines:
         return
     prefix = existing if existing.endswith("\n") or existing == "" else existing + "\n"
-    atomic_write_text(gitignore, prefix + _ARCHIVE_IGNORE_LINE + "\n")
+    atomic_write_text(gitignore, prefix + "".join(f"{line}\n" for line in missing_lines))
 
 
 def _git(base_path: Path, *args: str) -> subprocess.CompletedProcess:
@@ -85,7 +88,21 @@ def commit_requirement_dir(base_path: Path, work_id: str, message: str) -> None:
             _warn(f"skipped commit for {run_rel}: nothing staged (ignored or unchanged)")
             return
 
-        committed = _git(base_path, "commit", "--no-verify", "-m", message, "--", gitignore_rel, run_rel)
+        # `--no-verify` does not skip post-commit, so disable hooks for this
+        # best-effort background commit by pointing hooksPath at an empty dir.
+        with tempfile.TemporaryDirectory(prefix="r2p-empty-hooks-") as hooks_path:
+            committed = _git(
+                base_path,
+                "-c",
+                f"core.hooksPath={hooks_path}",
+                "commit",
+                "--no-verify",
+                "-m",
+                message,
+                "--",
+                gitignore_rel,
+                run_rel,
+            )
         if committed.returncode != 0:
             unstaged = _git(base_path, "reset", "-q", "--", gitignore_rel, run_rel)
             _warn(f"git commit failed for {run_rel}: {committed.stderr.strip()}")

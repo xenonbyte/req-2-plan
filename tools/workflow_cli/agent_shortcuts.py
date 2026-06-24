@@ -859,15 +859,31 @@ def _cmd_execute(ns: argparse.Namespace, base_path: Path) -> None:
             sys.exit(1)
         work_id = pointer["selected_work_id"]
     work_id = _validate_work_id(work_id)
-    run_path = base_path / ".req-to-plan" / work_id / "run.md"
+    r2p_dir = base_path / ".req-to-plan"
+    run_dir = r2p_dir / work_id
+    if r2p_dir.is_symlink():
+        print(
+            "blocked: unsafe_workspace_dir_symlink\n"
+            f"work_id: {work_id}\n"
+            f"path: {r2p_dir}\n"
+        )
+        sys.exit(EXIT_CONFLICT)
+    if run_dir.is_symlink():
+        print(
+            "blocked: unsafe_run_dir_symlink\n"
+            f"work_id: {work_id}\n"
+            f"path: {run_dir}\n"
+        )
+        sys.exit(EXIT_CONFLICT)
+    run_path = run_dir / "run.md"
     if not run_path.exists():
         print(f"blocked: source_run_not_found\nwork_id: {work_id}\n")
         sys.exit(7)
 
     from tools.workflow_cli.state import RunStateManager
-    record = RunStateManager(run_path.parent).load()
-    plan = run_path.parent / "07-plan.md"
-    ledger = run_path.parent / "execution" / "progress.md"
+    record = RunStateManager(run_dir).load()
+    plan = run_dir / "07-plan.md"
+    ledger = run_dir / "execution" / "progress.md"
 
     if record.status == RunStatus.CLOSED_AT_PLAN_CHECKPOINT:
         _ensure_workspace_gitignore_or_exit(base_path, work_id)
