@@ -1,9 +1,9 @@
 # AGENTS.md
 
 Guidance for AI agents working in `req-to-plan`. Compact by design — **read
-`CLAUDE.md` next**: it is the committed, authoritative dev doc with the full
-module map, the staged workflow model, and per-stage quality gates. This file
-only captures what an agent would otherwise guess wrong.
+`DEVELOPMENT.md` next**: it is the committed, tool-neutral development guide
+with the full module map, staged workflow model, and shared maintenance rules.
+This file only captures what an agent would otherwise guess wrong.
 
 ## What this is
 
@@ -43,8 +43,8 @@ above.
   suite green; describe its size qualitatively, never with a frozen number.
 - `tests/test_docs_consistency.py` enforces two things you can silently break
   when editing docs/templates:
-  - `CLAUDE.md` and `.claude/skills/req-to-plan.md` must contain **no**
-    hardcoded test count ("NN passing", "baseline: NN").
+  - `DEVELOPMENT.md` and tool-specific entry docs must contain **no** hardcoded
+    test count ("NN passing", "baseline: NN").
   - Agent-template surfaces must carry required tokens (`r2p-continue` →
     "unresolved ambiguity"/"undecided point"; `r2p-execute` → the SDD set)
     and `r2p-execute` templates must **not** mention `r2p-gap-open`.
@@ -55,11 +55,11 @@ above.
   Agent produces semantic content. **CLI never generates artifact text.**
 - **Entry points**: `cli.py` (workflow argparse router), `install_cli.py`
   (lifecycle: install/uninstall/status), `agent_shortcuts.py` (the `r2p-*`
-  surface). See CLAUDE.md for the rest of the module map.
+  surface). See `DEVELOPMENT.md` for the rest of the module map.
 - **Exit codes**: 0 ok · 2 cli-err · 3 gate-fail · 4 dry-run · 5 review-required
   · 6 conflict · 7 not-found.
-- **Terminal status**: only `CLOSED` and `ARCHIVED` are terminal
-  (`is_terminal()`). `EXECUTING` blocks starting a new run;
+- **Terminal status**: `CLOSED_AT_PLAN_CHECKPOINT` and `ARCHIVED` are terminal
+  for open-run scanning (`is_terminal()`). `EXECUTING` blocks starting a new run;
   `CLOSED_AT_PLAN_CHECKPOINT` is reopen/execute/archive-able but non-blocking.
 - **Tier floor**: `TierEstimate.lock()` raises if locked below the computed
   floor; override needs `--override-floor --confirm`.
@@ -70,8 +70,10 @@ above.
 ## Repo-layout gotchas
 
 - `docs/` and `.req-to-plan/` are **gitignored** (local-only runtime/design
-  state). Don't commit either. `CLAUDE.md` is committed (`!CLAUDE.md` in
-  `.gitignore`) and is the doc of record.
+  state). Don't commit either. `DEVELOPMENT.md` is committed and is the shared
+  development guide.
+- `.claude/skills/` is local tool state, not the canonical project guide. Do
+  not commit it.
 - `.codegraph/` is present and indexed — prefer `codegraph explore` /
   `codegraph node` over grep+read when locating code.
 - `.drfx/` holds archived run artifacts (local history), not source.
