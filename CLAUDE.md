@@ -140,8 +140,10 @@ doubt, read the module, not this file.
 
 ## Repo-layout gotchas
 
-- `.req-to-plan/` is **gitignored** local runtime state — never commit it. `docs/`
-  is **tracked** design state (committed; e.g. requirement docs live here); only
+- `.req-to-plan/` run dirs (`<work-id>/`) are **tracked** — close/archive commit
+  them via the path-scoped commit; only `.req-to-plan/archive`, `.workflow-active`,
+  and `<work-id>/logs/` are ignored (see `.req-to-plan/.gitignore`). `docs/` is
+  **tracked** design state (committed; e.g. requirement docs live here); only
   `docs/archive/` is gitignored local history. Check `.gitignore` before assuming
   a path is ignored.
 - `.claude/skills/` is local tool state, not the canonical project guide; the

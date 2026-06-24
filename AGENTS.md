@@ -108,7 +108,7 @@ archived -> none
 
 ## Repo-layout gotchas
 
-- `docs/` and `.req-to-plan/` are **gitignored** (local-only runtime/design state). Don't commit either.
+- `docs/` is **tracked** design state (only `docs/archive/` is ignored). `.req-to-plan/` run dirs (`<work-id>/`) are **tracked** and committed by the path-scoped close/archive commit; only `.req-to-plan/archive`, `.workflow-active`, and `<work-id>/logs/` are ignored (see `.req-to-plan/.gitignore`).
 - `.claude/skills/` is local tool state, not the canonical project guide. The user-facing Claude install template is `tools/workflow_cli/agent_templates/claude/SKILL.md`.
 - `.codegraph/` is present and indexed — prefer `codegraph explore` / `codegraph node` over grep+read when locating code.
 - `.drfx/` holds archived local run artifacts, not source.
