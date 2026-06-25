@@ -106,6 +106,16 @@ doubt, read the module, not this file.
   `.req-to-plan/.gitignore` plus that run's `.req-to-plan/<work-id>/` dir
   (archive commits the path removal). They never run `git add -A`/`-f`, never
   force-add ignored paths, never push, and are a no-op outside a git work tree.
+- **Final-review marker gate**: `check_final_review_recorded` is a presence/audit
+  check at the same trust level as the PLAN-TASK checkbox gate — it verifies that
+  `execution/final-review.md` exists and records `Verdict: Approved`; it never runs
+  code, runs tests, or asserts the recorded verdict is true.
+- **Cross-stage trace closure**: enforced at the PLAN quality gate (every `SPEC-*`
+  consumed by a PLAN-TASK, every `SCOPE-IN-*` carried into PLAN, every `RISK-*`
+  closed). Intermediate stages enforce only "cited upstream ID ⇒ closure tag".
+  Stages 04–06 have no forward full-coverage gate by design (REQ→DES→SPEC is a
+  legitimately many-to-many mapping; a hard symmetric-coverage gate produces false
+  positives).
 
 ## Test rules
 
@@ -124,7 +134,11 @@ doubt, read the module, not this file.
     "unresolved ambiguity" / "undecided point"; `r2p-execute` → the SDD set
     (in-place on `current branch`, `Pre-flight`, `Verification`,
     `fresh implementer subagent`, `task-reviewer`, `whole-branch review`,
-    `NEEDS_CONTEXT`, dirty-tree block, etc.) — and `r2p-execute` templates must
+    `NEEDS_CONTEXT`, dirty-tree block `stop before dispatching Task 1` /
+    `Do not commit unrelated work` / `git status --short -- ':!.req-to-plan'`,
+    plus the FR-A additions `Model Selection`, `HEAD~1`,
+    `execution/final-review.md`, `Verdict: Approved`,
+    `re-run the full verification suite`) — and `r2p-execute` templates must
     **not** mention `r2p-gap-open` (execution runs are `closed`, so upstream
     defects go through reopen/human repair, not gap routing).
 

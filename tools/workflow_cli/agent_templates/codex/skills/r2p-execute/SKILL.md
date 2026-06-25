@@ -32,6 +32,15 @@ Before dispatching Task 1, read `07-plan.md` once and scan for:
 Batch all findings into one question to the human **before** execution begins — one interrupt, not one per discovery. If the scan is clean, proceed without comment. The task-reviewer loop catches conflicts that only emerge from implementation.
 If a finding requires PLAN, SPEC, or DESIGN repair, stop and ask the human to reopen from the affected stage rather than patching over it in execution.
 
+## Model Selection
+
+Use the least powerful model that can handle each role:
+- **Mechanical implementation** (isolated, clear spec, complete `Skeleton`, 1–2 files): fast/cheap model.
+- **Integration / judgment / debugging** (multi-file coordination, pattern matching): standard model.
+- **Architecture / design AND the final whole-branch review**: most capable model.
+- Always specify the model explicitly when dispatching; an omitted model inherits the session model.
+- **Turn count beats token price**: use a mid-tier floor for reviewers and for implementers working from prose descriptions; drop to cheapest only for complete-code/single-file mechanical tasks.
+
 ## Per-Task Loop
 
 For each PLAN-TASK (in order):
@@ -69,12 +78,13 @@ The fresh implementer subagent verifies-then-removes ambiguity by evidence and T
 ### 5. Write diff and dispatch task-reviewer
 
 After the implementer reports DONE:
-1. Record the diff inline: `git diff -U10 <base-commit> HEAD`
-2. Dispatch a task-reviewer subagent with:
+1. Record BASE (`git rev-parse HEAD`) BEFORE dispatching the implementer — **never use `HEAD~1`** as BASE (it drops all but the last commit of a multi-commit task).
+2. After DONE: `mkdir -p .req-to-plan/<work-id>/logs` then `git diff -U10 <base-commit> HEAD > .req-to-plan/<work-id>/logs/task-N-diff.md`. Keep diff scratch under `logs/` (gitignored), never under `execution/`.
+3. Dispatch a task-reviewer subagent with:
    - The task text and `Spec References` from `07-plan.md`
    - The implementer's report
-   - The diff
-   - Global constraints from the plan
+   - The diff file path (`.req-to-plan/<work-id>/logs/task-N-diff.md`)
+   - Global constraints from the plan (copy verbatim from `## Global Constraints`); never pre-judge a finding's severity; never paste prior-task summaries into a later dispatch
 
 The task-reviewer returns two verdicts:
 - **Spec compliance**: checked against `Spec References` + `Verification`
@@ -87,13 +97,22 @@ The task-reviewer returns two verdicts:
 - Only when the task-reviewer is clean (both spec ✅ and quality Approved, and `Verification` satisfied), update the matching `execution/progress.md` checkbox from `- [ ] PLAN-TASK-NNN ...` to `- [x] PLAN-TASK-NNN ...` and append one line:
   `Task N: complete (commits <base7>..<head7>, review clean)`
 
+**Continuous execution**: execute all PLAN-TASKs without pausing to ask "should I continue?" between tasks. Stop only on: unresolvable `BLOCKED`, upstream defect requiring repair, dirty-tree block, or all tasks complete. `Verification` requires fresh command output; "should pass" / "looks correct" is not evidence; do not report `DONE` without it.
+
 ## Final Whole-Branch Review
 
-After all tasks complete, dispatch a final whole-branch review subagent:
-- Scope: all commits since the branch started (or since `closed_at_plan_checkpoint`)
-- Include the diff (`git diff -U10 <merge-base> HEAD`)
+After all tasks complete, dispatch a final whole-branch review subagent on the **most capable model**:
+- **re-run the full verification suite** on the final HEAD and attach the fresh output (per-task greens do not catch cross-task regressions)
+- Walk the PLAN task-by-task as a line-by-line requirements checklist; report any gap
+- Dispatch ONE fix subagent carrying the complete findings list (not one fixer per finding)
 - This whole-branch review is the merge gate
-- Dispatch fix subagents for any Critical/Important findings before marking done
+
+After the review settles, write `execution/final-review.md` recording the reviewed range, a one-line summary, and the verdict:
+- `Verdict: Approved` when the review is clean
+- `Verdict: Changes Requested` while findings remain
+- After a fix wave clears all findings, append `Verdict: Approved` as the final unfenced verdict (the gate reads the last one)
+
+Note: `r2p-archive` refuses to archive an executing run unless this file's current verdict is `Verdict: Approved`.
 
 ## Auto-Archive on Completion
 

@@ -75,6 +75,11 @@ class TestExecuteTemplateContent(unittest.TestCase):
             "- [x] PLAN-TASK-NNN",
             "hard prerequisite",       # no subagent degrade
             "NEEDS_CONTEXT",           # ambiguity ladder
+            "Model Selection",         # FR-A1 model scaling
+            "HEAD~1",                  # FR-A3 BASE rule (never use HEAD~1)
+            "execution/final-review.md",  # FR-A6 marker write
+            "Verdict: Approved",       # FR-A6 verdict protocol literal
+            "re-run the full verification suite",  # FR-A6 whole-branch review
         )
         missing = []
         for rel in surfaces:
