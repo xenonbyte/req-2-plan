@@ -1097,6 +1097,101 @@ class TestRunReopen:
             assert (outside / "run.md").read_text(encoding="utf-8") == target_run_md_before
             assert not (base / ".req-to-plan" / f"{source}-r1").exists()
 
+    def test_reopen_from_executing_rolls_back_new_run_on_source_save_failure(
+        self, monkeypatch
+    ):
+        """SPEC-STATE-001: if source_mgr.save raises after new_run_dir is created,
+        the new run dir must be removed (no orphan) and source must stay EXECUTING."""
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            source = "WF-20260527-exec-rb"
+            invoke(
+                ["run-start", "--work-id", source, "--requirement", "foo"],
+                base_path=base,
+            )
+            record = load_record(base, source)
+            record.status = RunStatus.EXECUTING
+            record.current_stage = Stage.CLOSED
+            save_record(base, record)
+
+            # Patch RunStateManager.save to succeed the first call (new record)
+            # and raise on the second call (source record).
+            from tools.workflow_cli.state import RunStateManager as _RSM
+
+            original_save = _RSM.save
+            call_count = {"n": 0}
+
+            def patched_save(self_mgr, rec):
+                call_count["n"] += 1
+                if call_count["n"] == 2:
+                    raise OSError("simulated disk failure on source save")
+                return original_save(self_mgr, rec)
+
+            monkeypatch.setattr(_RSM, "save", patched_save)
+
+            with pytest.raises((OSError, SystemExit)):
+                main(
+                    [
+                        "--base-path",
+                        str(base),
+                        "run-reopen",
+                        "--from",
+                        source,
+                        "--stage",
+                        "plan",
+                        "--reason",
+                        "repair plan",
+                    ]
+                )
+
+            # No orphan new run dir
+            new_run_dir = base / ".req-to-plan" / f"{source}-r1"
+            assert not new_run_dir.exists(), "Orphan new_run_dir must not exist after rollback"
+
+            # Source stays EXECUTING (un-patched load)
+            monkeypatch.undo()
+            source_rec = load_record(base, source)
+            assert source_rec.status == RunStatus.EXECUTING, (
+                f"Source must stay EXECUTING after failed save, got {source_rec.status}"
+            )
+
+    def test_reopen_from_executing_normal_path_unchanged(self):
+        """SPEC-STATE-001: normal reopen from EXECUTING still creates new run and
+        transitions source to CLOSED_AT_PLAN_CHECKPOINT (existing behaviour)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            source = "WF-20260527-exec-normal"
+            invoke(
+                ["run-start", "--work-id", source, "--requirement", "foo"],
+                base_path=base,
+            )
+            record = load_record(base, source)
+            record.status = RunStatus.EXECUTING
+            record.current_stage = Stage.CLOSED
+            save_record(base, record)
+
+            invoke(
+                [
+                    "run-reopen",
+                    "--from",
+                    source,
+                    "--stage",
+                    "plan",
+                    "--reason",
+                    "repair plan",
+                ],
+                base_path=base,
+            )
+
+            new_run_dir = base / ".req-to-plan" / f"{source}-r1"
+            assert new_run_dir.exists(), "New run dir must exist after normal reopen"
+            assert (new_run_dir / "run.md").exists(), "New run.md must exist"
+
+            source_rec = load_record(base, source)
+            assert source_rec.status == RunStatus.CLOSED_AT_PLAN_CHECKPOINT, (
+                f"Source must be CLOSED_AT_PLAN_CHECKPOINT, got {source_rec.status}"
+            )
+
 
 # ---------------------------------------------------------------------------
 # tier-lock

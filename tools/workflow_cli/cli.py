@@ -614,7 +614,13 @@ def _cmd_run_reopen(args):
             last_operation="reopen_from_execution",
             next_operation=f"continue_reopened_run:{new_work_id}",
         )
-        source_mgr.save(source_record)
+        try:
+            source_mgr.save(source_record)
+        except Exception:
+            # Roll back the just-created new run so no orphan is left and the
+            # source stays consistently EXECUTING.
+            shutil.rmtree(new_run_dir, ignore_errors=True)
+            raise
 
     print_and_exit(
         format_success(
