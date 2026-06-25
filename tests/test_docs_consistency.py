@@ -80,6 +80,11 @@ class TestExecuteTemplateContent(unittest.TestCase):
             "execution/final-review.md",  # FR-A6 marker write
             "Verdict: Approved",       # FR-A6 verdict protocol literal
             "re-run the full verification suite",  # FR-A6 whole-branch review
+            "After any final-review fix wave",  # FR-A6 post-fix review loop
+            "regenerate `.req-to-plan/<work-id>/logs/final-diff.md`",
+            "re-dispatch the final whole-branch reviewer",
+            "Repeat until the post-fix reviewer is clean",
+            "only then append `Verdict: Approved`",
         )
         missing = []
         for rel in surfaces:

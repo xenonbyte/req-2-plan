@@ -248,11 +248,15 @@ The final whole-branch review must:
 4. run on the most capable available model (cross-reference FR-A1);
 5. after the final review settles, write `execution/final-review.md` recording the
    reviewed range, a one-line summary, and the verdict — `Verdict: Approved` when
-   the review is clean, `Verdict: Changes Requested` while findings remain; after a
-   fix wave clears the findings, append `Verdict: Approved` as the final unfenced
-   verdict (the gate reads the last one, FR-B1). Note that `r2p-archive` refuses to
-   archive an executing run unless this file's current verdict is `Verdict: Approved`
-   (Part B).
+   the review is clean, `Verdict: Changes Requested` while findings remain;
+6. after any final-review fix wave, regenerate
+   `.req-to-plan/<work-id>/logs/final-diff.md` from the same
+   `<execution-base-commit>` to current `HEAD`, re-run the full verification suite,
+   re-dispatch the final whole-branch reviewer with the refreshed diff and output,
+   and repeat until the post-fix reviewer is clean; only then append
+   `Verdict: Approved` as the final unfenced verdict (the gate reads the last one,
+   FR-B1). Note that `r2p-archive` refuses to archive an executing run unless this
+   file's current verdict is `Verdict: Approved` (Part B).
 
 ### Part B — Final-review marker gate (CLI-side)
 

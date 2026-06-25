@@ -114,7 +114,8 @@ After all tasks complete, dispatch a final whole-branch review subagent on the *
 After the review settles, write `execution/final-review.md` recording the reviewed range, a one-line summary, and the verdict:
 - `Verdict: Approved` when the review is clean
 - `Verdict: Changes Requested` while findings remain
-- After a fix wave clears all findings, append `Verdict: Approved` as the final unfenced verdict (the gate reads the last one)
+- After any final-review fix wave, regenerate `.req-to-plan/<work-id>/logs/final-diff.md` from the same `<execution-base-commit>` to current `HEAD`, re-run the full verification suite, and re-dispatch the final whole-branch reviewer with the refreshed diff and output
+- Repeat until the post-fix reviewer is clean; only then append `Verdict: Approved` as the final unfenced verdict (the gate reads the last one)
 
 Note: `r2p-archive` refuses to archive an executing run unless this file's current verdict is `Verdict: Approved`.
 
