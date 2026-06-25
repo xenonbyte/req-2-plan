@@ -5,18 +5,23 @@
 A follow-on to the already-shipped **r2p-execute SDD Enhancement & Final-Review
 Marker Gate** work (FR-A1–FR-A6, now in local archive). That work moved the
 *diff and history* out of the controller's context into files (FR-A2) and
-disciplined the *reviewer prompt* (FR-A4). This requirement borrows the four
-remaining **controller-side context-management** disciplines from the
-`superpowers:subagent-driven-development` skill (upstream
-`obra/superpowers`, v6.0.3) that r2p-execute does not yet carry:
+disciplined the *reviewer prompt* (FR-A4). This requirement borrows the five
+remaining **context-management** disciplines from the
+`superpowers:subagent-driven-development` skill (upstream `obra/superpowers`,
+v6.0.3) that r2p-execute does not yet carry:
 
-1. **FR-CM1 — Task handoff as a file pointer + minimal implementer return contract.**
+1. **FR-CM1 — Task handoff as a brief file + minimal implementer return contract.**
 2. **FR-CM2 — Controller narration discipline.**
 3. **FR-CM3 — Reviewer ⚠️ "cannot verify from diff" adjudication before the checkbox flip.**
 4. **FR-CM4 — Minor findings carried forward to the final whole-branch review.**
+5. **FR-CM5 — `r2p-task-brief`: a read-only CLI command that extracts one frozen
+   PLAN task to a brief file, so neither the controller nor the implementer
+   ingests the whole plan.**
 
-The change is **agent-template prose only**. It touches no CLI command, no gate,
-no state transition, no artifact schema, and no JSON output. It is deliberately
+FR-CM2–CM4 are **agent-template prose only**. FR-CM1 + FR-CM5 add **one
+read-only CLI extraction command** (and its shortcut + wrapper) and wire the
+template task-handoff to it. The change touches no gate, no state transition, no
+artifact schema, and no existing command's output contract. It is deliberately
 compatible with — and reinforces — r2p's existing **trust/audit** gate
 architecture, in which the agent is the adjudicating authority and the machine
 only audits the presence/structure of the markers the agent produces.
@@ -30,13 +35,19 @@ The central thesis of the superpowers SDD skill is a context-economy claim:
 > re-read on every later turn. Hand artifacts over as files.
 
 r2p-execute already honors half of this (FR-A2 hands diffs and history over as
-files under `logs/`). But three leaks and one correctness gap remain:
+files under `logs/`). Two context leaks, one correctness gap, and one
+silent-discard remain:
 
-- **Task text leaks in.** The current §2 instruction — "Provide the subagent
-  with: The task text (from `07-plan.md`)" — reads as *paste the task text into
-  the dispatch*, which keeps it resident in the controller's context for the
-  whole run. The task already lives in a structured file (`07-plan.md`, with
-  `### PLAN-TASK-NNN` anchors); the controller can hand a **pointer** instead.
+- **Task text leaks both ways.** The current §2 instruction — "Provide the
+  subagent with: The task text (from `07-plan.md`)" — reads as *paste the task
+  text into the dispatch*, which keeps it resident in the **controller's**
+  context for the whole run (the expensive, compounding leak). The lighter
+  alternative — "tell the implementer to read its `PLAN-TASK-NNN` block" — only
+  half-fixes it: it removes the controller paste but leaves the **implementer**
+  free to read the whole `07-plan.md` (superpowers names "make a subagent read
+  the whole plan file" an explicit red flag). The deterministic fix is to
+  extract exactly one task to a brief file (FR-CM5) and hand its path, so
+  neither side sees more than the one task.
 - **Reports leak back.** There is no minimal-return contract, so an implementer
   can return its full report into the controller's context even though the
   report is also written to `execution/task-N-report.md`.
@@ -49,22 +60,43 @@ files under `logs/`). But three leaks and one correctness gap remain:
   the visible diff while a "cannot verify from diff" item is left unresolved,
   and the checkbox flips anyway.
 
-The transferable mechanism is not "add another gate". It is: **keep the
-controller's context curated by handing artifacts as files and returns as a few
-lines, and make the one place that already governs the checkbox flip account
-for what the diff-scoped reviewer structurally cannot see.**
+The transferable mechanism is not "add another gate". It is: **keep both the
+controller's and each subagent's context curated by handing each task as a brief
+file and returns as a few lines, and make the one place that already governs the
+checkbox flip account for what the diff-scoped reviewer structurally cannot
+see.**
+
+## Leak hierarchy (why FR-CM5 is in scope, not deferred)
+
+The context leaks are not equal, and the cost/value split is what justifies
+doing FR-CM5 now rather than shipping a prose-only pointer:
+
+| Leak | Nature | Fixed by | Cost |
+|---|---|---|---|
+| Controller pastes task text | Resident in the **controller** context, re-read **every turn, compounds** across the run | FR-CM1 brief-path handoff | low |
+| Implementer reads the whole plan | Lands in a **one-shot** subagent context, discarded after the task, **does not compound** | FR-CM5 deterministic extraction | one CLI command + wrapper + tests |
+
+FR-CM5 is in-grain and cheap because the machinery already exists:
+`run-execute-start` (`tools/workflow_cli/cli.py:746`) already extracts PLAN-TASK
+anchors with `plan_task_anchors(strip_readonly_sections(plan_text))` to seed
+`execution/progress.md`. Extracting one task *body* to a brief file is the same
+class of structural operation — **extraction of frozen PLAN text, not
+generation of prose** — so it does not cross the "CLI never generates artifact
+prose" boundary.
 
 ## Goals
 
-- Keep the controller's context bounded across a multi-task run: task text and
-  full reports move as files, not pasted/returned prose.
+- Keep both the controller's and each implementer's context bounded: each task
+  is handed as a brief file; full reports move as files, not returned prose.
+- Make single-task extraction **deterministic** (CLI-owned anchor parsing) rather
+  than relying on a subagent to slice its own block out of the full plan.
 - Close the diff-scoped-reviewer gap *in the prose/agent-judgment layer* without
   adding a machine gate, preserving the deliberate trust/audit architecture.
 - Stop silently discarding Minor findings between per-task review and the final
   whole-branch review.
-- Keep all four changes **agent-template prose only**, replicated across the two
-  execution surfaces that carry the orchestration body, and lock them with
-  `tests/test_docs_consistency.py` tokens so they cannot silently rot.
+- Replicate every template change across the two execution surfaces that carry
+  the orchestration body, and lock the prose with `tests/test_docs_consistency.py`
+  tokens so it cannot silently rot.
 
 ## Non-Goals
 
@@ -72,14 +104,16 @@ for what the diff-scoped reviewer structurally cannot see.**
   the current branch — a core r2p invariant. The superpowers
   `using-git-worktrees` / `finishing-a-development-branch` integration is
   explicitly **not** borrowed.
-- **No bundled bash scripts.** superpowers ships `scripts/task-brief` and
-  `scripts/review-package`. r2p's machine work lives in the Python CLI; this
-  requirement does **not** add either script.
-- **No new CLI command.** A `r2p-task-brief`-style extraction command is out of
-  scope here (see Deferred Decisions); FR-CM1 uses the existing
-  `07-plan.md` + anchor instead.
-- **No machine-gate, state-transition, schema, or JSON change.** `gates.py`,
-  `cli.py`, `state.py`, and `artifact.py` are untouched.
+- **No bundled extraction *script*.** superpowers ships `scripts/task-brief` and
+  `scripts/review-package` as skill-dir bash. r2p puts the extraction in the
+  **Python CLI**; the only shell added is the standard thin `tools/r2p-task-brief`
+  passthrough wrapper, identical in shape to the existing `r2p-*` wrappers.
+- **No machine-gate, state-transition, or schema change.** `gates.py` is
+  untouched. `r2p-task-brief` performs **no** status transition; `state.py` and
+  `artifact.py` are read-only consumers.
+- **No change to any existing command's output contract.** `r2p-task-brief` adds
+  a new command with its own output (text + `R2P_JSON=1` object); no existing
+  JSON payload changes.
 - **No change to the trust/audit model.** No receipt-based verification, no
   machine assertion that a marker is true. (Consistent with the deliberate
   rejection recorded in the `r2p-execution-gate-boundary` decision.)
@@ -114,6 +148,14 @@ review settles clean.
 only for DESIGN/SPEC/PLAN stages with MIGRATION/SAFETY/CROSS_PROJECT modifiers,
 never for execution.
 
+**Command-surface facts (for FR-CM5).** The `r2p-*` surface is three layers: a
+bash wrapper `tools/r2p-<name>` → an `agent_shortcuts.py` subcommand → one or
+more `cli.py` subcommands via `_run_cli`. The installer **discovers wrapper
+sources from the `tools/r2p-*` files on disk** and renders `{{R2P_BIN_DIR}}`
+(`tools/workflow_cli/install.py` bin-dir copy loop; wrappers are shared across
+platform manifests), so adding a new wrapper file needs **no** install-list
+edit.
+
 **Conclusion of the current-state read:** both machine gates are *deliberately*
 audit-only. The truth of a checkbox or verdict is the controller's
 responsibility, established in prose through the task-reviewer loop. This is the
@@ -122,10 +164,10 @@ new machine gate.
 
 ## Functional Requirements
 
-All prose lands in **both** orchestration surfaces (see Target Surfaces). Gemini
-`r2p-execute.toml` has no body and is unchanged.
+Template prose lands in **both** orchestration surfaces (see Target Surfaces).
+Gemini `r2p-execute.toml` has no body and is unchanged.
 
-### FR-CM1: Task handoff as a file pointer + minimal implementer return contract
+### FR-CM1: Task handoff as a brief file + minimal implementer return contract
 
 **Where:** `r2p-execute` §2 ("Dispatch a fresh implementer subagent") and the
 "The implementer must:" list.
@@ -137,13 +179,14 @@ line):
 > resident in your context and is re-read every turn. Hand artifacts as file
 > paths; keep returns to a few lines.
 
-**Change the task handoff.** Replace "Provide the subagent with: The task text
-(from `07-plan.md`)" with a file-pointer handoff:
+**Change the task handoff** to use FR-CM5's command (replacing "Provide the
+subagent with: The task text (from `07-plan.md`)"):
 
-> - A pointer to read **only** its own task block (`### PLAN-TASK-NNN` in
->   `07-plan.md`) — do **not** paste the task text into the dispatch, and do
->   **not** tell it to read the whole plan file. Hand it the file path plus the
->   `PLAN-TASK-NNN` anchor so the requirement text stays out of your context.
+> - Run `{{R2P_BIN_DIR}}/r2p-task-brief --work-id <id> --task N` and hand the
+>   implementer the **printed brief path** as its requirements ("read this first
+>   — it is your task, with the exact values to use verbatim"). Do **not** paste
+>   the task text into the dispatch, and do **not** point the implementer at the
+>   whole `07-plan.md`.
 
 **Add a minimal return contract** to the implementer instructions:
 
@@ -203,32 +246,82 @@ confirmed ⚠️ gap back through the existing implementer → re-review loop.
 > triages which must be fixed before the merge gate. A roll-up nobody reads is a
 > silent discard.
 
+### FR-CM5: `r2p-task-brief` — single-task extraction command
+
+A read-only command that extracts one frozen PLAN task to a brief file, so the
+controller hands a path (FR-CM1) and the implementer reads a file containing
+exactly its task. Deterministic CLI extraction replaces an agent slicing its own
+block out of the full plan.
+
+**Three-layer surface (matching the existing `r2p-*` shape):**
+
+- **CLI subcommand** (proposed name `plan-task-brief`) in `cli.py`:
+  `--work-id <id> --task <N>`. Loads the frozen PLAN via
+  `read_artifact(run_dir, Stage.PLAN)`, applies `strip_readonly_sections`,
+  locates the `### PLAN-TASK-N` body using the existing anchor primitives
+  (`plan_task_anchors` and the `_iter_plan_task_bodies` family — promote a small
+  public helper if needed; do **not** duplicate anchor parsing), and writes the
+  task body to `.req-to-plan/<work-id>/logs/task-N-brief.md` via
+  `atomic_write_text`, rejecting a symlinked `logs/` or target with the same
+  `_reject_symlink_or_exit` discipline `run-execute-start` uses for its
+  `execution/` write. Prints the brief path; under `R2P_JSON=1` emits
+  `{work_id, task_id, brief_path}`. **Read-only w.r.t. run state — no status
+  transition.** Exit codes from `output.py`: `EXIT_NOT_FOUND` when the run, the
+  PLAN artifact, or the requested `PLAN-TASK-N` is missing; `EXIT_OK` on success.
+- **Shortcut subcommand** `task-brief` in `agent_shortcuts.py`: resolves the
+  active run (or `--work-id`) and passes through via
+  `_run_cli(["plan-task-brief", "--work-id", id, "--task", n])`. Register it in
+  the subparser table and the `handlers` dict next to `execute`.
+- **Wrapper** `tools/r2p-task-brief`: mirrors the existing wrappers
+  (`exec python3 -m tools.workflow_cli.agent_shortcuts task-brief "$@"`).
+  Auto-discovered by the installer; no install-list edit.
+
+**Brief-file placement.** Under the run's gitignored `logs/` scratch
+(`<work-id>/logs/` is ignored per `.req-to-plan/.gitignore`), the same lifecycle
+class as the FR-A2 diff scratch. Briefs are ephemeral dispatch input — never
+tracked, never under `execution/`. They therefore touch no archive gate
+(`check_execution_complete` reads `execution/progress.md` only).
+
 ## Conflict Analysis (the explicit review)
 
 This requirement was checked against r2p's existing adjudication/checkbox
-mechanism before being written. Findings:
+mechanism and command surface before being written. Findings:
 
 | Dimension | Finding |
 |---|---|
-| **Machine-gate conflict** | **None.** FR-CM1–CM4 touch only prose and free-text ledger lines. `check_execution_complete` parses only `- [ ]`/`- [x] PLAN-TASK-\d+`; `check_final_review_recorded` parses only the last `Verdict:`. Neither structural marker is altered. |
-| **Design-philosophy fit** | **Reinforces.** FR-CM3 places adjudication in the agent-judgment layer — exactly where the audit-only architecture wants it. It adds **no** machine gate; a hypothetical "⚠️ resolved" machine gate would *violate* the deliberate audit-only decision and is therefore excluded. |
-| **Single prose-integration risk** | **One, mitigated.** Naively, FR-CM3 could create a *second* checkbox authority ("controller decides to flip") competing with "flip only when reviewer clean". The binding wording in FR-CM3 folds ⚠️ resolution *into* "reviewer clean" and routes confirmed gaps back through the implementer → re-review loop, so the reviewer-clean rule stays the single authority. |
-| **Responsibility overlap (disclosed)** | The final whole-branch review already re-walks the full PLAN task-by-task on the whole-branch diff, so it is the existing backstop for "requirement in unchanged / cross-task code". FR-CM3 is therefore an **earlier, cheaper catch** (and it prevents the task-reviewer from emitting a *false* spec ❌ on a requirement it structurally cannot see, avoiding a needless fix loop) — **not** a unique safety net. Its value is locality and false-positive avoidance, not closing an otherwise-unguarded path to archive. |
-| **FR-CM4 ledger-format gotcha** | Minor lines must be plain `Minor:` bullets. A `- [ ] PLAN-TASK-N`-shaped Minor line would match `_LEDGER_UNCHECKED_RE` and block the completion gate. Encoded in the FR-CM4 wording and in a docs-consistency token. |
+| **Machine-gate conflict** | **None.** FR-CM1–CM4 touch only prose and free-text ledger lines; FR-CM5 writes only gitignored `logs/` scratch. `check_execution_complete` parses only `- [ ]`/`- [x] PLAN-TASK-\d+`; `check_final_review_recorded` parses only the last `Verdict:`. Neither structural marker is altered. |
+| **CLI/agent-boundary fit (FR-CM5)** | **In-grain.** `r2p-task-brief` *extracts* frozen PLAN text; it does not *generate* prose, so it does not cross "the CLI never generates artifact prose". `run-execute-start` already extracts PLAN-TASK anchors with the same primitives — direct precedent. |
+| **State/transition impact (FR-CM5)** | **None.** Read-only w.r.t. run state; no `ALLOWED_TRANSITIONS` change; output is a new command's own contract, not a change to an existing payload. |
+| **Design-philosophy fit (FR-CM3)** | **Reinforces.** FR-CM3 places adjudication in the agent-judgment layer — exactly where the audit-only architecture wants it. It adds **no** machine gate; a hypothetical "⚠️ resolved" machine gate would *violate* the deliberate audit-only decision and is therefore excluded. |
+| **Single prose-integration risk (FR-CM3)** | **One, mitigated.** Naively, FR-CM3 could create a *second* checkbox authority ("controller decides to flip") competing with "flip only when reviewer clean". The binding wording folds ⚠️ resolution *into* "reviewer clean" and routes confirmed gaps back through the implementer → re-review loop, so the reviewer-clean rule stays the single authority. |
+| **Responsibility overlap (disclosed)** | The final whole-branch review already re-walks the full PLAN task-by-task on the whole-branch diff, so it is the existing backstop for "requirement in unchanged / cross-task code". FR-CM3 is an **earlier, cheaper catch** (and it prevents the task-reviewer from emitting a *false* spec ❌ on a requirement it structurally cannot see, avoiding a needless fix loop) — **not** a unique safety net. |
+| **FR-CM4 ledger-format gotcha** | Minor lines must be plain `Minor:` bullets. A `- [ ] PLAN-TASK-N`-shaped Minor line would match `_LEDGER_UNCHECKED_RE` and block the completion gate. Encoded in the FR-CM4 wording and a docs-consistency token. |
 
 ## Target Surfaces / Files
 
-1. `tools/workflow_cli/agent_templates/claude/commands/r2p-execute.md` — FR-CM1–CM4 prose.
-2. `tools/workflow_cli/agent_templates/codex/skills/r2p-execute/SKILL.md` — same prose (the two bodies are kept textually in sync; the docs-consistency token gate enforces parity).
-3. `tools/workflow_cli/agent_templates/gemini/commands/r2p-execute.toml` — **unchanged** (4-line pointer, no orchestration body).
-4. `tests/test_docs_consistency.py` — extend the
+1. `tools/workflow_cli/cli.py` — new `plan-task-brief` subcommand (handler +
+   registration in the relevant `_register_*_commands`).
+2. `tools/workflow_cli/agent_shortcuts.py` — new `task-brief` subparser + handler
+   (thin passthrough).
+3. `tools/r2p-task-brief` — new wrapper (auto-discovered by the installer).
+4. `tools/workflow_cli/agent_templates/claude/commands/r2p-execute.md` — FR-CM1–CM4 prose.
+5. `tools/workflow_cli/agent_templates/codex/skills/r2p-execute/SKILL.md` — same prose (the two bodies are kept textually in sync; the docs-consistency token gate enforces parity).
+6. `tools/workflow_cli/agent_templates/gemini/commands/r2p-execute.toml` — **unchanged** (4-line pointer, no orchestration body).
+7. `tests/test_cli.py` — tests for `plan-task-brief` (see Test Plan).
+8. `tests/test_docs_consistency.py` — extend the
    `test_execute_surfaces_carry_sdd_orchestration_tokens` required tuple with the
-   new guard tokens (below).
+   new guard tokens (below), including `r2p-task-brief`.
 
 ## Acceptance Criteria
 
-- Both orchestration surfaces hand the implementer a `PLAN-TASK-NNN` **file
-  pointer** (no pasted task text, no "read the whole plan file" instruction).
+- `r2p-task-brief --work-id <id> --task N` writes `logs/task-N-brief.md`
+  containing exactly task N's body (from the frozen, read-only-stripped PLAN),
+  prints the path, and emits `{work_id, task_id, brief_path}` under `R2P_JSON=1`;
+  it performs no status transition.
+- Missing run/PLAN/task → `EXIT_NOT_FOUND`; a symlinked `logs/` or target is
+  refused.
+- Both orchestration surfaces hand the implementer the **brief path** from
+  `r2p-task-brief` (no pasted task text, no "read the whole plan file").
 - Both surfaces state the minimal implementer return contract (status / commit
   range / one-line test summary / concerns; full report → `task-N-report.md`).
 - Both surfaces carry the narration ceiling line.
@@ -237,16 +330,29 @@ mechanism before being written. Findings:
   explicit "never flip on your own judgment".
 - Both surfaces record Minor findings as plain `Minor:` bullets and point the
   final review at them; neither uses the `- [ ] PLAN-TASK-N` shape for Minors.
-- No change to `gates.py`, `cli.py`, `state.py`, `artifact.py`, JSON output, or
-  any state transition.
-- `tests/test_docs_consistency.py` passes with the new tokens; the full suite
-  stays green.
+- No change to `gates.py`, any state transition, any artifact schema, or any
+  existing command's output contract.
+- `tests/test_cli.py` and `tests/test_docs_consistency.py` pass with the new
+  cases/tokens; the full suite stays green.
 
 ## Test Plan
 
-Extend `test_execute_surfaces_carry_sdd_orchestration_tokens` (claude + codex
-surfaces) with guard tokens, e.g.:
+**`tests/test_cli.py`** (local `invoke()` helper + `tempfile.TemporaryDirectory`,
+`base_path=Path(tmp)`; never touch the real workspace):
 
+- happy path: seed a run with a frozen PLAN containing `### PLAN-TASK-001..00N`;
+  `plan-task-brief --task 2` writes `logs/task-2-brief.md` whose content is
+  exactly task 2's body and excludes read-only sections; `R2P_JSON=1` payload
+  carries `brief_path`/`task_id`.
+- missing task / missing PLAN / unknown work-id → `EXIT_NOT_FOUND`.
+- symlinked `logs/` or target brief path → refusal (no write through the link).
+- the brief lands under `logs/` (gitignored), not under `execution/`.
+
+**`tests/test_docs_consistency.py`** — extend
+`test_execute_surfaces_carry_sdd_orchestration_tokens` (claude + codex) with
+stable tokens, e.g.:
+
+- `"r2p-task-brief"` (FR-CM1/CM5 handoff)
 - `"cannot verify from diff"` (FR-CM3)
 - `"never flip the checkbox on your own judgment"` (FR-CM3 single-authority)
 - `"returns **only**"` or an equivalent stable literal (FR-CM1 return contract)
@@ -254,33 +360,39 @@ surfaces) with guard tokens, e.g.:
 - `"Minor:"` plus a literal forbidding the `- [ ] PLAN-TASK-N` shape (FR-CM4)
 
 Token strings are finalized against the exact prose during implementation so the
-test asserts the wording that ships. No new test module is required; this
-extends the existing docs-consistency guard.
+test asserts the wording that ships.
 
 ## Risks
 
 - **Wording drift between the two surfaces.** Mitigated by the docs-consistency
   token gate (any new required token must appear in both files).
-- **Over-tokenizing the test.** Keep tokens to stable, load-bearing phrases;
-  do not pin incidental wording, which would make routine edits brittle.
+- **Over-tokenizing the test.** Keep tokens to stable, load-bearing phrases; do
+  not pin incidental wording, which would make routine edits brittle.
 - **FR-CM3 misread as a new gate.** Mitigated by the explicit "no machine-gate
   change" statement and the single-authority wording.
-- **Marginal real-world gain on FR-CM1 if controllers already hand `07-plan.md`
-  as a pointer.** Accepted: the change removes the ambiguity at near-zero cost
-  and is correct regardless.
+- **FR-CM5 surface creep.** Three layers (CLI + shortcut + wrapper) plus tests
+  is more than a prose change. Bounded by reusing existing extraction primitives
+  and the auto-discovered wrapper path; no install-list or gate edits.
 
-## Deferred Decisions
+## Implementation Sequencing
 
-- **`r2p-task-brief` CLI command.** Whether to add a CLI command that extracts a
-  single PLAN-TASK to a brief file (so the controller never touches task text at
-  all) is deferred. Default recommendation: ship FR-CM1's pointer-based handoff
-  first, run one real execution, and only add the CLI command if controller
-  context still grows materially. Owner: maintainer, after first post-change run.
+FR-CM5 is the dependency for FR-CM1's task handoff, so land the CLI command
+first, then wire the templates:
+
+1. **FR-CM5** — `plan-task-brief` CLI subcommand + `task-brief` shortcut +
+   `tools/r2p-task-brief` wrapper + `tests/test_cli.py`. Independently
+   shippable and verifiable on its own.
+2. **FR-CM1–CM4** — template prose on both surfaces + `tests/test_docs_consistency.py`
+   tokens (FR-CM1 references the command from step 1).
+
+Each phase is independently mergeable: after phase 1 the command exists and is
+tested even if the template wiring never lands.
 
 ## Verification Commands
 
 ```bash
 # Local: must use the venv (system python3 lacks pyyaml).
+.venv/bin/python -m pytest tests/test_cli.py -v -k task_brief
 .venv/bin/python -m pytest tests/test_docs_consistency.py -v
 .venv/bin/python -m pytest tests/ -q          # full suite stays green
 ```
