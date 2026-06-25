@@ -218,6 +218,15 @@ State explicitly: record BASE (`git rev-parse HEAD`) before dispatching the
 implementer, and **never use `HEAD~1`** as BASE — it silently drops all but the
 last commit of a multi-commit task.
 
+For Task 1, this BASE is also the run's `<execution-base-commit>` — the range
+anchor for the final whole-branch review (FR-A6). Persist it immediately in
+tracked execution state by adding an `Execution BASE: <execution-base-commit>`
+line to `execution/progress.md`. On resume, the final review reads that line back
+as `<execution-base-commit>` rather than recomputing the range from `HEAD` or the
+latest task range — a recomputed range would silently drop earlier task commits,
+the same multi-commit-loss failure `HEAD~1` causes. If the line is missing, stop
+and ask the human for the original Task 1 BASE instead of inferring a range.
+
 #### FR-A4: Reviewer-prompt discipline
 
 Add a short rule block: copy the plan's Global Constraints verbatim into the
