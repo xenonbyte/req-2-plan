@@ -19,8 +19,8 @@ v6.0.3) that r2p-execute does not yet carry:
    ingests the whole plan.**
 
 FR-CM2–CM4 are **agent-template prose only**. FR-CM1 + FR-CM5 add **one
-read-only CLI extraction command** (and its shortcut + wrapper) and wire the
-template task-handoff to it. The change touches no gate, no state transition, no
+read-only CLI extraction command** (and its shortcut + wrapper) and route both
+the implementer and the reviewer task-handoffs through it. The change touches no gate, no state transition, no
 artifact schema, and no existing command's output contract. It is deliberately
 compatible with — and reinforces — r2p's existing **trust/audit** gate
 architecture, in which the agent is the adjudicating authority and the machine
@@ -38,16 +38,18 @@ r2p-execute already honors half of this (FR-A2 hands diffs and history over as
 files under `logs/`). Two context leaks, one correctness gap, and one
 silent-discard remain:
 
-- **Task text leaks both ways.** The current §2 instruction — "Provide the
-  subagent with: The task text (from `07-plan.md`)" — reads as *paste the task
-  text into the dispatch*, which keeps it resident in the **controller's**
-  context for the whole run (the expensive, compounding leak). The lighter
-  alternative — "tell the implementer to read its `PLAN-TASK-NNN` block" — only
-  half-fixes it: it removes the controller paste but leaves the **implementer**
-  free to read the whole `07-plan.md` (superpowers names "make a subagent read
-  the whole plan file" an explicit red flag). The deterministic fix is to
-  extract exactly one task to a brief file (FR-CM5) and hand its path, so
-  neither side sees more than the one task.
+- **Task text leaks three ways, not one.** The controller pulls each task's text
+  into its own context through **three** channels, every one resident and
+  compounding across the run: (1) §1 "Extract task inline" tells the controller
+  to *read the task text directly from `07-plan.md`*; (2) §2 hands "The task text
+  (from `07-plan.md`)" into the **implementer** dispatch; (3) §5 hands "The task
+  text and `Spec References` from `07-plan.md`" into the **task-reviewer**
+  dispatch. Pointing a subagent at the whole `07-plan.md` instead only trades the
+  paste for a worse leak — superpowers names "make a subagent read the whole plan
+  file" an explicit red flag. The deterministic fix is to extract exactly one
+  task to a brief file once (FR-CM5) and route all three channels through its
+  path, so neither the controller, the implementer, nor the reviewer sees more
+  than the one task.
 - **Reports leak back.** There is no minimal-return contract, so an implementer
   can return its full report into the controller's context even though the
   report is also written to `execution/task-N-report.md`.
@@ -75,8 +77,8 @@ doing FR-CM5 now rather than shipping a prose-only pointer:
 
 | Leak | Nature | Fixed by | Cost |
 |---|---|---|---|
-| Controller pastes task text | Resident in the **controller** context, re-read **every turn, compounds** across the run | FR-CM1 brief-path handoff | low |
-| Implementer reads the whole plan | Lands in a **one-shot** subagent context, discarded after the task, **does not compound** | FR-CM5 deterministic extraction | one CLI command + wrapper + tests |
+| Controller holds task text via §1 read, §2 implementer paste, §5 reviewer paste | Resident in the **controller** context, re-read **every turn, compounds** across the run | FR-CM1 routes §2 + §5 through the brief **path** and trims §1 to an on-demand brief re-read (no eager per-task body in context) | low |
+| Implementer / reviewer reads the whole plan | Lands in a **one-shot** subagent context, discarded after the task, **does not compound** | FR-CM5 deterministic single-task extraction | one CLI command + wrapper + tests |
 
 FR-CM5 is in-grain and cheap because the machinery already exists:
 `run-execute-start` (`tools/workflow_cli/cli.py:746`) already extracts PLAN-TASK
@@ -85,6 +87,16 @@ anchors with `plan_task_anchors(strip_readonly_sections(plan_text))` to seed
 class of structural operation — **extraction of frozen PLAN text, not
 generation of prose** — so it does not cross the "CLI never generates artifact
 prose" boundary.
+
+**Disclosed residual (the controller is never fully plan-blind).** The controller
+still reads the whole `07-plan.md` **once** at Pre-flight — scanning for cross-task
+contradictions is structurally whole-plan. That read is for the contradiction
+scan, not a durable per-task cache: §6 ⚠️ adjudication re-reads the brief and the
+specific cited SPEC/sibling on demand rather than trusting the Pre-flight read to
+still be resident after compaction. FR-CM5's win is removing the *per-task,
+compounding* re-reads and dispatch pastes, not making the controller plan-blind.
+`## Global Constraints` is likewise still pasted per reviewer dispatch (short,
+shared) and is intentionally left as-is.
 
 ## Goals
 
@@ -172,8 +184,10 @@ Gemini `r2p-execute.toml` has no body and is unchanged.
 
 ### FR-CM1: Task handoff as a brief file + minimal implementer return contract
 
-**Where:** `r2p-execute` §2 ("Dispatch a fresh implementer subagent") and the
-"The implementer must:" list.
+**Where:** `r2p-execute` §1 ("Extract task inline"), §2 ("Dispatch a fresh
+implementer subagent") and its "The implementer must:" list, and §5 (the
+task-reviewer dispatch). One brief, produced once in §1, is the shared task
+reference for **both** the implementer (§2) and the reviewer (§5).
 
 **Add a controller-context principle** near the top of the Per-Task Loop (one
 line):
@@ -182,14 +196,35 @@ line):
 > resident in your context and is re-read every turn. Hand artifacts as file
 > paths; keep returns to a few lines.
 
-**Change the task handoff** to use FR-CM5's command (replacing "Provide the
-subagent with: The task text (from `07-plan.md`)"):
+**§1 — produce the brief instead of reading the task inline.** Rename the step
+away from "Extract task inline" (e.g. "Produce the task brief") and replace "Read
+the task text directly from `07-plan.md`" with:
 
-> - Run `{{R2P_BIN_DIR}}/r2p-task-brief --work-id <id> --task N` and hand the
->   implementer the **printed brief path** as its requirements ("read this first
->   — it is your task, with the exact values to use verbatim"). Do **not** paste
->   the task text into the dispatch, and do **not** point the implementer at the
->   whole `07-plan.md`.
+> - Run `{{R2P_BIN_DIR}}/r2p-task-brief --work-id <id> --task N` to write the
+>   one-task brief (`logs/task-N-brief.md`) and note its path. Do **not** eager-read
+>   the full task body into your own context — the goal is to avoid holding every
+>   task body at once, not to never read one. Re-open the brief on demand when it
+>   actually informs a decision: sizing the implementer's model (§2), or
+>   adjudicating a §6 ⚠️ item — and for a cross-task ⚠️, read the specific cited
+>   SPEC ID or sibling task it turns on. Do **not** lean on the Pre-flight
+>   whole-plan read still being resident; on the long runs where execution lives it
+>   may have been compacted away, so the durable source is the brief and the cited
+>   upstream on disk.
+
+**§2 — hand the implementer the brief path** (replacing "Provide the subagent
+with: The task text (from `07-plan.md`)"):
+
+> - Hand the implementer the **brief path** from §1 as its requirements ("read
+>   this first — it is your task, with the exact values to use verbatim"). Do
+>   **not** paste the task text into the dispatch, and do **not** point the
+>   implementer at the whole `07-plan.md`.
+
+**§5 — hand the task-reviewer the same brief path** (replacing "The task text and
+`Spec References` from `07-plan.md`" in the reviewer-dispatch list):
+
+> - The brief path from §1 (`logs/task-N-brief.md`) — it already carries the task
+>   body, `Spec References`, and `Verification`. Do **not** re-paste the task text
+>   or Spec References into the reviewer dispatch.
 
 **Add a minimal return contract** to the implementer instructions:
 
@@ -211,7 +246,9 @@ execution" guidance).
 ### FR-CM3: Reviewer ⚠️ "cannot verify from diff" adjudication before the flip
 
 **Where:** `r2p-execute` §5 (task-reviewer dispatch contract) **and** §6 (the
-checkbox-flip condition). **No machine-gate change.**
+checkbox-flip condition). **No machine-gate change.** (Orthogonal to FR-CM1's §5
+edit: FR-CM1 changes the reviewer's *task-reference input* to the brief path;
+FR-CM3 changes only the reviewer's *verdict output*.)
 
 The task-reviewer's only independent window into the implementation is the
 single-task diff, so requirements that live in unchanged code or span tasks are
@@ -233,8 +270,9 @@ blindly. FR-CM3 adds the missing *output* channel (§5) and then the controller
 > Flip `- [x]` only when the task-reviewer is clean — spec ✅, quality Approved,
 > `Verification` satisfied, **and no unresolved ⚠️ "cannot verify from diff" item
 > remains**. The task-reviewer's only independent view of the change is the diff;
-> resolve each ⚠️ yourself (you hold the cross-task and PLAN context it lacks). A
-> confirmed gap is a failed spec review: send it back to the implementer and
+> resolve each ⚠️ yourself by reading the cited SPEC/sibling task it turns on
+> (the cross-task and PLAN context the reviewer lacks). A confirmed gap is a
+> failed spec review: send it back to the implementer and
 > re-review — never flip the checkbox on your own judgment.
 
 This keeps "checkbox flips only when the reviewer is clean" as the single
@@ -268,8 +306,16 @@ block out of the full plan.
 **Three-layer surface (matching the existing `r2p-*` shape):**
 
 - **CLI subcommand** (proposed name `plan-task-brief`) in `cli.py`:
-  `--work-id <id> --task <N>` (selects the `PLAN-TASK-<N>` anchor; the PLAN
-  numbers tasks contiguously from 1). Loads the frozen PLAN via
+  `--work-id <id> --task <N>`. Resolve `N` by **integer value** — select the task
+  whose `### PLAN-TASK-<digits>` anchor satisfies `int(digits) == N`, so a
+  zero-padded `PLAN-TASK-002` is matched by `--task 2`, mirroring how the PLAN
+  quality gate parses task numbers (`int(m.group(1))`, `gates.py:532`).
+  Contiguous-from-1, unique numbering is **not assumed** — the PLAN quality gate
+  enforces it (`_check_plan_task_fields`, `gates.py:570-571`) before a run can
+  close at the PLAN checkpoint, so execution only ever sees a clean `1..N` task
+  set. The brief copies the task body verbatim, including its literal
+  `### PLAN-TASK-<digits>` heading, so the controller flips the matching ledger
+  checkbox by that literal ID. Loads the frozen PLAN via
   `read_artifact(run_dir, Stage.PLAN)` (which raises `FileNotFoundError` on a
   missing PLAN — map to `EXIT_NOT_FOUND`, exactly as `run-execute-start` already
   does), applies `strip_readonly_sections`, and selects the `### PLAN-TASK-N`
@@ -283,7 +329,9 @@ block out of the full plan.
   for its `execution/` write. Prints the brief path; under `R2P_JSON=1` emits
   `{work_id, task_id, brief_path}`. **Read-only w.r.t. run state — no status
   transition.** Exit codes from `output.py`: `EXIT_NOT_FOUND` when the run, the
-  PLAN artifact, or the requested `PLAN-TASK-N` is missing; `EXIT_OK` on success.
+  PLAN artifact, or the requested `PLAN-TASK-N` is missing; `EXIT_CONFLICT` when
+  `logs/` or the target brief path is a symlink (via `_reject_symlink_or_exit`);
+  `EXIT_OK` on success.
 - **Shortcut subcommand** `task-brief` in `agent_shortcuts.py`: resolves the
   active run (or `--work-id`) and passes through via
   `_run_cli(["plan-task-brief", "--work-id", id, "--task", n])`. Register it in
@@ -323,6 +371,7 @@ mechanism and command surface before being written. Findings:
 | **Single prose-integration risk (FR-CM3)** | **One, mitigated.** Naively, FR-CM3 could create a *second* checkbox authority ("controller decides to flip") competing with "flip only when reviewer clean". The binding wording folds ⚠️ resolution *into* "reviewer clean" and routes confirmed gaps back through the implementer → re-review loop, so the reviewer-clean rule stays the single authority. |
 | **Responsibility overlap (disclosed)** | The final whole-branch review already re-walks the full PLAN task-by-task on the whole-branch diff, so it is the existing backstop for "requirement in unchanged / cross-task code". FR-CM3 is an **earlier, cheaper catch** (and it prevents the task-reviewer from emitting a *false* spec ❌ on a requirement it structurally cannot see, avoiding a needless fix loop) — **not** a unique safety net. |
 | **FR-CM4 ledger-format gotcha** | Minor lines must be plain `Minor:` bullets. A `- [ ] PLAN-TASK-N`-shaped Minor line would match `_LEDGER_UNCHECKED_RE` and block the completion gate. Encoded in the FR-CM4 wording and a docs-consistency token. |
+| **Checkbox-identity alignment (FR-CM5 ↔ completion gate)** | **Consistent, gate-verified.** `--task N` resolves by integer to the literal `PLAN-TASK-<digits>` ID; the brief carries that literal heading; the controller flips that literal ledger ID; `check_execution_complete` audits the same literal IDs (`_LEDGER_CHECKED_RE` / `_plan_task_ids`). Contiguous-from-1 uniqueness is enforced upstream at the PLAN quality gate (`_check_plan_task_fields`, `gates.py:570-571`), so execution never sees a gapped/duplicate task set and the four ID surfaces cannot desync. FR-CM3 only tightens *when* the flip happens; the machine completion gate backstops it unchanged. |
 
 ## Target Surfaces / Files
 
@@ -341,14 +390,18 @@ mechanism and command surface before being written. Findings:
 
 ## Acceptance Criteria
 
-- `r2p-task-brief --work-id <id> --task N` writes `logs/task-N-brief.md`
-  containing exactly task N's body (from the frozen, read-only-stripped PLAN),
-  prints the path, and emits `{work_id, task_id, brief_path}` under `R2P_JSON=1`;
-  it performs no status transition.
-- Missing run/PLAN/task → `EXIT_NOT_FOUND`; a symlinked `logs/` or target is
-  refused.
-- Both orchestration surfaces hand the implementer the **brief path** from
-  `r2p-task-brief` (no pasted task text, no "read the whole plan file").
+- `r2p-task-brief --work-id <id> --task N` resolves `N` by integer value (a
+  zero-padded `PLAN-TASK-002` is selected by `--task 2`) and writes
+  `logs/task-N-brief.md` containing exactly that task's body (from the frozen,
+  read-only-stripped PLAN, including its literal `### PLAN-TASK-<digits>`
+  heading), prints the path, and emits `{work_id, task_id, brief_path}` under
+  `R2P_JSON=1`; it performs no status transition.
+- Missing run/PLAN/task → `EXIT_NOT_FOUND`; a symlinked `logs/` or target →
+  `EXIT_CONFLICT` (no write through the link).
+- Both orchestration surfaces produce the brief once in §1 (the controller does
+  **not** deep-read the full task body) and hand the **same brief path** to both
+  the implementer (§2) and the task-reviewer (§5) — no pasted task text on either
+  dispatch, no "read the whole plan file".
 - Both surfaces state the minimal implementer return contract (status / commit
   range / one-line test summary / concerns; full report → `task-N-report.md`).
 - Both surfaces carry the narration ceiling line.
@@ -373,8 +426,11 @@ mechanism and command surface before being written. Findings:
   `plan-task-brief --task 2` writes `logs/task-2-brief.md` whose content is
   exactly task 2's body and excludes read-only sections; `R2P_JSON=1` payload
   carries `brief_path`/`task_id`.
+- integer resolution: a zero-padded anchor `### PLAN-TASK-002` is selected by
+  `--task 2` (integer match, not string equality against `PLAN-TASK-2`).
 - missing task / missing PLAN / unknown work-id → `EXIT_NOT_FOUND`.
-- symlinked `logs/` or target brief path → refusal (no write through the link).
+- symlinked `logs/` or target brief path → `EXIT_CONFLICT` (no write through the
+  link).
 - the brief lands under `logs/` (gitignored), not under `execution/`.
 
 **`tests/test_docs_consistency.py`** — extend
@@ -382,6 +438,8 @@ mechanism and command surface before being written. Findings:
 stable tokens, e.g.:
 
 - `"r2p-task-brief"` (FR-CM1/CM5 handoff)
+- a stable literal asserting the **reviewer** dispatch receives the brief path
+  rather than pasted task text (FR-CM1 §5)
 - `"cannot verify from diff"` (FR-CM3)
 - `"never flip the checkbox on your own judgment"` (FR-CM3 single-authority)
 - `"returns **only**"` or an equivalent stable literal (FR-CM1 return contract)
@@ -402,6 +460,10 @@ test asserts the wording that ships.
 - **FR-CM5 surface creep.** Three layers (CLI + shortcut + wrapper) plus tests
   is more than a prose change. Bounded by reusing existing extraction primitives
   and the auto-discovered wrapper path; no install-list or gate edits.
+- **Controller under-reads and cannot adjudicate ⚠️.** Trimming §1 to a brief
+  pointer could starve the FR-CM3 ⚠️ resolution of context. Mitigated: the
+  Pre-flight whole-plan read is the adjudication context; §1's trim removes only
+  the *redundant per-task re-read*, not the controller's PLAN picture.
 
 ## Implementation Sequencing
 
