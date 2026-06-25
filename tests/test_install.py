@@ -175,22 +175,43 @@ class TestInstallService:
         assert not (ph_root / "claude" / "skills" / "r2p" / "SKILL.md").exists()
 
     def test_install_rejects_symlinked_manifest_tmp(self, tmp_path):
-        # Regression: the atomic manifest write goes through a "<manifest>.tmp"
-        # sibling. A planted symlink there must be rejected, or write_text would
-        # follow it and redirect the manifest write outside the manifest dir
-        # (the manifest_path validation alone never inspects the temp sibling).
+        # Regression: the atomic manifest write goes through a unique-named temp
+        # sibling. A planted symlink there must be rejected, or the atomic write
+        # would follow it and redirect the manifest write outside the manifest dir.
+        # Monkeypatch secrets.token_hex to a fixed value so we can plant a symlink
+        # at the predictable temp path (.claude.yaml.<pid>.<token>.tmp).
+        import os as _os
+        import secrets as _secrets_mod
         svc, manifest_root, ph_root = make_service(tmp_path)
         install_dir = manifest_root / "install"
         install_dir.mkdir(parents=True)
         victim = tmp_path / "victim.txt"
         victim.write_text("do not overwrite", encoding="utf-8")
-        (install_dir / "claude.yaml.tmp").symlink_to(victim)
+        fixed_token = "deadbeef12345678"
+        manifest_path = install_dir / "claude.yaml"
+        tmp_name = f".claude.yaml.{_os.getpid()}.{fixed_token}.tmp"
+        (install_dir / tmp_name).symlink_to(victim)
 
-        with pytest.raises(ValueError, match="unsafe_install"):
-            svc.install("claude")
+        with patch.object(_secrets_mod, "token_hex", return_value=fixed_token):
+            with pytest.raises(ValueError, match="unsafe_install"):
+                svc.install("claude")
 
         assert victim.read_text(encoding="utf-8") == "do not overwrite"
-        assert not (install_dir / "claude.yaml").exists()
+        assert not manifest_path.exists()
+
+    def test_write_manifest_atomic_writes_and_replaces(self, tmp_path):
+        # Verify the new unique-temp helper: a normal install still writes the
+        # manifest file with valid content (file exists, YAML parses, has expected
+        # keys). This is the positive-path contract for _write_manifest_atomic.
+        svc, manifest_root, _ = make_service(tmp_path)
+        svc.install("claude")
+        manifest_path = manifest_root / "install" / "claude.yaml"
+        assert manifest_path.exists(), "_write_manifest_atomic must create the manifest"
+        assert not manifest_path.is_symlink(), "manifest must be a regular file"
+        data = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+        assert data["platform"] == "claude"
+        assert isinstance(data["installed_paths"], list)
+        assert len(data["installed_paths"]) > 0
 
     def test_install_removes_manifest_when_post_manifest_cleanup_fails(self, tmp_path):
         svc, manifest_root, ph_root = make_service(tmp_path)

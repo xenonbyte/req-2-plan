@@ -6,6 +6,7 @@ Supports: claude, codex, gemini, opencode
 from __future__ import annotations
 
 import os
+import secrets
 import json
 import hashlib
 import shutil
@@ -204,15 +205,7 @@ class InstallService:
                 "r2p_version": R2P_VERSION,
                 "schema_version": SCHEMA_VERSION,
             }
-            self._validate_install_path(manifest_path, field="manifest")
-            manifest_path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = manifest_path.with_name(manifest_path.name + ".tmp")
-            # The temp sibling shares the (validated) parent, but its own path is
-            # untrusted: reject a planted symlink so the atomic write cannot be
-            # redirected outside the manifest dir.
-            self._validate_install_path(tmp, field="manifest")
-            tmp.write_text(_dump_manifest(manifest), encoding="utf-8")
-            tmp.replace(manifest_path)
+            self._write_manifest_atomic(manifest_path, _dump_manifest(manifest))
             manifest_written = True
 
             # Remove obsolete managed shared wrappers (e.g. a 0.1.2 r2p-adapt) that
@@ -831,6 +824,43 @@ class InstallService:
                 pass
         snapshot.manifest_path.parent.mkdir(parents=True, exist_ok=True)
         snapshot.manifest_path.write_text(snapshot.manifest_text, encoding="utf-8")
+
+    def _write_manifest_atomic(self, manifest_path: Path, data: str) -> None:
+        """Write manifest data via a unique temp sibling, then atomically replace.
+
+        Closes the fixed-name temp collision + check-then-write TOCTOU window.
+        _validate_install_path is called on both the manifest path and each
+        candidate temp path (preserving the existing symlink-rejection rules).
+        """
+        self._validate_install_path(manifest_path, field="manifest")
+        manifest_path.parent.mkdir(parents=True, exist_ok=True)
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        flags |= getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+        last_err: Exception | None = None
+        for _ in range(100):
+            tmp = manifest_path.with_name(
+                f".{manifest_path.name}.{os.getpid()}.{secrets.token_hex(8)}.tmp"
+            )
+            self._validate_install_path(tmp, field="manifest")
+            try:
+                fd = os.open(tmp, flags, 0o666)
+            except FileExistsError as exc:
+                last_err = exc
+                continue
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                    fh.write(data)
+                os.replace(tmp, manifest_path)
+                return
+            except BaseException:
+                try:
+                    tmp.unlink()
+                except FileNotFoundError:
+                    pass
+                raise
+        raise FileExistsError(
+            f"could not create unique manifest temp for {manifest_path}"
+        ) from last_err
 
     def _validate_install_path(self, path: Path, *, field: str) -> None:
         """Reject install writes that would follow untrusted symlinks."""
