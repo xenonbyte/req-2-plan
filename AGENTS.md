@@ -58,6 +58,7 @@ from Claude's Markdown command templates.
 | `link_expander.py` | Local relative-link expansion for requirement intake |
 | `stage_schema.py` / `stage_templates.py` | Required headings per stage/tier; structural seed templates |
 | `markdown.py` / `atomic.py` | Fence-aware Markdown helpers; atomic text writes |
+| `workspace.py` | Neutral helper (no CLI/shortcut import → no cycle): owns the workspace `.gitignore` + the path-limited `git commit` primitive used by run-close (add) and run-archive (remove) |
 | `trace.py` | Derived trace model and closure checks |
 | `gates.py` | Entry gates, quality gates, execution-completion gate, forced review |
 | `output.py` | Exit-code constants, output formatting, JSON mode |
