@@ -50,7 +50,7 @@ For each PLAN-TASK (in order):
 
 ### 1. Run `plan-task-brief` and obtain the task-brief path
 
-Run `{{R2P_BIN_DIR}}/plan-task-brief --work-id <work-id> --task PLAN-TASK-NNN` for the current task. The command returns a `brief_path` pointing to a scoped brief file that contains the task's `Skeleton`, `Steps`, `Spec References`, and `Verification` criteria. Pass the `brief_path` as the handoff pointer to both the implementer and the reviewer — not pasted task text from `07-plan.md`. The controller uses the returned `brief_path` without eager-reading the full task body into its own context; the implementer and reviewer read the task-brief on demand.
+Run `{{R2P_BIN_DIR}}/plan-task-brief --work-id <work-id> --task <N>` (where `<N>` is the task's integer, e.g. `2` for `PLAN-TASK-002`) for the current task. The command returns a `brief_path` pointing to a scoped brief file that contains the task's `Skeleton`, `Steps`, `Spec References`, and `Verification` criteria. Pass the `brief_path` as the handoff pointer to both the implementer and the reviewer — not pasted task text from `07-plan.md`. The controller uses the returned `brief_path` without eager-reading the full task body into its own context; the implementer and reviewer read the task-brief on demand.
 
 ### 2. Dispatch a fresh implementer subagent
 
@@ -102,7 +102,7 @@ The task-reviewer returns two verdicts:
 - Re-dispatch the task-reviewer after each fix wave
 - Before flipping the checkbox, adjudicate each reviewer "cannot verify from diff" warning by recording one line per finding in `execution/progress.md`:
   - `Resolved: <finding>` — clears the warning; a `Resolved:` claim about unchanged code must cite implementation and test evidence
-  - `Gap: <finding>` — blocks the flip
+  - `Gap: <finding>` — blocks the flip and cannot be overridden on the controller's own judgment
   - `Unresolved: <finding>` — blocks the flip and cannot be overridden on the controller's own judgment
 - Minor findings not fixed within a task: record each as `Minor: <finding>` in `execution/progress.md` and carry them into the final whole-branch review input rather than dropping them per task.
 - Only when the task-reviewer is clean (both spec ✅ and quality Approved, and `Verification` satisfied, and no open `Gap:` or `Unresolved:` entries), update the matching `execution/progress.md` checkbox from `- [ ] PLAN-TASK-NNN ...` to `- [x] PLAN-TASK-NNN ...` and append one line:
