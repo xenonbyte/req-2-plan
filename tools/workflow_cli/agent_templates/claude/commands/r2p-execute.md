@@ -50,6 +50,8 @@ Read the task text directly from `07-plan.md`. Note the task's `Skeleton`, `Step
 
 ### 2. Dispatch a fresh implementer subagent
 
+Record BASE (`git rev-parse HEAD`) BEFORE dispatching the implementer — **never use `HEAD~1`** as BASE (it drops all but the last commit of a multi-commit task). For Task 1, this BASE is also `<execution-base-commit>` for the final whole-branch review. Persist the Task 1 BASE immediately in tracked execution state by adding `Execution BASE: <execution-base-commit>` to `execution/progress.md`.
+
 Provide the subagent with:
 - The task text (from `07-plan.md`)
 - Scene-setting context (project, dependencies, architectural constraints)
@@ -77,9 +79,8 @@ The fresh implementer subagent verifies-then-removes ambiguity by evidence and T
 ### 5. Write diff and dispatch task-reviewer
 
 After the implementer reports DONE:
-1. Record BASE (`git rev-parse HEAD`) BEFORE dispatching the implementer — **never use `HEAD~1`** as BASE (it drops all but the last commit of a multi-commit task).
-2. After DONE: `mkdir -p .req-to-plan/<work-id>/logs` then `git diff -U10 <base-commit> HEAD > .req-to-plan/<work-id>/logs/task-N-diff.md`. Keep diff scratch under `logs/` (gitignored), never under `execution/`.
-3. Dispatch a task-reviewer subagent with:
+1. `mkdir -p .req-to-plan/<work-id>/logs` then `git diff -U10 <base-commit> HEAD > .req-to-plan/<work-id>/logs/task-N-diff.md`. Keep diff scratch under `logs/` (gitignored), never under `execution/`.
+2. Dispatch a task-reviewer subagent with:
    - The task text and `Spec References` from `07-plan.md`
    - The implementer's report
    - The diff file path (`.req-to-plan/<work-id>/logs/task-N-diff.md`)
@@ -101,6 +102,9 @@ The task-reviewer returns two verdicts:
 ## Final Whole-Branch Review
 
 After all tasks complete, dispatch a final whole-branch review subagent on the **most capable model**:
+- First create the whole-branch diff: `mkdir -p .req-to-plan/<work-id>/logs` then `git diff -U10 <execution-base-commit> HEAD > .req-to-plan/<work-id>/logs/final-diff.md`
+- Scope: review the complete execution range `git diff -U10 <execution-base-commit> HEAD`, where `<execution-base-commit>` is the Task 1 BASE captured before dispatching the first implementer
+- Include the diff file path (`.req-to-plan/<work-id>/logs/final-diff.md`) in the reviewer dispatch; do not ask the reviewer to infer the changed range
 - **re-run the full verification suite** on the final HEAD and attach the fresh output (per-task greens do not catch cross-task regressions)
 - Walk the PLAN task-by-task as a line-by-line requirements checklist; report any gap
 - Dispatch ONE fix subagent carrying the complete findings list (not one fixer per finding)
@@ -128,6 +132,7 @@ Commits are already on the **current branch**. `push` and PR creation still requ
 ## Durable Progress
 
 Track progress in `execution/progress.md` (not only in todos). On resume, read the ledger and skip tasks already marked complete.
+On resume, read `execution/progress.md` before the final review and reuse its `Execution BASE:` line as `<execution-base-commit>`. Do not recalculate it from `HEAD` or from the latest task range. If the line is missing, stop and ask the human for the original Task 1 BASE instead of inferring a range.
 
 ## Error Reference
 

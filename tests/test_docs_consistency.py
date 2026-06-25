@@ -134,6 +134,84 @@ class TestExecuteTemplateContent(unittest.TestCase):
         self.assertEqual(missing, [], f"missing dirty-tree block guidance: {missing}")
         self.assertEqual(offenders, [], f"unsafe dirty-tree guidance remains: {offenders}")
 
+    def test_execute_surfaces_capture_base_before_implementer_dispatch(self):
+        surfaces = [
+            "tools/workflow_cli/agent_templates/claude/commands/r2p-execute.md",
+            "tools/workflow_cli/agent_templates/codex/skills/r2p-execute/SKILL.md",
+        ]
+        offenders = []
+        for rel in surfaces:
+            text = (REPO_ROOT / rel).read_text(encoding="utf-8")
+            base_pos = text.find("Record BASE (`git rev-parse HEAD`) BEFORE dispatching the implementer")
+            dispatch_pos = text.find("### 2. Dispatch a fresh implementer subagent")
+            after_done_pos = text.find("After the implementer reports DONE")
+            if base_pos == -1 or dispatch_pos == -1 or after_done_pos == -1:
+                offenders.append(f"{rel}:missing-anchor")
+                continue
+            if not (dispatch_pos < base_pos < after_done_pos):
+                offenders.append(rel)
+        self.assertEqual(
+            offenders,
+            [],
+            "r2p-execute surfaces must record BASE before implementer dispatch, "
+            f"not after DONE: {offenders}",
+        )
+
+    def test_execute_surfaces_pass_final_review_whole_branch_diff_scope(self):
+        surfaces = [
+            "tools/workflow_cli/agent_templates/claude/commands/r2p-execute.md",
+            "tools/workflow_cli/agent_templates/codex/skills/r2p-execute/SKILL.md",
+        ]
+        required = (
+            "Scope:",
+            "Include the diff",
+            "git diff -U10 <execution-base-commit> HEAD",
+            ".req-to-plan/<work-id>/logs/final-diff.md",
+        )
+        missing = []
+        for rel in surfaces:
+            text = (REPO_ROOT / rel).read_text(encoding="utf-8")
+            for tok in required:
+                if tok not in text:
+                    missing.append(f"{rel}:{tok}")
+        self.assertEqual(missing, [], f"missing final-review diff scope guidance: {missing}")
+
+    def test_execute_surfaces_persist_execution_base_for_resume(self):
+        surfaces = [
+            "tools/workflow_cli/agent_templates/claude/commands/r2p-execute.md",
+            "tools/workflow_cli/agent_templates/codex/skills/r2p-execute/SKILL.md",
+        ]
+        required = (
+            "Persist the Task 1 BASE immediately in tracked execution state",
+            "`execution/progress.md`",
+            "`Execution BASE: <execution-base-commit>`",
+            "On resume, read `execution/progress.md`",
+            "Do not recalculate it from `HEAD`",
+        )
+        missing = []
+        for rel in surfaces:
+            text = (REPO_ROOT / rel).read_text(encoding="utf-8")
+            for tok in required:
+                if tok not in text:
+                    missing.append(f"{rel}:{tok}")
+        self.assertEqual(missing, [], f"missing persisted execution-base guidance: {missing}")
+
+    def test_execute_surfaces_create_logs_dir_before_final_diff(self):
+        surfaces = [
+            "tools/workflow_cli/agent_templates/claude/commands/r2p-execute.md",
+            "tools/workflow_cli/agent_templates/codex/skills/r2p-execute/SKILL.md",
+        ]
+        required = (
+            "`mkdir -p .req-to-plan/<work-id>/logs` then `git diff -U10 <execution-base-commit> HEAD > .req-to-plan/<work-id>/logs/final-diff.md`",
+        )
+        missing = []
+        for rel in surfaces:
+            text = (REPO_ROOT / rel).read_text(encoding="utf-8")
+            for tok in required:
+                if tok not in text:
+                    missing.append(f"{rel}:{tok}")
+        self.assertEqual(missing, [], f"missing final-diff logs mkdir guidance: {missing}")
+
     def test_gemini_execute_toml_mentions_in_place_and_archive(self):
         text = (REPO_ROOT / "tools/workflow_cli/agent_templates/gemini/commands/r2p-execute.toml").read_text(encoding="utf-8")
         self.assertIn("r2p-execute", text)
