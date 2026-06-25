@@ -68,7 +68,12 @@ from tools.workflow_cli.output import (
 from tools.workflow_cli.tier import estimate_tier, scan_keywords
 from tools.workflow_cli.workspace import ensure_workspace_gitignore, commit_requirement_dir
 from tools.workflow_cli.atomic import atomic_write_text
-from tools.workflow_cli.markdown import plan_task_anchors, strip_readonly_sections
+from tools.workflow_cli.markdown import (
+    PLAN_TASK_ANCHOR_RE,
+    heading_bounded_bodies,
+    plan_task_anchors,
+    strip_readonly_sections,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -1625,6 +1630,76 @@ def _cmd_stage_ready(args):
 
 
 # ---------------------------------------------------------------------------
+# plan-task-brief
+# ---------------------------------------------------------------------------
+
+
+def _positive_int(raw: str) -> int:
+    """argparse type: positive integer (>= 1); raises ArgumentTypeError → exit 2."""
+    try:
+        n = int(raw)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"expected a positive integer, got {raw!r}")
+    if n < 1:
+        raise argparse.ArgumentTypeError(f"task number must be >= 1, got {n}")
+    return n
+
+
+def _cmd_plan_task_brief(args):
+    """Write a read-only task brief for one PLAN-TASK-NNN to logs/task-N-brief.md."""
+    record, mgr, run_dir = _load_run(args.work_id, args.base_path)
+    if record.status != RunStatus.EXECUTING:
+        print_and_exit(
+            format_error(
+                "plan-task-brief requires an EXECUTING run",
+                exit_code=EXIT_CONFLICT,
+            ),
+            EXIT_CONFLICT,
+        )
+    try:
+        plan_text = read_artifact(run_dir, Stage.PLAN)
+    except FileNotFoundError:
+        print_and_exit(
+            format_error("PLAN artifact not found", exit_code=EXIT_NOT_FOUND),
+            EXIT_NOT_FOUND,
+        )
+    stripped = strip_readonly_sections(plan_text)
+    anchors = plan_task_anchors(stripped)
+    bodies = list(heading_bounded_bodies(stripped, PLAN_TASK_ANCHOR_RE.match))
+    target_idx = None
+    for i, (tid, _title) in enumerate(anchors):
+        m = re.match(r"PLAN-TASK-(\d+)", tid)
+        if m and int(m.group(1)) == args.task:
+            target_idx = i
+            break
+    if target_idx is None:
+        print_and_exit(
+            format_error(f"task {args.task} not found in PLAN", exit_code=EXIT_NOT_FOUND),
+            EXIT_NOT_FOUND,
+        )
+    task_id = anchors[target_idx][0]
+    body = bodies[target_idx]
+    logs_dir = run_dir / "logs"
+    _reject_symlink_or_exit(logs_dir, "logs dir is a symlink")
+    brief_path = logs_dir / f"task-{args.task}-brief.md"
+    _reject_symlink_or_exit(brief_path, "brief target is a symlink")
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    atomic_write_text(brief_path, body)
+    rel = brief_path.relative_to(run_dir.parent.parent)
+    print_and_exit(
+        format_success(
+            {
+                "work_id": args.work_id,
+                "task_id": task_id,
+                "brief_path": rel.as_posix(),
+            },
+            message="task brief written",
+        ),
+        EXIT_OK,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Subparser registration
 # ---------------------------------------------------------------------------
 
@@ -1683,6 +1758,20 @@ def _register_run_commands(subparsers):
     p = subparsers.add_parser("run-execute-start", help="Begin executing a closed run's PLAN in place")
     p.add_argument("--work-id", required=True)
     p.set_defaults(func=_cmd_run_execute_start)
+
+    # plan-task-brief
+    p = subparsers.add_parser(
+        "plan-task-brief",
+        help="Write a read-only brief for one PLAN task to logs/task-N-brief.md",
+    )
+    p.add_argument("--work-id", required=True, help="Workflow run ID")
+    p.add_argument(
+        "--task",
+        required=True,
+        type=_positive_int,
+        help="Task number to extract (positive integer, e.g. 2 for PLAN-TASK-002)",
+    )
+    p.set_defaults(func=_cmd_plan_task_brief)
 
 
 def _register_tier_commands(subparsers):

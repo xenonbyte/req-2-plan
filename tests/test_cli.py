@@ -4500,3 +4500,158 @@ class TestHonestyGuard:
                 main(["--base-path", str(base), "run-archive", "--work-id", "WF-20260101-exec"])
             out = capsys.readouterr().out
             assert _is_honest(out), f"archive success output not honest: {out!r}"
+
+
+# ---------------------------------------------------------------------------
+# TestPlanTaskBrief — SPEC-CLI-001
+# ---------------------------------------------------------------------------
+
+
+class TestPlanTaskBrief:
+    """SPEC-CLI-001: plan-task-brief writes a task-scoped brief to logs/."""
+
+    _MULTI_TASK_PLAN = (
+        "# Plan\n\n"
+        "## Overview\nSome overview text.\n\n"
+        "### PLAN-TASK-001: first task\n"
+        "Do thing A.\n"
+        "Files:\n- a.py\n\n"
+        "### PLAN-TASK-002: second task\n"
+        "Do thing B.\n"
+        "Files:\n- b.py\n\n"
+        "### PLAN-TASK-003: third task\n"
+        "Do thing C.\n"
+    )
+
+    def _executing_run_with_plan(self, base, wid_str, plan_body):
+        from tools.workflow_cli.state import RunStateManager, create_run_record
+        from tools.workflow_cli.artifact import write_artifact
+        from tools.workflow_cli.models import RunStatus, Stage, WorkId
+        wid = WorkId(wid_str)
+        run_dir = base / ".req-to-plan" / wid_str
+        run_dir.mkdir(parents=True)
+        rec = create_run_record(wid)
+        rec.status = RunStatus.EXECUTING
+        rec.current_stage = Stage.CLOSED
+        write_artifact(run_dir, Stage.PLAN, plan_body, version=1, status="approved")
+        RunStateManager(run_dir).save(rec)
+        return run_dir
+
+    def test_plan_task_brief_writes_task_body_and_returns_success(self, capsys):
+        """Happy path: task 2 brief written; payload carries work_id, task_id, brief_path."""
+        from tools.workflow_cli.markdown import (
+            heading_bounded_bodies,
+            PLAN_TASK_ANCHOR_RE,
+            plan_task_anchors,
+            strip_readonly_sections,
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            wid = "WF-20260626-brief"
+            run_dir = self._executing_run_with_plan(base, wid, self._MULTI_TASK_PLAN)
+            with pytest.raises(SystemExit) as exc:
+                main(["--base-path", str(base), "plan-task-brief", "--work-id", wid, "--task", "2"])
+            assert exc.value.code == 0
+            brief_path = run_dir / "logs" / "task-2-brief.md"
+            assert brief_path.exists(), "brief file must be written"
+            actual_body = brief_path.read_text(encoding="utf-8")
+            # Byte-identical to heading_bounded_bodies gate for task 2
+            stripped = strip_readonly_sections(self._MULTI_TASK_PLAN)
+            bodies = list(heading_bounded_bodies(stripped, PLAN_TASK_ANCHOR_RE.match))
+            assert actual_body == bodies[1], "body must be byte-identical to heading_bounded_bodies slice"
+            # Verify success payload
+            out = capsys.readouterr().out
+            assert wid in out
+            assert "PLAN-TASK-002" in out
+            assert ".req-to-plan" in out
+            assert "task-2-brief.md" in out
+
+    def test_plan_task_brief_non_executing_run_exits_conflict(self):
+        """Non-EXECUTING run → EXIT_CONFLICT and no file written."""
+        from tools.workflow_cli.state import RunStateManager, create_run_record
+        from tools.workflow_cli.artifact import write_artifact
+        from tools.workflow_cli.models import RunStatus, Stage, WorkId
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            wid = "WF-20260626-closed"
+            run_dir = base / ".req-to-plan" / wid
+            run_dir.mkdir(parents=True)
+            rec = create_run_record(WorkId(wid))
+            rec.status = RunStatus.CLOSED_AT_PLAN_CHECKPOINT
+            rec.current_stage = Stage.CLOSED
+            write_artifact(run_dir, Stage.PLAN, self._MULTI_TASK_PLAN, version=1, status="approved")
+            RunStateManager(run_dir).save(rec)
+            with pytest.raises(SystemExit) as exc:
+                main(["--base-path", str(base), "plan-task-brief", "--work-id", wid, "--task", "1"])
+            assert exc.value.code == 6  # EXIT_CONFLICT
+            assert not (run_dir / "logs" / "task-1-brief.md").exists()
+
+    def test_plan_task_brief_symlinked_logs_dir_exits_conflict(self):
+        """Symlinked logs/ → EXIT_CONFLICT; no write-through the link."""
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            wid = "WF-20260626-symlog"
+            run_dir = self._executing_run_with_plan(base, wid, self._MULTI_TASK_PLAN)
+            outside = base / "outside-logs"
+            outside.mkdir()
+            (run_dir / "logs").symlink_to(outside, target_is_directory=True)
+            with pytest.raises(SystemExit) as exc:
+                main(["--base-path", str(base), "plan-task-brief", "--work-id", wid, "--task", "1"])
+            assert exc.value.code == 6  # EXIT_CONFLICT
+            # Must not write through the symlink
+            assert not (outside / "task-1-brief.md").exists()
+
+    def test_plan_task_brief_symlinked_brief_target_exits_conflict(self):
+        """Pre-existing symlinked logs/task-N-brief.md → EXIT_CONFLICT; no write-through."""
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            wid = "WF-20260626-symbrief"
+            run_dir = self._executing_run_with_plan(base, wid, self._MULTI_TASK_PLAN)
+            logs_dir = run_dir / "logs"
+            logs_dir.mkdir(parents=True)
+            outside = base / "outside-brief.md"
+            outside.write_text("old content", encoding="utf-8")
+            (logs_dir / "task-1-brief.md").symlink_to(outside)
+            with pytest.raises(SystemExit) as exc:
+                main(["--base-path", str(base), "plan-task-brief", "--work-id", wid, "--task", "1"])
+            assert exc.value.code == 6  # EXIT_CONFLICT
+            assert outside.read_text(encoding="utf-8") == "old content"  # not overwritten
+
+    def test_plan_task_brief_out_of_range_task_exits_not_found(self):
+        """--task beyond PLAN task count → EXIT_NOT_FOUND."""
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            wid = "WF-20260626-oob"
+            self._executing_run_with_plan(base, wid, self._MULTI_TASK_PLAN)
+            with pytest.raises(SystemExit) as exc:
+                main(["--base-path", str(base), "plan-task-brief", "--work-id", wid, "--task", "99"])
+            assert exc.value.code == 7  # EXIT_NOT_FOUND
+
+    def test_plan_task_brief_non_positive_task_exits_cli_err(self):
+        """--task 0 → EXIT_CLI_ERR (argparse type rejection)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            wid = "WF-20260626-zero"
+            self._executing_run_with_plan(base, wid, self._MULTI_TASK_PLAN)
+            with pytest.raises(SystemExit) as exc:
+                main(["--base-path", str(base), "plan-task-brief", "--work-id", wid, "--task", "0"])
+            assert exc.value.code == 2  # EXIT_CLI_ERR
+
+    def test_plan_task_brief_zero_padded_anchor_resolved_by_task_number(self):
+        """### PLAN-TASK-002 (zero-padded) resolved by --task 2; payload task_id = 'PLAN-TASK-002'."""
+        plan = (
+            "# Plan\n\n"
+            "### PLAN-TASK-001: first\nBody 1.\n\n"
+            "### PLAN-TASK-002: padded second\nBody 2.\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            wid = "WF-20260626-padded"
+            run_dir = self._executing_run_with_plan(base, wid, plan)
+            with pytest.raises(SystemExit) as exc:
+                main(["--base-path", str(base), "plan-task-brief", "--work-id", wid, "--task", "2"])
+            assert exc.value.code == 0
+            brief_path = run_dir / "logs" / "task-2-brief.md"
+            assert brief_path.exists()
+            body = brief_path.read_text(encoding="utf-8")
+            assert "PLAN-TASK-002" in body
