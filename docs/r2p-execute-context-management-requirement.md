@@ -53,12 +53,14 @@ silent-discard remain:
   report is also written to `execution/task-N-report.md`.
 - **Controller narration leaks.** No narration ceiling, so coordination turns
   can accrete prose that the ledger and tool results already record.
-- **Diff-scoped reviewer blindness is ungated.** The task-reviewer is handed
-  only the single-task diff (`logs/task-N-diff.md`). Requirements satisfied in
-  *unchanged* code, or spanning tasks, are invisible to it. The current §6 flip
-  rule keys solely on "task-reviewer clean", so a reviewer can report spec ✅ on
-  the visible diff while a "cannot verify from diff" item is left unresolved,
-  and the checkbox flips anyway.
+- **Diff-scoped reviewer blindness is ungated.** The task-reviewer's only
+  independent window into the implementation is the single-task diff
+  (`logs/task-N-diff.md`); requirements satisfied in *unchanged* code, or
+  spanning tasks, are not confirmable from it. Worse, the current §5 reviewer
+  contract asks only for two verdicts (spec compliance, code quality) with no
+  channel to flag "I cannot verify this from the diff", so the reviewer must
+  pass-or-fail such a requirement blindly — and the §6 flip rule keys solely on
+  "task-reviewer clean", so the checkbox flips on a blind pass.
 
 The transferable mechanism is not "add another gate". It is: **keep both the
 controller's and each subagent's context curated by handing each task as a brief
@@ -150,10 +152,11 @@ never for execution.
 
 **Command-surface facts (for FR-CM5).** The `r2p-*` surface is three layers: a
 bash wrapper `tools/r2p-<name>` → an `agent_shortcuts.py` subcommand → one or
-more `cli.py` subcommands via `_run_cli`. The installer **discovers wrapper
-sources from the `tools/r2p-*` files on disk** and renders `{{R2P_BIN_DIR}}`
-(`tools/workflow_cli/install.py` bin-dir copy loop; wrappers are shared across
-platform manifests), so adding a new wrapper file needs **no** install-list
+more `cli.py` subcommands via `_run_cli`. The installer's copy loop and
+`_install_targets` both iterate `repo_root.glob("tools/r2p-*")`
+(`tools/workflow_cli/install.py`), render each via `_render_bin_script`, and
+share the wrappers across platform manifests — so dropping a new
+`tools/r2p-task-brief` file is auto-discovered and needs **no** install-list
 edit.
 
 **Conclusion of the current-state read:** both machine gates are *deliberately*
@@ -207,23 +210,32 @@ execution" guidance).
 
 ### FR-CM3: Reviewer ⚠️ "cannot verify from diff" adjudication before the flip
 
-**Where:** `r2p-execute` §6 ("Fix loop"), amending the checkbox-flip condition.
-**No machine-gate change.**
+**Where:** `r2p-execute` §5 (task-reviewer dispatch contract) **and** §6 (the
+checkbox-flip condition). **No machine-gate change.**
 
-The task-reviewer is handed only the single-task diff and therefore cannot see
-requirements that live in unchanged code or span tasks. It may surface these as
-⚠️ "cannot verify from diff" items. These do not block the rest of the review,
-but the controller must resolve each one before the flip — and must do so
-**without becoming a second checkbox authority**.
+The task-reviewer's only independent window into the implementation is the
+single-task diff, so requirements that live in unchanged code or span tasks are
+not confirmable from it. Today the §5 contract gives the reviewer only two
+verdicts and no way to abstain, so it must pass-or-fail such requirements
+blindly. FR-CM3 adds the missing *output* channel (§5) and then the controller
+*resolves* it (§6) — without becoming a second checkbox authority.
 
-**Amend the flip condition to (the binding wording):**
+**Produce side — amend the §5 reviewer contract** so the spec verdict is
+✅ / ❌ / ⚠️-defer, not binary:
+
+> For any requirement in `Spec References` / `Verification` that the single-task
+> diff does not let you confirm (it may be met in unchanged code, or span tasks),
+> do **not** silently pass or fail it — flag it as a ⚠️ "cannot verify from diff"
+> item for the controller to adjudicate.
+
+**Consume side — amend the §6 flip condition (the binding wording):**
 
 > Flip `- [x]` only when the task-reviewer is clean — spec ✅, quality Approved,
 > `Verification` satisfied, **and no unresolved ⚠️ "cannot verify from diff" item
-> remains**. The task-reviewer sees only the single-task diff; resolve each ⚠️
-> yourself (you hold the cross-task and PLAN context it lacks). A confirmed gap
-> is a failed spec review: send it back to the implementer and re-review —
-> never flip the checkbox on your own judgment.
+> remains**. The task-reviewer's only independent view of the change is the diff;
+> resolve each ⚠️ yourself (you hold the cross-task and PLAN context it lacks). A
+> confirmed gap is a failed spec review: send it back to the implementer and
+> re-review — never flip the checkbox on your own judgment.
 
 This keeps "checkbox flips only when the reviewer is clean" as the single
 authority: the controller never unilaterally flips a checkbox, it only routes a
@@ -256,15 +268,19 @@ block out of the full plan.
 **Three-layer surface (matching the existing `r2p-*` shape):**
 
 - **CLI subcommand** (proposed name `plan-task-brief`) in `cli.py`:
-  `--work-id <id> --task <N>`. Loads the frozen PLAN via
-  `read_artifact(run_dir, Stage.PLAN)`, applies `strip_readonly_sections`,
-  locates the `### PLAN-TASK-N` body using the existing anchor primitives
-  (`plan_task_anchors` and the `_iter_plan_task_bodies` family — promote a small
-  public helper if needed; do **not** duplicate anchor parsing), and writes the
-  task body to `.req-to-plan/<work-id>/logs/task-N-brief.md` via
-  `atomic_write_text`, rejecting a symlinked `logs/` or target with the same
-  `_reject_symlink_or_exit` discipline `run-execute-start` uses for its
-  `execution/` write. Prints the brief path; under `R2P_JSON=1` emits
+  `--work-id <id> --task <N>` (selects the `PLAN-TASK-<N>` anchor; the PLAN
+  numbers tasks contiguously from 1). Loads the frozen PLAN via
+  `read_artifact(run_dir, Stage.PLAN)` (which raises `FileNotFoundError` on a
+  missing PLAN — map to `EXIT_NOT_FOUND`, exactly as `run-execute-start` already
+  does), applies `strip_readonly_sections`, and selects the `### PLAN-TASK-N`
+  body with the existing **public** primitive
+  `markdown.heading_bounded_bodies(content, PLAN_TASK_ANCHOR_RE.match)` — the
+  same call `gates._iter_plan_task_bodies` wraps (`gates.py:301`); it yields each
+  heading-bounded task body, so **no new parsing is added**. Writes the task body
+  to `.req-to-plan/<work-id>/logs/task-N-brief.md` via `atomic_write_text`
+  (`atomic.py:9`), rejecting a symlinked `logs/` or target with the same
+  `_reject_symlink_or_exit` discipline (`cli.py:165`) `run-execute-start` uses
+  for its `execution/` write. Prints the brief path; under `R2P_JSON=1` emits
   `{work_id, task_id, brief_path}`. **Read-only w.r.t. run state — no status
   transition.** Exit codes from `output.py`: `EXIT_NOT_FOUND` when the run, the
   PLAN artifact, or the requested `PLAN-TASK-N` is missing; `EXIT_OK` on success.
@@ -276,11 +292,22 @@ block out of the full plan.
   (`exec python3 -m tools.workflow_cli.agent_shortcuts task-brief "$@"`).
   Auto-discovered by the installer; no install-list edit.
 
-**Brief-file placement.** Under the run's gitignored `logs/` scratch
-(`<work-id>/logs/` is ignored per `.req-to-plan/.gitignore`), the same lifecycle
-class as the FR-A2 diff scratch. Briefs are ephemeral dispatch input — never
-tracked, never under `execution/`. They therefore touch no archive gate
-(`check_execution_complete` reads `execution/progress.md` only).
+**Brief-file placement.** Under the run's `logs/` scratch
+(`.req-to-plan/.gitignore` ignores `/*/logs/`, so every run's `logs/` is
+untracked), the same lifecycle class as the FR-A2 diff scratch. Briefs are
+ephemeral dispatch input — never tracked, never under `execution/`. They
+therefore touch no archive gate (`check_execution_complete` reads
+`execution/progress.md` only).
+
+**Primitives verified against code (FR-CM5 feasibility).** No new parsing,
+write, or symlink logic is introduced — every building block already exists and
+was confirmed: `read_artifact(run_dir, Stage.PLAN) -> str` raising
+`FileNotFoundError` (`artifact.py:108`); `strip_readonly_sections`
+(`markdown.py:62`); `heading_bounded_bodies` + `PLAN_TASK_ANCHOR_RE`
+(`markdown.py`, the primitive `gates._iter_plan_task_bodies` wraps at
+`gates.py:301`); `atomic_write_text` (`atomic.py:9`); `_reject_symlink_or_exit`
+(`cli.py:165`); exit-code constants (`output.py`). Installer auto-discovery is
+confirmed by the `repo_root.glob("tools/r2p-*")` loops in `install.py`.
 
 ## Conflict Analysis (the explicit review)
 
@@ -325,6 +352,8 @@ mechanism and command surface before being written. Findings:
 - Both surfaces state the minimal implementer return contract (status / commit
   range / one-line test summary / concerns; full report → `task-N-report.md`).
 - Both surfaces carry the narration ceiling line.
+- Both surfaces' §5 reviewer contract instructs the task-reviewer to emit ⚠️
+  "cannot verify from diff" items (spec verdict becomes ✅ / ❌ / ⚠️-defer).
 - Both surfaces' §6 flip condition subsumes "no unresolved ⚠️ cannot-verify
   item", with confirmed gaps routed back through implementer → re-review and an
   explicit "never flip on your own judgment".
