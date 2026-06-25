@@ -9,4 +9,4 @@ To start from a requirement document, pass `--file <path>` instead of inline tex
 
 Use `--separate` to create an independent run when another open run exists.
 
-Optionally pass `--repo-path <dir>` to ground tier estimation and the Project Context Pack in real repo facts.
+Tier estimation and the Project Context Pack are grounded in the current directory by default; pass `--repo-path <dir>` to ground them in a different repository instead.

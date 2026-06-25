@@ -285,7 +285,16 @@ def _cmd_run_start(args):
             format_error("Requirement must not be blank", exit_code=EXIT_CLI_ERR),
             EXIT_CLI_ERR,
         )
-    repo_path = _validate_repo_path(args.repo_path) if args.repo_path else None
+    if args.repo_path:
+        repo_path = _validate_repo_path(args.repo_path)
+    else:
+        # --repo-path is optional: default to the workspace root (--base-path,
+        # which itself defaults to the current directory) so tier estimation and
+        # the Project Context Pack are grounded in real repo facts without an
+        # explicit flag. A standard-tier PLAN later requires a usable Context Pack
+        # (R11), so grounding by default avoids a silent gate failure. Using
+        # base_path (not literal Path.cwd()) preserves --base-path test isolation.
+        repo_path = args.base_path or Path.cwd()
     run_dir = _reject_symlinked_run_paths(work_id, args.base_path)
     mgr = RunStateManager(run_dir)
 
@@ -1632,7 +1641,11 @@ def _register_run_commands(subparsers):
         default=None,
         help="Path to a file whose contents are the raw requirement",
     )
-    p.add_argument("--repo-path", default=None, help="Path to repository for baseline scan")
+    p.add_argument(
+        "--repo-path",
+        default=None,
+        help="Path to repository for baseline scan (default: current directory / --base-path)",
+    )
     p.add_argument("--overwrite", action="store_true", help="Overwrite an existing run")
     p.set_defaults(func=_cmd_run_start)
 

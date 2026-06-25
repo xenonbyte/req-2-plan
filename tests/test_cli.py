@@ -3366,6 +3366,23 @@ class TestRunStartBuildsContextPack:
         assert exc.value.code == 0
         assert (tmp_path / ".req-to-plan" / "WF-20260605-rate-limit" / "02-project-context.json").exists()
 
+    def test_run_start_without_repo_path_defaults_to_base_path(self, tmp_path):
+        # --repo-path is optional: when omitted, tier estimation and the Context
+        # Pack default to the workspace root (--base-path, the current directory in
+        # real usage), so a standard-tier run is grounded without an explicit flag.
+        from tools.workflow_cli.cli import main
+        (tmp_path / "requirements.txt").write_text("pyyaml>=6.0\n", encoding="utf-8")
+        with pytest.raises(SystemExit) as exc:
+            main([
+                "--base-path", str(tmp_path),
+                "run-start", "--work-id", "WF-20260605-default-repo",
+                "--requirement", "add rate limiting",
+            ])
+        assert exc.value.code == 0
+        run_dir = tmp_path / ".req-to-plan" / "WF-20260605-default-repo"
+        assert (run_dir / "02-project-context.json").exists()
+        assert (run_dir / "02-project-context.md").exists()
+
     def test_run_start_rejects_missing_repo_path_before_writing_run(self, tmp_path, capsys):
         from tools.workflow_cli.cli import main
         from tools.workflow_cli.output import EXIT_CLI_ERR
