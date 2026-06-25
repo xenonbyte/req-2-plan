@@ -3,10 +3,14 @@ Tests for tools/workflow_cli/cli.py — CLI command router.
 """
 from __future__ import annotations
 
+import contextlib
+import io
 import json
-import re
-import tempfile
 import os
+import re
+import subprocess
+import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -4665,3 +4669,232 @@ class TestPlanTaskBrief:
             assert brief_path.exists()
             body = brief_path.read_text(encoding="utf-8")
             assert "PLAN-TASK-002" in body
+
+
+# ---------------------------------------------------------------------------
+# TestTaskBriefShortcut — SPEC-SURFACE-001 (PLAN-TASK-003)
+# ---------------------------------------------------------------------------
+
+
+class TestTaskBriefShortcut:
+    """SPEC-SURFACE-001: task-brief shortcut is surface-equivalent to plan-task-brief CLI."""
+
+    _MULTI_TASK_PLAN = (
+        "# Plan\n\n"
+        "## Overview\nSome overview text.\n\n"
+        "### PLAN-TASK-001: first task\n"
+        "Do thing A.\n"
+        "Files:\n- a.py\n\n"
+        "### PLAN-TASK-002: second task\n"
+        "Do thing B.\n"
+        "Files:\n- b.py\n\n"
+        "### PLAN-TASK-003: third task\n"
+        "Do thing C.\n"
+    )
+
+    def _executing_run_with_plan(self, base, wid_str, plan_body):
+        """Seed an EXECUTING run with an approved PLAN artifact (mirrors TestPlanTaskBrief)."""
+        from tools.workflow_cli.state import RunStateManager, create_run_record
+        from tools.workflow_cli.artifact import write_artifact
+        from tools.workflow_cli.models import RunStatus, Stage, WorkId
+        wid = WorkId(wid_str)
+        run_dir = base / ".req-to-plan" / wid_str
+        run_dir.mkdir(parents=True)
+        rec = create_run_record(wid)
+        rec.status = RunStatus.EXECUTING
+        rec.current_stage = Stage.CLOSED
+        write_artifact(run_dir, Stage.PLAN, plan_body, version=1, status="approved")
+        RunStateManager(run_dir).save(rec)
+        return run_dir
+
+    # ------------------------------------------------------------------
+    # Shortcut equivalence tests
+    # ------------------------------------------------------------------
+
+    def test_task_brief_shortcut_happy_path_matches_cli_json_and_file(self, monkeypatch):
+        """EXECUTING run: shortcut JSON, file bytes, exit code == direct CLI (exit 0)."""
+        from tools.workflow_cli.agent_shortcuts import main as shortcuts_main
+
+        monkeypatch.setenv("R2P_JSON", "1")
+        with tempfile.TemporaryDirectory() as tmp1, tempfile.TemporaryDirectory() as tmp2:
+            base_cli = Path(tmp1)
+            base_sc = Path(tmp2)
+            wid = "WF-20260626-sc-ok"
+            run_dir_cli = self._executing_run_with_plan(base_cli, wid, self._MULTI_TASK_PLAN)
+            run_dir_sc = self._executing_run_with_plan(base_sc, wid, self._MULTI_TASK_PLAN)
+
+            # Direct CLI
+            out_cli = io.StringIO()
+            cli_exit = None
+            with contextlib.redirect_stdout(out_cli):
+                try:
+                    main(["--base-path", str(base_cli), "plan-task-brief",
+                          "--work-id", wid, "--task", "2"])
+                except SystemExit as exc:
+                    cli_exit = exc.code
+
+            # Shortcut
+            out_sc = io.StringIO()
+            sc_exit = None
+            with contextlib.redirect_stdout(out_sc):
+                try:
+                    shortcuts_main(["task-brief", "--work-id", wid, "--task", "2"],
+                                   base_path=base_sc)
+                except SystemExit as exc:
+                    sc_exit = exc.code
+
+            assert cli_exit == 0, f"CLI exit: {cli_exit}"
+            assert sc_exit == 0, f"shortcut exit: {sc_exit}"
+
+            cli_payload = json.loads(out_cli.getvalue().strip())
+            sc_payload = json.loads(out_sc.getvalue().strip())
+
+            # work_id and task_id must be identical; brief_path differs only in base dir
+            assert cli_payload["work_id"] == sc_payload["work_id"]
+            assert cli_payload["task_id"] == sc_payload["task_id"]
+            assert "task-2-brief.md" in cli_payload["brief_path"]
+            assert "task-2-brief.md" in sc_payload["brief_path"]
+
+            # The brief file bytes must be identical (same PLAN extraction)
+            brief_cli = (run_dir_cli / "logs" / "task-2-brief.md").read_bytes()
+            brief_sc = (run_dir_sc / "logs" / "task-2-brief.md").read_bytes()
+            assert brief_cli == brief_sc
+
+    def test_task_brief_shortcut_conflict_exit_code_propagates(self, monkeypatch):
+        """Non-EXECUTING run: shortcut exit code == CLI exit code (EXIT_CONFLICT=6)."""
+        from tools.workflow_cli.agent_shortcuts import main as shortcuts_main
+        from tools.workflow_cli.state import RunStateManager, create_run_record
+        from tools.workflow_cli.artifact import write_artifact
+
+        monkeypatch.setenv("R2P_JSON", "1")
+
+        def _seed_closed(base):
+            run_dir = base / ".req-to-plan" / wid
+            run_dir.mkdir(parents=True)
+            rec = create_run_record(WorkId(wid))
+            rec.status = RunStatus.CLOSED_AT_PLAN_CHECKPOINT
+            rec.current_stage = Stage.CLOSED
+            write_artifact(run_dir, Stage.PLAN, self._MULTI_TASK_PLAN, version=1, status="approved")
+            RunStateManager(run_dir).save(rec)
+
+        wid = "WF-20260626-sc-cf"
+        with tempfile.TemporaryDirectory() as tmp1, tempfile.TemporaryDirectory() as tmp2:
+            base_cli = Path(tmp1)
+            base_sc = Path(tmp2)
+            _seed_closed(base_cli)
+            _seed_closed(base_sc)
+
+            # Direct CLI
+            cli_exit = None
+            with contextlib.redirect_stdout(io.StringIO()):
+                try:
+                    main(["--base-path", str(base_cli), "plan-task-brief",
+                          "--work-id", wid, "--task", "1"])
+                except SystemExit as exc:
+                    cli_exit = exc.code
+
+            # Shortcut
+            sc_exit = None
+            with contextlib.redirect_stdout(io.StringIO()):
+                try:
+                    shortcuts_main(["task-brief", "--work-id", wid, "--task", "1"],
+                                   base_path=base_sc)
+                except SystemExit as exc:
+                    sc_exit = exc.code
+
+            assert cli_exit == 6, f"CLI exit: {cli_exit}"
+            assert sc_exit == cli_exit, f"shortcut exit {sc_exit} != CLI exit {cli_exit}"
+
+    # ------------------------------------------------------------------
+    # Wrapper structural test
+    # ------------------------------------------------------------------
+
+    def test_r2p_task_brief_wrapper_structural(self):
+        """tools/r2p-task-brief exists, is executable, and body delegates to agent_shortcuts task-brief."""
+        wrapper = Path(__file__).resolve().parents[1] / "tools" / "r2p-task-brief"
+        assert wrapper.exists(), "tools/r2p-task-brief must exist"
+        assert os.access(wrapper, os.X_OK), "tools/r2p-task-brief must be executable"
+        body = wrapper.read_text(encoding="utf-8")
+        assert "agent_shortcuts" in body, "wrapper body must invoke agent_shortcuts"
+        assert "task-brief" in body, "wrapper body must delegate to task-brief subcommand"
+
+    # ------------------------------------------------------------------
+    # Wrapper end-to-end test
+    # ------------------------------------------------------------------
+
+    def test_r2p_task_brief_wrapper_end_to_end(self, monkeypatch, tmp_path):
+        """Subprocess wrapper produces identical JSON, file bytes, and exit code as direct CLI."""
+        wrapper = Path(__file__).resolve().parents[1] / "tools" / "r2p-task-brief"
+        assert wrapper.exists() and os.access(wrapper, os.X_OK)
+
+        wid = "WF-20260626-wpe2e"
+        base_sc = tmp_path / "sc_base"
+        base_sc.mkdir()
+        base_cli = tmp_path / "cli_base"
+        base_cli.mkdir()
+        run_dir_sc = self._executing_run_with_plan(base_sc, wid, self._MULTI_TASK_PLAN)
+        run_dir_cli = self._executing_run_with_plan(base_cli, wid, self._MULTI_TASK_PLAN)
+
+        # Symlink sys.executable as "python3" in a tmp bin dir so the wrapper
+        # always finds a dependency-complete interpreter regardless of CI PATH.
+        # Also propagate site-packages via PYTHONPATH so yaml is available even
+        # when sys.executable is itself a symlink to the base cpython binary
+        # (as in a uv-managed venv on local dev) and Python can't locate pyvenv.cfg
+        # through the extra symlink indirection.
+        import sysconfig
+        py_bin = tmp_path / "pybin"
+        py_bin.mkdir()
+        py3_link = py_bin / "python3"
+        py3_link.symlink_to(sys.executable)
+        os.chmod(py3_link, 0o755)
+
+        site_pkgs = sysconfig.get_path("purelib")
+        base_pp = os.environ.get("PYTHONPATH", "")
+        extra_pp = site_pkgs if site_pkgs else ""
+        child_pythonpath = (extra_pp + os.pathsep + base_pp).strip(os.pathsep) if extra_pp or base_pp else ""
+
+        child_env: dict[str, str] = {
+            **os.environ,
+            "PATH": str(py_bin) + os.pathsep + os.environ["PATH"],
+            "R2P_JSON": "1",
+        }
+        if child_pythonpath:
+            child_env["PYTHONPATH"] = child_pythonpath
+
+        # Run wrapper; cwd=base_sc so agent_shortcuts uses it as base_path
+        result = subprocess.run(
+            [str(wrapper), "--work-id", wid, "--task", "2"],
+            cwd=str(base_sc),
+            env=child_env,
+            text=True,
+            capture_output=True,
+        )
+
+        # Direct CLI for comparison
+        monkeypatch.setenv("R2P_JSON", "1")
+        out_cli = io.StringIO()
+        cli_exit = None
+        with contextlib.redirect_stdout(out_cli):
+            try:
+                main(["--base-path", str(base_cli), "plan-task-brief",
+                      "--work-id", wid, "--task", "2"])
+            except SystemExit as exc:
+                cli_exit = exc.code
+
+        assert cli_exit == 0, f"CLI exit: {cli_exit}"
+        assert result.returncode == 0, (
+            f"wrapper returncode={result.returncode}\n"
+            f"stdout: {result.stdout!r}\nstderr: {result.stderr!r}"
+        )
+
+        cli_payload = json.loads(out_cli.getvalue().strip())
+        wrapper_payload = json.loads(result.stdout.strip())
+
+        assert cli_payload["work_id"] == wrapper_payload["work_id"]
+        assert cli_payload["task_id"] == wrapper_payload["task_id"]
+        assert "task-2-brief.md" in cli_payload["brief_path"]
+        assert "task-2-brief.md" in wrapper_payload["brief_path"]
+
+        brief_cli = (run_dir_cli / "logs" / "task-2-brief.md").read_bytes()
+        brief_sc = (run_dir_sc / "logs" / "task-2-brief.md").read_bytes()
+        assert brief_cli == brief_sc

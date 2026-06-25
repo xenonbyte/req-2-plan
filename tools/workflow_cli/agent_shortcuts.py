@@ -968,6 +968,13 @@ def _cmd_execute(ns: argparse.Namespace, base_path: Path) -> None:
     sys.exit(EXIT_CONFLICT)
 
 
+def _cmd_task_brief(ns: argparse.Namespace, base_path: Path) -> None:
+    sys.exit(_run_cli(
+        ["plan-task-brief", "--work-id", ns.work_id, "--task", str(ns.task)],
+        base_path,
+    ))
+
+
 def _cmd_gap_open(ns: argparse.Namespace, base_path: Path) -> None:
     work_id = _validate_work_id(ns.work_id)
     args = [
@@ -1065,6 +1072,10 @@ def _build_parser() -> argparse.ArgumentParser:
     p_tier_lock.add_argument("--override-floor", action="store_true")
     p_tier_lock.add_argument("--confirm", action="store_true")
 
+    p_task_brief = sub.add_parser("task-brief")
+    p_task_brief.add_argument("--work-id", dest="work_id", required=True)
+    p_task_brief.add_argument("--task", type=int, required=True)
+
     p_gap_open = sub.add_parser("gap-open")
     p_gap_open.add_argument("--work-id", dest="work_id", required=True)
     p_gap_open.add_argument("--owner-stage", dest="owner_stage", required=True)
@@ -1104,6 +1115,7 @@ def main(args: list[str] | None = None, base_path: Path | None = None) -> None:
         "gap-open": _cmd_gap_open,
         "gap-resolve": _cmd_gap_resolve,
         "execute": _cmd_execute,
+        "task-brief": _cmd_task_brief,
     }
     handlers[ns.subcommand](ns, bp)
     sys.exit(0)
