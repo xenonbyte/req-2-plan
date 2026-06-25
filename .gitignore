@@ -12,4 +12,3 @@ venv/
 .codegraph
 .cursor
 .pytest_cache
-docs/archive
