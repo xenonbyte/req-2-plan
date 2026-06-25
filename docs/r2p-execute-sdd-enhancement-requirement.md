@@ -202,9 +202,10 @@ which surface carries the prose.
 #### FR-A2: Diff and history as files, not inline
 
 Replace the inline-diff instruction in Step 5. The controller records the task's
-BASE commit before dispatching the implementer, and after `DONE` writes the diff to
-the run's gitignored scratch dir — `<work-id>/logs/task-N-diff.md`
-(`git diff -U10 <base-commit> HEAD > .req-to-plan/<work-id>/logs/task-N-diff.md`) —
+BASE commit before dispatching the implementer, and after `DONE` ensures the run's
+gitignored scratch dir exists (`mkdir -p .req-to-plan/<work-id>/logs`), writes the
+diff to `<work-id>/logs/task-N-diff.md`
+(`git diff -U10 <base-commit> HEAD > .req-to-plan/<work-id>/logs/task-N-diff.md`),
 and hands the reviewer the **file path**, not the diff text. The reviewer-input
 list changes "The diff" to the diff file path. The diff is transient, possibly
 large review scratch, so it goes under `logs/` (ignored by `.req-to-plan/.gitignore`
