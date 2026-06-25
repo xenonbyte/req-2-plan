@@ -11,6 +11,7 @@ try:
 except ImportError:  # pragma: no cover - older interpreters: pyproject parsing degrades to a no-op
     tomllib = None
 
+from tools.workflow_cli.atomic import atomic_write_text
 from tools.workflow_cli.repo_baseline import SKIP_DIRS, scan_repo_baseline
 
 _CONFIG_NAMES = {
@@ -167,6 +168,9 @@ def to_markdown(pack: ProjectContextPack) -> str:
 def write_context_pack(pack: ProjectContextPack, run_dir: Path) -> tuple[Path, Path]:
     json_path = run_dir / "02-project-context.json"
     md_path = run_dir / "02-project-context.md"
-    json_path.write_text(to_json(pack), encoding="utf-8")
-    md_path.write_text(to_markdown(pack), encoding="utf-8")
+    for target in (json_path, md_path):
+        if target.is_symlink():
+            raise ValueError(f"refusing to write through symlink: {target}")
+    atomic_write_text(json_path, to_json(pack))
+    atomic_write_text(md_path, to_markdown(pack))
     return md_path, json_path

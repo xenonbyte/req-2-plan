@@ -302,3 +302,76 @@ class TestContextPackWriters(unittest.TestCase):
             data = json.loads(json_path.read_text(encoding="utf-8"))
             self.assertEqual(data["repo_root"], str(tmp.resolve()))
             self.assertIn("dependencies", data)
+
+    def test_symlink_at_json_path_raises_and_does_not_write_through(self):
+        from tools.workflow_cli.context_pack import ProjectContextPack, write_context_pack
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            run_dir = tmp / "run"
+            run_dir.mkdir()
+            json_path = run_dir / "02-project-context.json"
+            target_file = tmp / "target.json"
+            target_file.write_text("{}", encoding="utf-8")
+            json_path.symlink_to(target_file)
+
+            pack = ProjectContextPack(repo_root="/repo")
+            with self.assertRaises(ValueError) as cm:
+                write_context_pack(pack, run_dir)
+            self.assertIn("symlink", str(cm.exception))
+
+            # Verify that target file was not overwritten
+            self.assertEqual(target_file.read_text(encoding="utf-8"), "{}")
+
+    def test_symlink_at_md_path_raises_and_does_not_write_through(self):
+        from tools.workflow_cli.context_pack import ProjectContextPack, write_context_pack
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            run_dir = tmp / "run"
+            run_dir.mkdir()
+            md_path = run_dir / "02-project-context.md"
+            target_file = tmp / "target.md"
+            target_file.write_text("# Target", encoding="utf-8")
+            md_path.symlink_to(target_file)
+
+            pack = ProjectContextPack(repo_root="/repo")
+            with self.assertRaises(ValueError) as cm:
+                write_context_pack(pack, run_dir)
+            self.assertIn("symlink", str(cm.exception))
+
+            # Verify that target file was not overwritten
+            self.assertEqual(target_file.read_text(encoding="utf-8"), "# Target")
+
+    def test_normal_build_writes_both_files_with_atomic_write(self):
+        from tools.workflow_cli.context_pack import ProjectContextPack, write_context_pack
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            run_dir = tmp / "run"
+            run_dir.mkdir()
+
+            pack = ProjectContextPack(
+                repo_root="/test/repo",
+                languages={"Python": 100},
+                dependencies=[{"name": "pyyaml", "version": ">=6.0", "ecosystem": "pip"}]
+            )
+            md_path, json_path = write_context_pack(pack, run_dir)
+
+            # Verify both files exist
+            self.assertTrue(json_path.exists())
+            self.assertTrue(md_path.exists())
+
+            # Verify they are regular files (not symlinks)
+            self.assertFalse(json_path.is_symlink())
+            self.assertFalse(md_path.is_symlink())
+
+            # Verify content
+            json_data = json.loads(json_path.read_text(encoding="utf-8"))
+            self.assertEqual(json_data["repo_root"], "/test/repo")
+            self.assertIn("pyyaml", [d["name"] for d in json_data["dependencies"]])
+
+            md_text = md_path.read_text(encoding="utf-8")
+            self.assertIn("# Project Context Pack", md_text)
+            self.assertIn("/test/repo", md_text)
+
+            # Verify return values
+            self.assertEqual(md_path, run_dir / "02-project-context.md")
+            self.assertEqual(json_path, run_dir / "02-project-context.json")
