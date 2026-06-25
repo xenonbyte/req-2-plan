@@ -21,10 +21,11 @@ before the next stage seeds.
 
 ```bash
 # Tests — locally you MUST use the venv; system python3 has no pyyaml.
-.venv/bin/python -m pytest tests/ -v              # full suite
-.venv/bin/python -m pytest tests/test_cli.py -v   # one module
-npm run test:local                                # == .venv/bin/python -m pytest
-# CI shape (fresh venv w/ requirements-dev.txt): python -m pytest -q
+.venv/bin/python -m pytest tests/ -v                          # full suite
+.venv/bin/python -m pytest tests/test_cli.py -v               # one module
+.venv/bin/python -m pytest tests/test_cli.py -v -k tier_lock  # one test (-k)
+npm run test:local                                            # == .venv/bin/python -m pytest
+# CI shape (fresh venv w/ requirements-dev.txt, py 3.11/3.12): python -m pytest -q
 
 # Run the workflow CLI directly (no npm/global install needed)
 .venv/bin/python -m tools.workflow_cli --help
@@ -74,6 +75,8 @@ from Claude's Markdown command templates.
 - **Tier floor**: `TierEstimate.lock()` raises if locked below the computed floor; override needs `--override-floor --confirm`.
 - **Manifest safety**: uninstall removes only paths in `installed_paths`; pre-existing user files are backed up, never deleted. Every manifest write routes through `InstallService._write_manifest_atomic` (unique-temp + `O_EXCL` + `O_NOFOLLOW` + atomic replace, symlink-rejecting) — never a bare `write_text`; obsolete-wrapper cleanup tolerates its `ValueError` best-effort rather than aborting the install.
 - **JSON mode**: set `R2P_JSON=1` for machine-readable output.
+- **Final-review marker gate** (`check_final_review_recorded`): a presence/audit check at the same trust level as the PLAN-TASK checkbox gate — it verifies `execution/final-review.md` exists and records `Verdict: Approved`. It **never** runs code, runs tests, or asserts the verdict is true.
+- **Cross-stage trace closure**: enforced only at the PLAN quality gate (every `SPEC-*` consumed by a PLAN-TASK, every `SCOPE-IN-*` carried into PLAN, every `RISK-*` closed). Intermediate stages enforce only "cited upstream ID ⇒ closure tag"; stages 04–06 have no forward full-coverage gate by design (REQ→DES→SPEC is a legitimately many-to-many mapping — a hard symmetric gate produces false positives).
 - **Scoped git commits** (primitive in `workspace.py`): closing a run at the PLAN checkpoint and archiving a run each do a path-limited, best-effort `git commit` scoped to `.req-to-plan/.gitignore` + that run's `.req-to-plan/<work-id>/` dir. They never run `git add -A`/`-f`, never force-add ignored paths, never push, and are a no-op outside a git work tree.
 
 ### State machine (`models.py` → `ALLOWED_TRANSITIONS`)
