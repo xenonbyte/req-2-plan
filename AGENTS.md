@@ -72,9 +72,9 @@ from Claude's Markdown command templates.
 - **Exit codes** (`output.py`): `0` ok · `2` cli-err · `3` gate-fail · `4` dry-run · `5` review-required · `6` conflict · `7` not-found.
 - **Terminal-for-open-run scanning**: `agent_shortcuts.is_terminal()` treats `CLOSED_AT_PLAN_CHECKPOINT` and `ARCHIVED` as terminal. `EXECUTING` blocks starting a new run; `CLOSED_AT_PLAN_CHECKPOINT` is non-blocking and is reopen/execute/archive-able.
 - **Tier floor**: `TierEstimate.lock()` raises if locked below the computed floor; override needs `--override-floor --confirm`.
-- **Manifest safety**: uninstall removes only paths in `installed_paths`; pre-existing user files are backed up, never deleted.
+- **Manifest safety**: uninstall removes only paths in `installed_paths`; pre-existing user files are backed up, never deleted. Every manifest write routes through `InstallService._write_manifest_atomic` (unique-temp + `O_EXCL` + `O_NOFOLLOW` + atomic replace, symlink-rejecting) — never a bare `write_text`; obsolete-wrapper cleanup tolerates its `ValueError` best-effort rather than aborting the install.
 - **JSON mode**: set `R2P_JSON=1` for machine-readable output.
-- **Scoped git commits**: closing a run at the PLAN checkpoint and archiving a run each do a path-limited, best-effort `git commit` scoped to `.req-to-plan/.gitignore` + that run's `.req-to-plan/<work-id>/` dir. They never run `git add -A`/`-f`, never force-add ignored paths, never push, and are a no-op outside a git work tree.
+- **Scoped git commits** (primitive in `workspace.py`): closing a run at the PLAN checkpoint and archiving a run each do a path-limited, best-effort `git commit` scoped to `.req-to-plan/.gitignore` + that run's `.req-to-plan/<work-id>/` dir. They never run `git add -A`/`-f`, never force-add ignored paths, never push, and are a no-op outside a git work tree.
 
 ### State machine (`models.py` → `ALLOWED_TRANSITIONS`)
 
