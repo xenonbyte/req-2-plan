@@ -40,23 +40,29 @@ Use the least powerful model that can handle each role:
 - Always specify the model explicitly when dispatching; an omitted model inherits the session model.
 - **Turn count beats token price**: use a mid-tier floor for reviewers and for implementers working from prose descriptions; drop to cheapest only for complete-code/single-file mechanical tasks.
 
+## Controller Narration Discipline
+
+Between tool calls, the controller narrates at most one short line. Use the prefix `Narration:` for these inter-call notes (e.g. `Narration: implementer returned DONE, writing diff`). Never paste a subagent's returned text — report body, diff content, or review findings — into a later dispatch; what the controller restates into its own context is bounded to a status (DONE / NEEDS_CONTEXT / BLOCKED) plus a pointer to the report or diff file path.
+
 ## Per-Task Loop
 
 For each PLAN-TASK (in order):
 
-### 1. Extract task inline
+### 1. Run `plan-task-brief` and obtain the task-brief path
 
-Read the task text directly from `07-plan.md`. Note the task's `Skeleton`, `Steps`, `Spec References`, and `Verification` criteria.
+Run `{{R2P_BIN_DIR}}/plan-task-brief --work-id <work-id> --task PLAN-TASK-NNN` for the current task. The command returns a `brief_path` pointing to a scoped brief file that contains the task's `Skeleton`, `Steps`, `Spec References`, and `Verification` criteria. Pass the `brief_path` as the handoff pointer to both the implementer and the reviewer — not pasted task text from `07-plan.md`. The controller uses the returned `brief_path` without eager-reading the full task body into its own context; the implementer and reviewer read the task-brief on demand.
 
 ### 2. Dispatch a fresh implementer subagent
 
 Record BASE (`git rev-parse HEAD`) BEFORE dispatching the implementer — **never use `HEAD~1`** as BASE (it drops all but the last commit of a multi-commit task). For Task 1, this BASE is also `<execution-base-commit>` for the final whole-branch review. Persist the Task 1 BASE immediately in tracked execution state by adding `Execution BASE: <execution-base-commit>` to `execution/progress.md`.
 
 Provide the subagent with:
-- The task text (from `07-plan.md`)
+- The `brief_path` returned by `plan-task-brief` (not pasted task text from `07-plan.md`)
 - Scene-setting context (project, dependencies, architectural constraints)
 - TDD instructions: follow `Skeleton`/`Steps`; prove `Verification` with evidence
 - A report file path (`execution/task-N-report.md`)
+
+The implementer return contract is minimal: a status (DONE / DONE_WITH_CONCERNS / NEEDS_CONTEXT / BLOCKED) plus the report file path. The controller does not ask the implementer to restate the task.
 
 The implementer must:
 1. Implement exactly what the task specifies, following TDD
@@ -81,8 +87,8 @@ The fresh implementer subagent verifies-then-removes ambiguity by evidence and T
 After the implementer reports DONE:
 1. `mkdir -p .req-to-plan/<work-id>/logs` then `git diff -U10 <base-commit> HEAD > .req-to-plan/<work-id>/logs/task-N-diff.md`. Keep diff scratch under `logs/` (gitignored), never under `execution/`.
 2. Dispatch a task-reviewer subagent with:
-   - The task text and `Spec References` from `07-plan.md`
-   - The implementer's report
+   - The `brief_path` returned by `plan-task-brief` (not pasted task text) plus the task's `Spec References`
+   - The implementer report file path (`execution/task-N-report.md`)
    - The diff file path (`.req-to-plan/<work-id>/logs/task-N-diff.md`)
    - Global constraints from the plan (copy verbatim from `## Global Constraints`); never pre-judge a finding's severity; never paste prior-task summaries into a later dispatch
 
@@ -94,7 +100,12 @@ The task-reviewer returns two verdicts:
 
 - Dispatch fix subagents for Critical and Important findings
 - Re-dispatch the task-reviewer after each fix wave
-- Only when the task-reviewer is clean (both spec ✅ and quality Approved, and `Verification` satisfied), update the matching `execution/progress.md` checkbox from `- [ ] PLAN-TASK-NNN ...` to `- [x] PLAN-TASK-NNN ...` and append one line:
+- Before flipping the checkbox, adjudicate each reviewer "cannot verify from diff" warning by recording one line per finding in `execution/progress.md`:
+  - `Resolved: <finding>` — clears the warning; a `Resolved:` claim about unchanged code must cite implementation and test evidence
+  - `Gap: <finding>` — blocks the flip
+  - `Unresolved: <finding>` — blocks the flip and cannot be overridden on the controller's own judgment
+- Minor findings not fixed within a task: record each as `Minor: <finding>` in `execution/progress.md` and carry them into the final whole-branch review input rather than dropping them per task.
+- Only when the task-reviewer is clean (both spec ✅ and quality Approved, and `Verification` satisfied, and no open `Gap:` or `Unresolved:` entries), update the matching `execution/progress.md` checkbox from `- [ ] PLAN-TASK-NNN ...` to `- [x] PLAN-TASK-NNN ...` and append one line:
   `Task N: complete (commits <base7>..<head7>, review clean)`
 
 **Continuous execution**: execute all PLAN-TASKs without pausing to ask "should I continue?" between tasks. Stop only on: unresolvable `BLOCKED`, upstream defect requiring repair, dirty-tree block, or all tasks complete. `Verification` requires fresh command output; "should pass" / "looks correct" is not evidence; do not report `DONE` without it.

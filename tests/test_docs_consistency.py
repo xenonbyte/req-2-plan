@@ -112,6 +112,41 @@ class TestExecuteTemplateContent(unittest.TestCase):
             + ", ".join(offenders),
         )
 
+    def test_execute_surfaces_carry_fr_cm_context_management_tokens(self):
+        """SPEC-GUARD-001: both r2p-execute surfaces must carry the FR-CM load-bearing tokens."""
+        surfaces = [
+            "tools/workflow_cli/agent_templates/claude/commands/r2p-execute.md",
+            "tools/workflow_cli/agent_templates/codex/skills/r2p-execute/SKILL.md",
+        ]
+        REQUIRED_FR_CM_TOKENS = [
+            "plan-task-brief",       # FR-CM1: the loop routes the handoff through the brief
+            "task-brief",            # the brief-file handoff / shortcut
+            "brief_path",            # FR-CM1: both dispatches use the returned brief path
+            "not pasted task text",  # FR-CM1: guards against reverting to inline handoff
+            "Resolved:",             # FR-CM3 adjudication — clears a reviewer warning
+            "Gap:",                  # FR-CM3 adjudication — blocks the flip
+            "Unresolved:",           # FR-CM3 adjudication — blocks the flip
+            "Narration:",            # FR-CM2 narration ceiling label
+            "Minor:",                # FR-CM4 carried-forward minor-findings marker
+        ]
+        missing = []
+        gap_open_offenders = []
+        for rel in surfaces:
+            text = (REPO_ROOT / rel).read_text(encoding="utf-8")
+            for tok in REQUIRED_FR_CM_TOKENS:
+                if tok not in text:
+                    missing.append(f"{rel}:{tok}")
+            if "`r2p-gap-open`" in text:
+                gap_open_offenders.append(rel)
+        self.assertEqual(missing, [], f"missing FR-CM context-management tokens: {missing}")
+        self.assertEqual(
+            gap_open_offenders,
+            [],
+            "Execution runs have current_stage=closed, so upstream defects must "
+            "use a reopen/human repair path instead of r2p-gap-open: "
+            + ", ".join(gap_open_offenders),
+        )
+
     def test_execute_surfaces_block_dirty_code_tree_before_task_loop(self):
         surfaces = [
             "tools/workflow_cli/agent_templates/claude/commands/r2p-execute.md",
