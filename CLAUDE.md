@@ -79,6 +79,7 @@ doubt, read the module, not this file.
 | `link_expander.py` | Local relative-link expansion for requirement intake |
 | `stage_schema.py` / `stage_templates.py` | Required headings per stage/tier + structural seed templates |
 | `markdown.py` / `atomic.py` | Fence-aware Markdown helpers; atomic text writes |
+| `workspace.py` | Neutral `.req-to-plan/` workspace helpers (imports neither `cli.py` nor `agent_shortcuts.py`): owns the workspace `.gitignore` and the path-limited git-commit primitive used by run-close (add) and run-archive (remove) |
 | `trace.py` | Derived trace model and closure checks |
 | `gates.py` | Entry/quality gates, execution completion gate, forced-review checks |
 | `output.py` | Exit code constants, output formatting, JSON mode |
@@ -97,12 +98,17 @@ doubt, read the module, not this file.
 - **Tier floor**: `TierEstimate.lock()` raises when locking below the computed
   floor; override needs `--override-floor --confirm`.
 - **Manifest safety**: uninstall removes only paths in `installed_paths`;
-  pre-existing user files are backed up before overwrite, never deleted.
+  pre-existing user files are backed up before overwrite, never deleted. Every
+  manifest write routes through `InstallService._write_manifest_atomic`
+  (unique-temp + `O_EXCL` + `O_NOFOLLOW` + atomic replace, symlink-rejecting) —
+  never a bare `write_text`; obsolete-wrapper cleanup tolerates its `ValueError`
+  best-effort rather than aborting the install.
 - **JSON mode**: set `R2P_JSON=1` for machine-readable output.
 - **Version**: `tools/workflow_cli/version.py` (`R2P_VERSION`) is the single
   source — never hardcode the version in docs.
-- **Git side effects**: closing a run at the PLAN checkpoint and archiving a run
-  each perform a **path-limited, best-effort `git commit`** scoped to
+- **Git side effects** (primitive in `workspace.py`): closing a run at the PLAN
+  checkpoint and archiving a run each perform a **path-limited, best-effort
+  `git commit`** scoped to
   `.req-to-plan/.gitignore` plus that run's `.req-to-plan/<work-id>/` dir
   (archive commits the path removal). They never run `git add -A`/`-f`, never
   force-add ignored paths, never push, and are a no-op outside a git work tree.
