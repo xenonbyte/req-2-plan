@@ -213,6 +213,79 @@ class TestInstallService:
         assert isinstance(data["installed_paths"], list)
         assert len(data["installed_paths"]) > 0
 
+    def test_strip_path_from_manifest_rejects_symlinked_manifest(self, tmp_path):
+        # _strip_path_from_manifest now writes via _write_manifest_atomic, which
+        # rejects a symlinked manifest instead of following it. A planted symlink
+        # whose target references the stripped path must not be written through.
+        from tools.workflow_cli.install import _load_manifest
+
+        svc, manifest_root, _ = make_service(tmp_path)
+        svc.install("claude")
+        real_manifest = manifest_root / "install" / "claude.yaml"
+        manifest_text = real_manifest.read_text(encoding="utf-8")
+        target = _load_manifest(real_manifest)["installed_paths"][0]
+
+        victim = tmp_path / "victim.yaml"
+        victim.write_text(manifest_text, encoding="utf-8")
+        link = manifest_root / "install" / "codex.yaml"
+        link.symlink_to(victim)
+
+        with pytest.raises(ValueError, match="unsafe_install"):
+            svc._strip_path_from_manifest(link, target)
+
+        assert link.is_symlink(), "planted manifest must remain a symlink"
+        assert victim.read_text(encoding="utf-8") == manifest_text, (
+            "symlink target must not be written through"
+        )
+
+    def test_obsolete_wrapper_cleanup_tolerates_symlinked_manifest(self, tmp_path):
+        # A symlinked (unsafe) manifest sitting in install/ must neither be written
+        # through nor abort cleanup of the remaining valid manifests. The valid
+        # codex manifest's obsolete reference is still stripped; the symlinked
+        # claude manifest (sorted first) raises ValueError that the loop tolerates.
+        from tools.workflow_cli.install import _dump_manifest, _load_manifest
+
+        svc, manifest_root, _ = make_service(tmp_path)
+        svc.install("codex")
+        bin_dir = manifest_root / "bin"
+        bin_dir.mkdir(parents=True, exist_ok=True)
+        stale = bin_dir / "r2p-adapt"
+        stale.write_text("MANAGED WRAPPER\n", encoding="utf-8")
+
+        valid_mpath = manifest_root / "install" / "codex.yaml"
+        valid_manifest = _load_manifest(valid_mpath)
+        valid_manifest.setdefault("installed_paths", []).append(str(stale))
+        valid_mpath.write_text(_dump_manifest(valid_manifest), encoding="utf-8")
+
+        victim = tmp_path / "victim-claude.yaml"
+        victim.write_text(
+            _dump_manifest(
+                {
+                    "backups": [],
+                    "installed_at": "x",
+                    "installed_paths": [str(stale)],
+                    "platform": "claude",
+                    "r2p_version": "x",
+                    "schema_version": SCHEMA_VERSION,
+                }
+            ),
+            encoding="utf-8",
+        )
+        victim_text = victim.read_text(encoding="utf-8")
+        link = manifest_root / "install" / "claude.yaml"
+        link.symlink_to(victim)
+
+        # Must complete without raising despite the symlinked manifest.
+        svc._cleanup_obsolete_managed_wrappers()
+
+        assert str(stale) not in _load_manifest(valid_mpath).get(
+            "installed_paths", []
+        ), "valid manifest's obsolete reference must still be stripped"
+        assert link.is_symlink(), "planted manifest must remain a symlink"
+        assert victim.read_text(encoding="utf-8") == victim_text, (
+            "symlinked manifest target must not be written through"
+        )
+
     def test_install_removes_manifest_when_post_manifest_cleanup_fails(self, tmp_path):
         svc, manifest_root, ph_root = make_service(tmp_path)
         manifest_path = manifest_root / "install" / "claude.yaml"

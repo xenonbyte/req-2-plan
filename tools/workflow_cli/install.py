@@ -664,7 +664,14 @@ class InstallService:
             for mpath in sorted(install_dir.glob("*.yaml")):
                 if self._load_manifest_for_cleanup(mpath) is None:
                     continue
-                self._strip_path_from_manifest(mpath, path_str)
+                try:
+                    self._strip_path_from_manifest(mpath, path_str)
+                except ValueError:
+                    # Best-effort cleanup: _write_manifest_atomic rejects writes
+                    # that would follow an untrusted symlink. A symlinked or
+                    # otherwise unsafe manifest is left in place for operator
+                    # repair rather than aborting the in-progress install.
+                    continue
             # Delete the obsolete managed wrapper only when there was no user
             # original to restore in its place.
             if not restored and path_str not in preserve_paths:
@@ -765,7 +772,7 @@ class InstallService:
             changed = True
 
         if changed:
-            manifest_path.write_text(_dump_manifest(manifest), encoding="utf-8")
+            self._write_manifest_atomic(manifest_path, _dump_manifest(manifest))
 
     def _load_manifest_for_cleanup(self, manifest_path: Path) -> dict[str, Any] | None:
         """Load a manifest during best-effort shared-wrapper cleanup.
@@ -822,8 +829,7 @@ class InstallService:
                 file_snapshot.path.chmod(file_snapshot.mode)
             except OSError:
                 pass
-        snapshot.manifest_path.parent.mkdir(parents=True, exist_ok=True)
-        snapshot.manifest_path.write_text(snapshot.manifest_text, encoding="utf-8")
+        self._write_manifest_atomic(snapshot.manifest_path, snapshot.manifest_text)
 
     def _write_manifest_atomic(self, manifest_path: Path, data: str) -> None:
         """Write manifest data via a unique temp sibling, then atomically replace.
