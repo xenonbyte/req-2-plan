@@ -271,13 +271,23 @@ blindly. FR-CM3 adds the missing *output* channel (§5) and then the controller
 > `Verification` satisfied, **and no unresolved ⚠️ "cannot verify from diff" item
 > remains**. The task-reviewer's only independent view of the change is the diff;
 > resolve each ⚠️ yourself by reading the cited SPEC/sibling task it turns on
-> (the cross-task and PLAN context the reviewer lacks). A confirmed gap is a
-> failed spec review: send it back to the implementer and
-> re-review — never flip the checkbox on your own judgment.
+> (the cross-task and PLAN context the reviewer lacks) and the relevant
+> implementation/test evidence that proves or disproves the item. Record each ⚠️
+> outcome in `execution/progress.md` before the flip decision:
+> `Resolved:` when durable evidence shows the requirement is already satisfied
+> (for unchanged-code claims, cite the relevant implementation path/function and
+> test or tool output, not only the SPEC/sibling task); `Gap:` when the evidence
+> shows missing work; `Unresolved:` when the evidence still does not prove
+> satisfaction. Only `Resolved:` clears the ⚠️.
+> A `Gap:` is a failed spec review: send it back to the implementer and
+> re-review. An `Unresolved:` item blocks the flip. Never flip the checkbox by
+> overriding a `Gap:` or `Unresolved:` item on your own judgment.
 
 This keeps "checkbox flips only when the reviewer is clean" as the single
-authority: the controller never unilaterally flips a checkbox, it only routes a
-confirmed ⚠️ gap back through the existing implementer → re-review loop.
+authority: the controller can clear a reviewer ⚠️ only by recording durable
+evidence for a `Resolved:` outcome; it cannot override a confirmed gap or
+unresolved item. Confirmed gaps still go through the existing implementer →
+re-review loop.
 
 ### FR-CM4: Minor findings carried forward to the final whole-branch review
 
@@ -318,7 +328,10 @@ block out of the full plan.
   checkbox by that literal ID. Loads the frozen PLAN via
   `read_artifact(run_dir, Stage.PLAN)` (which raises `FileNotFoundError` on a
   missing PLAN — map to `EXIT_NOT_FOUND`, exactly as `run-execute-start` already
-  does), applies `strip_readonly_sections`, and selects the `### PLAN-TASK-N`
+  does). The command is valid only while the run status is `EXECUTING`; every
+  other existing run status returns `EXIT_CONFLICT` without writing, because task
+  briefs are execution scratch, not a way to inspect draft or archived runs.
+  It applies `strip_readonly_sections`, and selects the `### PLAN-TASK-N`
   body with the existing **public** primitive
   `markdown.heading_bounded_bodies(content, PLAN_TASK_ANCHOR_RE.match)` — the
   same call `gates._iter_plan_task_bodies` wraps (`gates.py:301`); it yields each
@@ -327,11 +340,14 @@ block out of the full plan.
   (`atomic.py:9`), rejecting a symlinked `logs/` or target with the same
   `_reject_symlink_or_exit` discipline (`cli.py:165`) `run-execute-start` uses
   for its `execution/` write. Prints the brief path; under `R2P_JSON=1` emits
-  `{work_id, task_id, brief_path}`. **Read-only w.r.t. run state — no status
+  top-level success fields `{work_id, task_id, brief_path}` where `work_id` is
+  the canonical work ID string, `task_id` is the literal matched anchor such as
+  `PLAN-TASK-002`, and `brief_path` is the repository-root-relative path
+  `.req-to-plan/<work-id>/logs/task-N-brief.md`. **Read-only w.r.t. run state — no status
   transition.** Exit codes from `output.py`: `EXIT_NOT_FOUND` when the run, the
   PLAN artifact, or the requested `PLAN-TASK-N` is missing; `EXIT_CONFLICT` when
-  `logs/` or the target brief path is a symlink (via `_reject_symlink_or_exit`);
-  `EXIT_OK` on success.
+  the existing run is not `EXECUTING`, or when `logs/` or the target brief path
+  is a symlink (via `_reject_symlink_or_exit`); `EXIT_OK` on success.
 - **Shortcut subcommand** `task-brief` in `agent_shortcuts.py`: resolves the
   active run (or `--work-id`) and passes through via
   `_run_cli(["plan-task-brief", "--work-id", id, "--task", n])`. Register it in
@@ -381,7 +397,7 @@ mechanism and command surface before being written. Findings:
    (thin passthrough).
 3. `tools/r2p-task-brief` — new wrapper (auto-discovered by the installer).
 4. `tools/workflow_cli/agent_templates/claude/commands/r2p-execute.md` — FR-CM1–CM4 prose.
-5. `tools/workflow_cli/agent_templates/codex/skills/r2p-execute/SKILL.md` — same prose (the two bodies are kept textually in sync; the docs-consistency token gate enforces parity).
+5. `tools/workflow_cli/agent_templates/codex/skills/r2p-execute/SKILL.md` — same prose intent (the docs-consistency token gate enforces load-bearing token coverage across both surfaces).
 6. `tools/workflow_cli/agent_templates/gemini/commands/r2p-execute.toml` — **unchanged** (4-line pointer, no orchestration body).
 7. `tests/test_cli.py` — tests for `plan-task-brief` (see Test Plan).
 8. `tests/test_docs_consistency.py` — extend the
@@ -395,9 +411,12 @@ mechanism and command surface before being written. Findings:
   `logs/task-N-brief.md` containing exactly that task's body (from the frozen,
   read-only-stripped PLAN, including its literal `### PLAN-TASK-<digits>`
   heading), prints the path, and emits `{work_id, task_id, brief_path}` under
-  `R2P_JSON=1`; it performs no status transition.
-- Missing run/PLAN/task → `EXIT_NOT_FOUND`; a symlinked `logs/` or target →
-  `EXIT_CONFLICT` (no write through the link).
+  `R2P_JSON=1` where `task_id` is the literal matched anchor and `brief_path` is
+  the repository-root-relative `.req-to-plan/<work-id>/logs/task-N-brief.md`;
+  it performs no status transition and is valid only for `EXECUTING` runs.
+- Missing run/PLAN/task → `EXIT_NOT_FOUND`; non-`EXECUTING` existing run,
+  symlinked `logs/`, or symlinked target → `EXIT_CONFLICT` (no write through the
+  link).
 - Both orchestration surfaces produce the brief once in §1 (the controller does
   **not** deep-read the full task body) and hand the **same brief path** to both
   the implementer (§2) and the task-reviewer (§5) — no pasted task text on either
@@ -408,8 +427,11 @@ mechanism and command surface before being written. Findings:
 - Both surfaces' §5 reviewer contract instructs the task-reviewer to emit ⚠️
   "cannot verify from diff" items (spec verdict becomes ✅ / ❌ / ⚠️-defer).
 - Both surfaces' §6 flip condition subsumes "no unresolved ⚠️ cannot-verify
-  item", with confirmed gaps routed back through implementer → re-review and an
-  explicit "never flip on your own judgment".
+  item", records each ⚠️ as `Resolved:`, `Gap:`, or `Unresolved:`, routes
+  confirmed gaps back through implementer → re-review, blocks unresolved items,
+  requires implementation/test evidence for unchanged-code `Resolved:` claims,
+  and forbids overriding a gap or unresolved item on the controller's own
+  judgment.
 - Both surfaces record Minor findings as plain `Minor:` bullets and point the
   final review at them; neither uses the `- [ ] PLAN-TASK-N` shape for Minors.
 - No change to `gates.py`, any state transition, any artifact schema, or any
@@ -425,13 +447,20 @@ mechanism and command surface before being written. Findings:
 - happy path: seed a run with a frozen PLAN containing `### PLAN-TASK-001..00N`;
   `plan-task-brief --task 2` writes `logs/task-2-brief.md` whose content is
   exactly task 2's body and excludes read-only sections; `R2P_JSON=1` payload
-  carries `brief_path`/`task_id`.
+  carries the full command payload as top-level fields, including `work_id: "<work-id>"`,
+  `task_id: "PLAN-TASK-002"`, and repository-root-relative
+  `brief_path: ".req-to-plan/<work-id>/logs/task-2-brief.md"`; existing
+  success metadata fields such as `status` / `message` may also be present.
 - integer resolution: a zero-padded anchor `### PLAN-TASK-002` is selected by
   `--task 2` (integer match, not string equality against `PLAN-TASK-2`).
 - missing task / missing PLAN / unknown work-id → `EXIT_NOT_FOUND`.
+- non-`EXECUTING` existing run statuses → `EXIT_CONFLICT` and no brief write.
 - symlinked `logs/` or target brief path → `EXIT_CONFLICT` (no write through the
   link).
 - the brief lands under `logs/` (gitignored), not under `execution/`.
+- shortcut/wrapper coverage: `agent_shortcuts task-brief --work-id <id> --task 2`
+  and `tools/r2p-task-brief --work-id <id> --task 2` reach the same extraction
+  path and preserve the same text/JSON payload contract as `plan-task-brief`.
 
 **`tests/test_docs_consistency.py`** — extend
 `test_execute_surfaces_carry_sdd_orchestration_tokens` (claude + codex) with
@@ -451,8 +480,10 @@ test asserts the wording that ships.
 
 ## Risks
 
-- **Wording drift between the two surfaces.** Mitigated by the docs-consistency
-  token gate (any new required token must appear in both files).
+- **Wording drift between the two surfaces.** Mitigated by docs-consistency
+  coverage of load-bearing tokens across both files. This does not prove textual
+  parity; it prevents the specific orchestration requirements from silently
+  disappearing from either surface.
 - **Over-tokenizing the test.** Keep tokens to stable, load-bearing phrases; do
   not pin incidental wording, which would make routine edits brittle.
 - **FR-CM3 misread as a new gate.** Mitigated by the explicit "no machine-gate
@@ -462,8 +493,10 @@ test asserts the wording that ships.
   and the auto-discovered wrapper path; no install-list or gate edits.
 - **Controller under-reads and cannot adjudicate ⚠️.** Trimming §1 to a brief
   pointer could starve the FR-CM3 ⚠️ resolution of context. Mitigated: the
-  Pre-flight whole-plan read is the adjudication context; §1's trim removes only
-  the *redundant per-task re-read*, not the controller's PLAN picture.
+  Pre-flight whole-plan read remains only the initial contradiction scan; §6
+  adjudication re-reads the durable brief and the cited SPEC/sibling task on
+  disk. §1's trim removes only the *redundant per-task re-read*, not the
+  controller's ability to fetch the exact context needed for a ⚠️ decision.
 
 ## Implementation Sequencing
 
