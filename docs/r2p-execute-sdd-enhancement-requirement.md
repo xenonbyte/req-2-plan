@@ -211,16 +211,19 @@ The final whole-branch review must:
 Add `gates.py::check_final_review_recorded(run_dir) -> GateResult`, placed beside
 `check_execution_complete`, reusing `_read_regular_text_no_symlink` (symlink and
 non-regular-file rejection) and `unfenced_markdown_lines` (fenced code is
-ignored). It validates `execution/final-review.md`:
+ignored). It validates the current verdict in `execution/final-review.md`:
 
 - file missing → fail.
 - file is a symlink or not a regular file → fail (refuse to read outside the run
   directory).
-- no unfenced line matching `^\s*Verdict:\s*(Approved|Changes Requested)\s*$`
-  (case-insensitive) → fail (verdict not recorded).
-- `Verdict: Changes Requested` (or any non-approved value) → fail (resolve
-  findings and record `Verdict: Approved`).
-- `Verdict: Approved` → pass.
+- no unfenced line beginning `Verdict:` → fail (verdict not recorded).
+- unsupported unfenced `Verdict:` value → fail (allowed values are `Approved`
+  and `Changes Requested`, case-insensitive).
+- when multiple unfenced `Verdict:` lines exist, the **last** one is the current
+  verdict; earlier verdict lines are historical audit text.
+- current verdict `Changes Requested` → fail (resolve findings and record
+  `Verdict: Approved` as the final unfenced verdict).
+- current verdict `Approved` → pass.
 
 The gate uses exit code `EXIT_GATE_FAIL` (3), consistent with
 `check_execution_complete`.
@@ -243,20 +246,35 @@ final-review gates (abandoned/superseded runs).
 
 #### FR-B4: Honest labeling (the linchpin)
 
-No archive-path output and no `check_final_review_recorded` message may imply that
-correctness was verified. The gate's failure message states it is a presence
-check on the review audit trail, not a correctness guarantee. The archive success
-path stays state-only (`archived`); no "review approved" / "verified" wording is
-added anywhere. This requirement is enforced by an executable test (the
-honesty-word guard in the Test Plan), not by prose intention alone.
+No archive-path output and no `check_final_review_recorded` message may make an
+affirmative correctness claim. Every gate failure message states it is a
+presence check on the review audit trail, not a correctness guarantee. The
+archive success path stays state-only (`archived`); no affirmative "review
+approved" / "verified" wording is added anywhere. The executable honesty guard
+must allow required protocol literals such as `Verdict: Approved` and the
+negated disclaimer `not a correctness guarantee` in **any** gate failure
+message, while rejecting affirmative correctness claims such as "verified",
+"validated", "guaranteed correct", or "review approved".
 
-The canonical failure message is:
+The guard cannot be a naive substring match: `correct` and `guarantee` appear in
+both the allowed disclaimer (`not a correctness guarantee`) and rejected claims
+(`guaranteed correct`), and `Approved` is both a protocol literal (allowed) and
+part of `review approved` (rejected). It must match affirmative claim
+phrases/patterns and exempt the exact disclaimer plus protocol literals — never
+match bare tokens. This requirement is enforced by an executable test (the
+honesty guard in the Test Plan), not by prose intention alone.
+
+Failure messages are mode-specific (missing file; symlink / non-regular; no
+unfenced `Verdict:` line; unsupported current verdict; current verdict
+`Changes Requested`). Each carries the presence-check disclaimer, and the
+honesty allowlist must cover every message that embeds `Verdict: Approved` or
+`not a correctness guarantee`. The missing / not-approved variant reads:
 
 ```text
-Final whole-branch review verdict not recorded: execution/final-review.md is
-missing or has no 'Verdict: Approved' line. Presence check on the review audit
-trail — not a correctness guarantee. Record the verdict, or re-run with --force
-to archive an abandoned run.
+Final whole-branch review not approved: execution/final-review.md is missing,
+or its current (last unfenced) 'Verdict:' line is not 'Approved'. Presence check
+on the review audit trail — not a correctness guarantee. Record
+'Verdict: Approved', or re-run with --force to archive an abandoned run.
 ```
 
 ### Part C — Closure-model documentation (docs-only)
@@ -277,10 +295,11 @@ introduced.
 ```text
 Path:     <run-dir>/execution/final-review.md
 Seeded:   no (absent by default; written by the agent's final-review step)
-Required: a regular, non-symlink file containing an unfenced line
-          matching  ^\s*Verdict:\s*(Approved|Changes Requested)\s*$  (case-insensitive)
-Pass:     Verdict: Approved
-Fail:     missing file | symlink / non-regular | no Verdict line | Verdict: Changes Requested
+Required: a regular, non-symlink file containing at least one unfenced
+          Verdict: line. The final unfenced Verdict: line is the current verdict.
+Pass:     current verdict is Approved
+Fail:     missing file | symlink / non-regular | no Verdict line |
+          unsupported current verdict | current verdict is Changes Requested
 Exit:     EXIT_GATE_FAIL (3) on failure
 Scope:    enforced only when archiving an EXECUTING run without --force
 ```
@@ -303,35 +322,45 @@ No new file is created for tests; no new module, service, or dependency.
 - Both `r2p-execute` surfaces contain the Part A additions and stay in sync; all
   pre-existing required SDD tokens remain present and `r2p-gap-open` is absent.
 - `check_final_review_recorded` passes only on a regular `execution/final-review.md`
-  carrying `Verdict: Approved`; it fails on a missing file, a symlink/non-regular
-  file, a missing verdict line, and `Verdict: Changes Requested`; a `Verdict:`
-  inside a fenced code block does not count.
+  whose final unfenced `Verdict:` line is `Verdict: Approved`; it fails on a
+  missing file, a symlink/non-regular file, a missing verdict line, an
+  unsupported current verdict value, and a final `Verdict: Changes Requested`; a
+  `Verdict:` inside a fenced code block does not count.
 - Archiving an `EXECUTING` run with a complete ledger but no approved
   final-review marker is rejected with `EXIT_GATE_FAIL`; adding the approved
   marker lets it pass; `--force` bypasses both gates.
 - Archiving a `CLOSED_AT_PLAN_CHECKPOINT` run does not require a final-review
   marker.
 - `run-execute-start` does not create `execution/final-review.md`.
-- No archive-path output and no gate message contains correctness-implying wording
-  (`verified`, `correct`, `validated`, `guaranteed`, …); an executable test
-  asserts this.
+- No archive-path output and no gate message may make an affirmative correctness
+  claim; the executable guard allows required protocol literals and the negated
+  disclaimer in any gate failure message, while rejecting affirmative wording
+  such as `verified`, `validated`, `guaranteed correct`, and `review approved`.
+  The guard is phrase/pattern-based, not a bare-token substring match.
 - Existing exit codes and JSON-mode payloads are unchanged.
 - `tests/test_docs_consistency.py` guards the new tokens and stays green; the full
   suite stays green.
 
 ## Test Plan
 
-- `tests/test_gates.py`: missing file → fail; `Verdict: Approved` → pass;
-  `Verdict: Changes Requested` → fail; symlink → fail; non-regular (FIFO) →
-  fail without blocking; `Verdict:` inside a code fence → not counted.
+- `tests/test_gates.py`: missing file → fail; final `Verdict: Approved` → pass;
+  final `Verdict: Changes Requested` → fail; unsupported current verdict value →
+  fail; symlink → fail; non-regular (FIFO) → fail without blocking; `Verdict:`
+  inside a code fence → not counted; multiple unfenced verdict lines use the
+  last verdict (`Changes Requested` then `Approved` passes, `Approved` then
+  `Changes Requested` fails).
 - `tests/test_cli.py`: executing-run archive blocked when the marker is missing
   even with a complete ledger; passes with an approved marker; `--force`
   overrides; closed-at-plan archive unaffected. Update the existing success cases
   (`test_archive_executing_run_with_complete_ledger`,
   `test_archive_passes_when_ledger_covers_all_plan_tasks`, and any other
   executing-run archive-success test) to seed an approved
-  `execution/final-review.md`. Add the FR-B4 honesty-word guard over the archive
-  output and the gate message.
+  `execution/final-review.md`. Add the FR-B4 honesty guard over the archive
+  output and every gate failure message: allowlist coverage so each mode-specific
+  message passes, plus negative tests that affirmative claims ("verified",
+  "guaranteed correct", "review approved") are rejected while the disclaimer
+  `not a correctness guarantee` is not (the guard must be phrase/pattern-based,
+  not a bare-token substring match).
 - `tests/test_docs_consistency.py`: add a stable subset of new tokens
   (`Model Selection`, `HEAD~1`, `execution/final-review.md`, `Verdict: Approved`,
   `re-run the full verification suite`) to the execute-surface required set.
@@ -357,10 +386,11 @@ mutated by the upgrade itself.
   executing-archive tests red; the test plan updates them in the same change.
 - **Surface drift.** The two `r2p-execute` surfaces can fall out of sync; the
   docs-consistency token guard catches divergence on the guarded tokens.
-- **Honesty word-list coverage.** The FR-B4 guard checks a finite word list; a
-  future message could imply correctness with an unlisted word. Accepted as low
-  residual risk, mitigated by covering the common words and stating intent in
-  `CLAUDE.md`.
+- **Honesty guard coverage.** The FR-B4 guard checks a finite pattern set with a
+  small allowlist for required protocol literals and negated disclaimers; a
+  future message could imply correctness with an unlisted phrase. Accepted as low
+  residual risk, mitigated by covering the common affirmative claims and stating
+  intent in `CLAUDE.md`.
 
 ## Implementation Boundaries
 
