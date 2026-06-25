@@ -202,10 +202,14 @@ which surface carries the prose.
 #### FR-A2: Diff and history as files, not inline
 
 Replace the inline-diff instruction in Step 5. The controller records the task's
-BASE commit before dispatching the implementer, and after `DONE` writes the diff
-to `execution/task-N-diff.md` (`git diff -U10 <base-commit> HEAD >
-execution/task-N-diff.md`) and hands the reviewer the **file path**, not the diff
-text. The reviewer-input list changes "The diff" to the diff file path.
+BASE commit before dispatching the implementer, and after `DONE` writes the diff to
+the run's gitignored scratch dir — `<work-id>/logs/task-N-diff.md`
+(`git diff -U10 <base-commit> HEAD > .req-to-plan/<work-id>/logs/task-N-diff.md`) —
+and hands the reviewer the **file path**, not the diff text. The reviewer-input
+list changes "The diff" to the diff file path. The diff is transient, possibly
+large review scratch, so it goes under `logs/` (ignored by `.req-to-plan/.gitignore`
+via `/*/logs/`), never under the tracked `execution/` path — keeping it out of
+`git status` and immune to an accidental broad `git add` during execution.
 
 #### FR-A3: BASE commit rule
 
@@ -468,6 +472,36 @@ A run already in `EXECUTING` before this change has no `execution/final-review.m
 After upgrade, archiving it requires the agent's final-review step to write the
 marker (the normal path) or `--force` (abandoned/superseded run). No run state is
 mutated by the upgrade itself.
+
+## Interaction with auto-commit-and-archive
+
+The `r2p-execute` skill auto-archives on completion, and `r2p-archive` performs a
+path-scoped git commit. This change is compatible with that flow; the relevant
+facts, verified against code:
+
+- **gitignore boundary** (`.req-to-plan/.gitignore`): `/archive`,
+  `/.workflow-active`, and `/*/logs/` are ignored. The run's `execution/` directory
+  is **tracked**; `<work-id>/logs/` is **ignored**.
+- **The archive commit is path-scoped and post-move.** `commit_requirement_dir`
+  runs `git add -- <.req-to-plan/.gitignore> <run-dir>` (no `-A`, no `-f`) *after*
+  `shutil.move` has already moved the run dir into the gitignored `/archive`. It
+  records the **removal** of the previously-tracked run files; the moved-away
+  `execution/` artifacts are never staged by it.
+- **The marker gate is read-only and pre-commit.** `check_final_review_recorded`
+  only reads `execution/final-review.md` from the working tree, before the move and
+  commit. It adds an archive precondition with zero git interaction.
+- **New `execution/` artifacts are not committed by r2p.** `execution/final-review.md`
+  behaves like the existing `execution/progress.md` and `task-N-report.md`: created
+  during execution, never staged by the per-task code commits (which stage only
+  task files), and moved into the gitignored archive at archive time. No r2p flow
+  runs a path-scoped commit over the run dir between marker-write and the post-move
+  archive commit, so the marker is never committed.
+- **Transient diff scratch lives under `logs/` (FR-A2),** not `execution/`, so it is
+  gitignored and cannot be picked up by any `git add`.
+- **Behavioral note (by design, not a conflict):** a `Verdict: Changes Requested`
+  marker blocks auto-archive until the verdict becomes `Approved` (or `--force`) —
+  the same "stuck if incomplete" property the existing completion gate already has,
+  not a new failure class.
 
 ## Risks
 
