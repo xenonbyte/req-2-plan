@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from tools.workflow_cli.version import R2P_VERSION
+from tools.workflow_cli.atomic import atomic_write_text
 
 
 # ---------------------------------------------------------------------------
@@ -1120,6 +1121,6 @@ def _safe_write(
         backup = _backup_path(backup_dir, dest)
         shutil.copy2(str(dest), str(backup))
         backups.append({"target": str(dest), "backup": str(backup)})
-    dest.write_text(content, encoding="utf-8")
+    atomic_write_text(dest, content)
     installed_paths.append(str(dest))
     written.append(dest)

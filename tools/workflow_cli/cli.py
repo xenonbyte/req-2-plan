@@ -936,9 +936,9 @@ def _cmd_gap_open(args):
         )
         mgr.save(record)
     except Exception as e:
-        run_md_path.write_text(run_md_before, encoding="utf-8")
+        atomic_write_text(run_md_path, run_md_before)
         for _d, _aa, _artifact_file, artifact_path, artifact_before in reversed(affected):
-            artifact_path.write_text(artifact_before, encoding="utf-8")
+            atomic_write_text(artifact_path, artifact_before)
         print_and_exit(
             format_error(
                 f"Cannot gap-open: failed to mark downstream stale atomically ({e})",
