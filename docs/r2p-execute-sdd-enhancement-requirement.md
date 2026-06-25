@@ -14,13 +14,17 @@ plus document the existing cross-stage closure model.
   evidence.
 - **Part B (CLI-side, structural):** add a lightweight `check_final_review_recorded`
   presence gate so a run cannot be archived unless the final whole-branch review
-  verdict is persisted on disk (`execution/final-review.md` carrying
-  `Verdict: Approved`). This enforces the **persistence** of that evidence and
-  closes a real structural hole: today an agent can flip every PLAN-TASK checkbox
-  and archive while silently skipping the final review.
+  verdict is recorded (`execution/final-review.md` carrying `Verdict: Approved`).
+  This makes the recorded verdict an **archive-time precondition** and closes a
+  real structural hole: today an agent can flip every PLAN-TASK checkbox and
+  archive while silently skipping the final review.
 - **Part C (docs-only):** document that cross-stage trace closure is intentionally
   concentrated at the PLAN quality gate, and that stages 04–06 deliberately have
   no forward full-coverage gate.
+- **Part D (adjacent, P2):** three independently-shippable write-safety /
+  transactional-consistency fixes (Context Pack write, install manifest temp,
+  run-reopen rollback), captured at the maintainer's request. Not part of the SDD
+  theme and not a blocker for A–C.
 
 Part B is an **audit-trail completeness** check at the same trust level as the
 existing checkbox cross-check — it is a presence/audit gate, **not** a
@@ -39,7 +43,7 @@ in-place execution on the current branch, and an upstream-defect → reopen/repa
 route. Those divergences are deliberate and are preserved.
 
 What the upstream skills carry and our surfaces lack is **controller
-discipline** and **evidence persistence**:
+discipline** and a **recorded final-review verdict**:
 
 1. **No model-selection guidance.** Every subagent silently inherits the session
    model (often the most capable and most expensive). The upstream skill scales
@@ -60,7 +64,7 @@ discipline** and **evidence persistence**:
 6. **Cross-stage coverage is asked about repeatedly.** The closure model is real
    but undocumented, so it reads as a possible gap.
 
-The transferable mechanism is controller hygiene and persisted audit evidence —
+The transferable mechanism is controller hygiene and a recorded review verdict —
 not a new runtime, not a worktree model, and not CLI-side correctness
 verification.
 
@@ -69,10 +73,12 @@ verification.
 - Reduce controller context bloat and subagent cost during execution
   (file handoffs, explicit model selection).
 - Raise the quality and honesty of per-task and whole-branch completion evidence.
-- Guarantee that an archived executing run leaves the final whole-branch review
-  verdict on disk, so a later false-green can be inspected.
+- Make an approved final whole-branch review verdict an archive-time precondition
+  for executing runs, at the same trust level as the existing PLAN-TASK checkbox
+  cross-check. (No durability or forensic claim: the marker is a working-tree
+  precondition read at archive time, not a shared, committed record.)
 - Keep every change Python-only and dependency-light (stdlib + `pyyaml`).
-- Preserve the CLI/agent boundary: the CLI validates structure and persistence,
+- Preserve the CLI/agent boundary: the CLI validates structure and recorded state,
   the agent produces all semantic content. The CLI never generates artifact prose
   and never verifies correctness.
 - Keep both `r2p-execute` surfaces (claude command + codex skill) byte-for-byte
@@ -99,6 +105,11 @@ verification.
   (execution runs are `closed`; defects go through reopen/human repair).
 - Do **not** change workflow state transitions, artifact schemas, tier semantics,
   or any other gate's rules.
+- Do **not** present the marker gate as a hard correctness barrier. `--force` is
+  its intended operator bypass for abandoned/superseded runs, and fabrication is
+  out of scope (same trust level as the checkbox gate); the gate is an
+  archive-time audit precondition, not a guarantee that the review happened or was
+  correct.
 
 ## Background: Current State (verified against code)
 
@@ -147,14 +158,46 @@ Applies identically to both surfaces, kept in sync:
 All existing required SDD tokens must be preserved and `r2p-gap-open` must not
 appear (guarded by `tests/test_docs_consistency.py`).
 
+Part A is prose-only and must stay terse. Prefer one-line additions over new
+subsections wherever a line suffices, and keep the combined `r2p-execute` surface
+from ballooning — a long rule list dilutes adherence and costs context on every
+load. Treat the upstream 400+ line skill as a source of principles, not a length
+target.
+
 #### FR-A1: Model Selection
 
-Add a `## Model Selection` subsection: dispatch the cheapest capable model for
-mechanical tasks (1–2 files with a complete Skeleton), a standard model for
-integration/judgment tasks, and the most capable available model for the final
-whole-branch review. Always specify the model explicitly when dispatching; an
-omitted model inherits the session default. State the principle "turn count beats
-token price."
+Add a `## Model Selection` subsection that follows the validated wording of the
+`superpowers:subagent-driven-development` "Model Selection" section, adapted only
+to r2p terms. Use the least powerful model that can handle each role:
+
+- **Mechanical implementation** (isolated functions, clear specs, 1–2 files): a
+  fast, cheap model. Most tasks are mechanical when the PLAN is well-specified.
+- **Integration / judgment** (multi-file coordination, pattern matching,
+  debugging): a standard model.
+- **Architecture / design**: the most capable available model. The final
+  whole-branch review is one of these — dispatch it on the most capable model,
+  not the session default.
+- **Review tasks**: the same judgment, scaled to the diff's size, complexity, and
+  risk — a small mechanical diff does not need the most capable model; a subtle
+  concurrency change does.
+
+Always specify the model explicitly when dispatching; an omitted model inherits
+the session model — often the most capable and most expensive — which silently
+defeats this section. **Turn count beats token price:** the cheapest models
+routinely take 2–3× the turns on multi-step work, costing more overall, so use a
+mid-tier model as the floor for reviewers and for implementers working from prose
+descriptions; drop to the cheapest tier only when the task carries the complete
+code to write (transcription plus testing — in r2p, a PLAN-TASK whose `Skeleton`
+is complete code) or for single-file mechanical fixes.
+
+The `## Model Selection` prose is authored in the two full-prose surfaces (the
+claude command and the codex skill) and is inherited by opencode, whose commands
+`install.py` derives from the claude command. The gemini surface is a four-line
+launcher shim (`command = {{R2P_BIN_DIR}}/r2p-execute`) that carries no SDD prose,
+so it is intentionally left unedited. The guidance is actionable wherever a
+runtime's subagent dispatch accepts an explicit model; where it does not, it is
+inert there and is not force-fit — a runtime-capability question, orthogonal to
+which surface carries the prose.
 
 #### FR-A2: Diff and history as files, not inline
 
@@ -290,6 +333,51 @@ full-coverage gate. Update the `r2p-execute` SDD token description in the Test
 rules section to match the new guarded tokens. No hardcoded test count may be
 introduced.
 
+### Part D — Adjacent write-safety & transactional hardening (P2)
+
+These three items are **separate from the SDD theme** and are captured here at the
+maintainer's request. Each is a low-risk consistency fix, independently shippable,
+and **not a blocker** for Parts A–C. All three are verified against current code.
+
+#### FR-D1: Atomic, symlink-checked Context Pack write
+
+`context_pack.py::write_context_pack` writes `02-project-context.json` and
+`02-project-context.md` with plain `Path.write_text` and no symlink check on the
+two targets. `run-start` and `context-build` guard the run directory, but a symlink
+planted at either file inside an existing run dir would be written through
+(`write_text` follows symlinks). Fix: reject when either target `is_symlink()`,
+then write each via `atomic_write_text` (unique temp + `O_EXCL` + `O_NOFOLLOW` +
+`os.replace`), matching the write-safety style used elsewhere. Tests
+(`tests/test_context_pack.py`): a symlink planted at the json or md path is
+rejected (target not written through); a normal build still produces both files.
+
+#### FR-D2: Unique-temp manifest write in install
+
+`install.py` writes the manifest through a fixed sibling temp `manifest.yaml.tmp`,
+validates it is not a symlink (`_validate_install_path`), then `write_text` +
+`replace`. It does not use the unique-temp + `O_EXCL` + `O_NOFOLLOW` pattern, so a
+fixed-name collision (rare — install is not normally concurrent) and a
+check-then-write TOCTOU window remain. Fix: add an install-specific unique-temp
+write helper that preserves the existing install path validation (manifest path and
+parent) but writes through an `O_EXCL` unique temp like `atomic_write_text`; it
+cannot reuse `atomic_write_text` verbatim because install carries its own
+path-validation rules. Low risk, not a blocker. Tests (`tests/test_install.py`):
+the manifest is still written and replaced; a symlink planted at the temp path is
+rejected.
+
+#### FR-D3: Transactional run-reopen from EXECUTING
+
+`cli.py::_cmd_run_reopen` saves the new run (`new_mgr.save`) first, then — for an
+`EXECUTING` source — transitions the source to `CLOSED_AT_PLAN_CHECKPOINT` and saves
+it. If the source save fails, the new run already exists while the source stays
+`EXECUTING` — a partial state. Unlike `_cmd_run_archive`, which rolls back on save
+failure, reopen has no rollback. Fix (either): on source-save failure, remove the
+newly created run; or persist the source transition first and roll the source back
+if the new-run save fails — matching archive's transactional level. Low
+probability, no file-safety breakage. Tests (`tests/test_cli.py`): a simulated
+source-save failure leaves no orphan new run and a consistent source status; a
+normal reopen is unchanged.
+
 ## Marker File Contract
 
 ```text
@@ -315,7 +403,16 @@ Scope:    enforced only when archiving an EXECUTING run without --force
 7. `tests/test_docs_consistency.py` — new guarded tokens.
 8. `CLAUDE.md` — Invariants (Parts B and C) + Test rules token description.
 
-No new file is created for tests; no new module, service, or dependency.
+No new file is created for tests; no new module, service, or dependency. The
+opencode surface needs no edit — `install.py` derives its commands from the claude
+command (1), so it inherits Part A automatically. The gemini `r2p-execute.toml` is
+a four-line launcher shim that carries no SDD prose and is intentionally left
+unedited.
+
+Part D (adjacent, P2) additionally touches `tools/workflow_cli/context_pack.py`,
+`tools/workflow_cli/install.py`, and `tools/workflow_cli/cli.py` (reopen), with
+focused tests in `tests/test_context_pack.py`, `tests/test_install.py`, and
+`tests/test_cli.py`. These can land in a change separate from Parts A–C.
 
 ## Acceptance Criteria
 
@@ -375,22 +472,30 @@ mutated by the upgrade itself.
 ## Risks
 
 - **False confidence.** A presence gate that read as "correctness verified" would
-  regress into the theater this project previously rejected. Mitigated by FR-B4
-  and its executable guard; the gate trust level equals the existing checkbox
-  gate.
-- **Adversarial fabrication.** An agent could write a fake `Verdict: Approved`
-  without doing the review. This is the same trust boundary as fabricated
-  checkboxes and is explicitly out of scope; the gate closes the realistic
-  forgetful/lazy-skip hole, not fabrication.
+  regress into the theater this project previously rejected. Eliminated by FR-B4
+  and its executable guard: every gate message is a presence/audit statement at
+  the same trust level as the existing checkbox gate.
+- **Bypass and trust boundary (by design, not a defect).** `--force` is the
+  intended operator bypass for abandoned/superseded runs, and an agent could write
+  a fake `Verdict: Approved` — the same trust level as fabricated checkboxes. The
+  gate is an archive-time audit precondition, not a hard barrier; it closes the
+  realistic forgetful/lazy skip of the final review, which is its whole and stated
+  purpose.
+- **Enforcement ahead of evidence.** The gate guards a failure mode not yet
+  observed in this project, overriding the recorded "wait for a real false-green"
+  decision. Bounded: the gate is strictly additive and revertible (remove one
+  function plus one wiring line), makes no correctness or durability claim, and
+  adds exactly one archive-time precondition — so the override is low-cost and
+  easy to undo if it proves noisy.
 - **Existing-test breakage.** Adding the gate turns previously-passing
   executing-archive tests red; the test plan updates them in the same change.
 - **Surface drift.** The two `r2p-execute` surfaces can fall out of sync; the
   docs-consistency token guard catches divergence on the guarded tokens.
-- **Honesty guard coverage.** The FR-B4 guard checks a finite pattern set with a
-  small allowlist for required protocol literals and negated disclaimers; a
-  future message could imply correctness with an unlisted phrase. Accepted as low
-  residual risk, mitigated by covering the common affirmative claims and stating
-  intent in `CLAUDE.md`.
+- **Honesty-guard brittleness.** The FR-B4 guard asserts on our own output prose,
+  and the project elsewhere warns that over-asserting exact prose is brittle. Keep
+  it pattern-based and minimal — match affirmative claim phrases only, exempt the
+  exact disclaimer and protocol literals — so it guards intent without pinning
+  full message text.
 
 ## Implementation Boundaries
 
