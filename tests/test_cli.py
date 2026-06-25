@@ -4637,6 +4637,16 @@ class TestPlanTaskBrief:
                 main(["--base-path", str(base), "plan-task-brief", "--work-id", wid, "--task", "0"])
             assert exc.value.code == 2  # EXIT_CLI_ERR
 
+    def test_plan_task_brief_non_integer_task_exits_cli_err(self):
+        """--task abc → EXIT_CLI_ERR (argparse ValueError branch)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            wid = "WF-20260626-abc"
+            self._executing_run_with_plan(base, wid, self._MULTI_TASK_PLAN)
+            with pytest.raises(SystemExit) as exc:
+                main(["--base-path", str(base), "plan-task-brief", "--work-id", wid, "--task", "abc"])
+            assert exc.value.code == 2  # EXIT_CLI_ERR
+
     def test_plan_task_brief_zero_padded_anchor_resolved_by_task_number(self):
         """### PLAN-TASK-002 (zero-padded) resolved by --task 2; payload task_id = 'PLAN-TASK-002'."""
         plan = (
