@@ -20,7 +20,7 @@ Node 18+ is used solely by the thin launcher `bin/r2p.js`, which sets
 .venv/bin/python -m pytest tests/test_cli.py -v   # one module
 .venv/bin/python -m pytest tests/test_cli.py -v -k tier_lock   # one test
 npm run test:local                                # == .venv/bin/python -m pytest
-# CI shape (fresh venv w/ requirements-dev.txt): python -m pytest -q
+# CI shape (fresh venv w/ requirements-dev.txt, Python 3.11 + 3.12 matrix): python -m pytest -q
 
 # Run the workflow CLI directly (no npm/global install needed)
 .venv/bin/python -m tools.workflow_cli --help
@@ -32,6 +32,12 @@ bin/r2p.js version                                # package.json `prepack` runs 
 
 Never use bare `pytest` — it ignores the venv and fails on the missing `pyyaml`
 import. Never `npm install -g` to develop; use the venv paths above.
+
+The local `.venv` is Python 3.10, so a few `tomllib`-dependent tests **skip**
+locally — that is expected, not a failure; they execute on the CI 3.11/3.12
+matrix. `pytest` is the only verification surface: there is **no** linter,
+formatter, or type-checker configured (no ruff/black/mypy/pyproject), so don't
+go looking for one or introduce one without being asked.
 
 ## Architecture (big picture)
 
