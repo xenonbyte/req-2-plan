@@ -1111,6 +1111,90 @@ def check_forced_subagent_review(
 
 
 # ---------------------------------------------------------------------------
+# Final Review Presence Gate
+# ---------------------------------------------------------------------------
+
+_FINAL_REVIEW_DISCLAIMER = (
+    "Presence check on the review audit trail — not a correctness guarantee."
+)
+_SUPPORTED_VERDICTS = {"approved", "changes requested"}
+
+_CANONICAL_NOT_APPROVED_MSG = (
+    "Final whole-branch review not approved: execution/final-review.md is missing, "
+    "or its current (last unfenced) 'Verdict:' line is not 'Approved'. "
+    + _FINAL_REVIEW_DISCLAIMER
+    + " Record 'Verdict: Approved', or re-run with --force to archive an abandoned run."
+)
+
+
+def _fail_gate(msg: str) -> GateResult:
+    return GateResult(passed=False, issues=[msg], exit_code=EXIT_GATE_FAIL)
+
+
+def _current_verdict(text: str) -> str | None:
+    """Return the last unfenced 'Verdict:' value (stripped, lowercased), or None."""
+    value = None
+    for line, _, _ in unfenced_markdown_lines(text):
+        s = line.strip()
+        if s[:8].lower() == "verdict:":
+            value = s[8:].strip().lower()  # last one wins
+    return value
+
+
+def _has_verdict(text: str) -> bool:
+    return _current_verdict(text) is not None
+
+
+def check_final_review_recorded(run_dir: Path) -> GateResult:
+    """Archive precondition: the final whole-branch review verdict is recorded.
+
+    Presence/audit only — never runs code or tests, never asserts the verdict is
+    true. Same trust level as the PLAN-TASK checkbox gate.
+    """
+    marker = run_dir / "execution" / "final-review.md"
+    text, err = _read_regular_text_no_symlink(marker)
+
+    if err == "missing":
+        return _fail_gate(_CANONICAL_NOT_APPROVED_MSG)
+
+    if err == "symlink":
+        return _fail_gate(
+            "execution/final-review.md is a symlink; refusing to read "
+            "outside the run directory. " + _FINAL_REVIEW_DISCLAIMER
+        )
+
+    if err == "not_regular":
+        return _fail_gate(
+            "execution/final-review.md is not a regular file. "
+            + _FINAL_REVIEW_DISCLAIMER
+        )
+
+    assert text is not None
+
+    if not _has_verdict(text):
+        # Case d: regular file, zero unfenced Verdict: lines
+        return _fail_gate(_CANONICAL_NOT_APPROVED_MSG)
+
+    current = _current_verdict(text)  # last unfenced 'Verdict:' value, lowercased
+    assert current is not None  # guarded by _has_verdict above
+
+    if current not in _SUPPORTED_VERDICTS:
+        return _fail_gate(
+            "execution/final-review.md current 'Verdict:' value is unsupported. "
+            + _FINAL_REVIEW_DISCLAIMER
+        )
+
+    if current == "changes requested":
+        return _fail_gate(
+            "Final whole-branch review not approved: current 'Verdict:' is "
+            "'Changes Requested'. " + _FINAL_REVIEW_DISCLAIMER
+        )
+
+    # current == "approved"
+    return GateResult(passed=True, issues=[], exit_code=0)
+
+
+# ---------------------------------------------------------------------------
 # Execution Completion Gate
 # ---------------------------------------------------------------------------
 

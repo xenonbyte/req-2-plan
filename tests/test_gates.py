@@ -2644,5 +2644,224 @@ class TestAmbiguityMarkers(unittest.TestCase):
         )
 
 
+class TestCheckFinalReviewRecorded(unittest.TestCase):
+    """Tests for check_final_review_recorded (SPEC-GATE-001).
+
+    Every test isolates I/O in a tempfile.TemporaryDirectory so it never
+    touches the real ~/.req-to-plan or the repo's .req-to-plan.
+    """
+
+    def setUp(self):
+        from tools.workflow_cli.gates import check_final_review_recorded
+        from tools.workflow_cli.output import EXIT_GATE_FAIL
+        self.check = check_final_review_recorded
+        self.EXIT_GATE_FAIL = EXIT_GATE_FAIL
+
+    def _make_run_dir(self, tmp: str) -> Path:
+        run_dir = Path(tmp)
+        (run_dir / "execution").mkdir(parents=True, exist_ok=True)
+        return run_dir
+
+    def _write_marker(self, run_dir: Path, content: str) -> None:
+        (run_dir / "execution" / "final-review.md").write_text(
+            content, encoding="utf-8"
+        )
+
+    # Case a: missing file → fail
+    def test_missing_marker_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = self._make_run_dir(tmp)
+            result = self.check(run_dir)
+        self.assertFalse(result.passed)
+        self.assertEqual(result.exit_code, self.EXIT_GATE_FAIL)
+        self.assertTrue(len(result.issues) == 1)
+        self.assertIn("not a correctness guarantee", result.issues[0])
+
+    # Case g: approved → pass (exit 0)
+    def test_approved_verdict_passes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = self._make_run_dir(tmp)
+            self._write_marker(run_dir, "# Final Review\n\nVerdict: Approved\n")
+            result = self.check(run_dir)
+        self.assertTrue(result.passed)
+        self.assertEqual(result.exit_code, 0)
+        self.assertEqual(result.issues, [])
+
+    # Case g: approved case-insensitive
+    def test_approved_verdict_case_insensitive_passes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = self._make_run_dir(tmp)
+            self._write_marker(run_dir, "Verdict: APPROVED\n")
+            result = self.check(run_dir)
+        self.assertTrue(result.passed)
+        self.assertEqual(result.exit_code, 0)
+
+    # Case f: changes requested → fail
+    def test_changes_requested_verdict_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = self._make_run_dir(tmp)
+            self._write_marker(run_dir, "# Review\n\nVerdict: Changes Requested\n")
+            result = self.check(run_dir)
+        self.assertFalse(result.passed)
+        self.assertEqual(result.exit_code, self.EXIT_GATE_FAIL)
+        self.assertIn("not a correctness guarantee", result.issues[0])
+
+    # Case e: unsupported value → fail
+    def test_unsupported_verdict_value_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = self._make_run_dir(tmp)
+            self._write_marker(run_dir, "Verdict: Maybe\n")
+            result = self.check(run_dir)
+        self.assertFalse(result.passed)
+        self.assertEqual(result.exit_code, self.EXIT_GATE_FAIL)
+        self.assertIn("not a correctness guarantee", result.issues[0])
+
+    # Case b: symlink → fail
+    def test_symlink_marker_fails(self):
+        import os
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = self._make_run_dir(tmp)
+            # Create a real file elsewhere and symlink to it
+            real_file = Path(tmp) / "elsewhere.md"
+            real_file.write_text("Verdict: Approved\n", encoding="utf-8")
+            (run_dir / "execution" / "final-review.md").symlink_to(real_file)
+            result = self.check(run_dir)
+        self.assertFalse(result.passed)
+        self.assertEqual(result.exit_code, self.EXIT_GATE_FAIL)
+        self.assertIn("not a correctness guarantee", result.issues[0])
+
+    # Case c: FIFO (non-regular file) → fail without blocking
+    def test_fifo_marker_fails_without_blocking(self):
+        import os
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = self._make_run_dir(tmp)
+            fifo_path = run_dir / "execution" / "final-review.md"
+            os.mkfifo(fifo_path)
+            result = self.check(run_dir)
+        self.assertFalse(result.passed)
+        self.assertEqual(result.exit_code, self.EXIT_GATE_FAIL)
+        self.assertIn("not a correctness guarantee", result.issues[0])
+
+    # Case i: Verdict: only inside a code fence → ignored → falls to case d (fail)
+    def test_verdict_inside_code_fence_ignored(self):
+        content = (
+            "# Review\n\n"
+            "```\n"
+            "Verdict: Approved\n"
+            "```\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = self._make_run_dir(tmp)
+            self._write_marker(run_dir, content)
+            result = self.check(run_dir)
+        self.assertFalse(result.passed)
+        self.assertEqual(result.exit_code, self.EXIT_GATE_FAIL)
+        self.assertIn("not a correctness guarantee", result.issues[0])
+
+    # Case h, CR then Approved → last verdict is Approved → pass
+    def test_last_verdict_approved_after_changes_requested_passes(self):
+        content = (
+            "# Review\n\n"
+            "Verdict: Changes Requested\n\n"
+            "Fixed the issues.\n\n"
+            "Verdict: Approved\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = self._make_run_dir(tmp)
+            self._write_marker(run_dir, content)
+            result = self.check(run_dir)
+        self.assertTrue(result.passed)
+        self.assertEqual(result.exit_code, 0)
+
+    # Case h, Approved then CR → last verdict is CR → fail
+    def test_last_verdict_changes_requested_after_approved_fails(self):
+        content = (
+            "# Review\n\n"
+            "Verdict: Approved\n\n"
+            "Actually found more issues.\n\n"
+            "Verdict: Changes Requested\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = self._make_run_dir(tmp)
+            self._write_marker(run_dir, content)
+            result = self.check(run_dir)
+        self.assertFalse(result.passed)
+        self.assertEqual(result.exit_code, self.EXIT_GATE_FAIL)
+        self.assertIn("not a correctness guarantee", result.issues[0])
+
+    # Case d: regular file present but zero unfenced Verdict: lines → fail
+    def test_present_file_no_verdict_line_fails(self):
+        content = "# Final Review\n\nAll looks good.\n"
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = self._make_run_dir(tmp)
+            self._write_marker(run_dir, content)
+            result = self.check(run_dir)
+        self.assertFalse(result.passed)
+        self.assertEqual(result.exit_code, self.EXIT_GATE_FAIL)
+        self.assertIn("not a correctness guarantee", result.issues[0])
+
+    # Canonical missing/not-approved message verbatim check
+    def test_missing_marker_canonical_message(self):
+        """The missing-file failure message must match the canonical SPEC-HONEST-001 text."""
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = self._make_run_dir(tmp)
+            result = self.check(run_dir)
+        msg = result.issues[0]
+        self.assertIn("Final whole-branch review not approved", msg)
+        self.assertIn("execution/final-review.md is missing", msg)
+        self.assertIn("not 'Approved'", msg)
+        self.assertIn("Presence check on the review audit trail", msg)
+        self.assertIn("not a correctness guarantee", msg)
+        self.assertIn("Record 'Verdict: Approved'", msg)
+        self.assertIn("re-run with --force to archive an abandoned run", msg)
+
+    # All failure messages must carry the disclaimer
+    def test_all_failure_paths_carry_disclaimer(self):
+        """Every failure case must carry 'not a correctness guarantee'."""
+        import os
+        cases = {}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = self._make_run_dir(tmp)
+            cases["missing"] = self.check(run_dir)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = self._make_run_dir(tmp)
+            self._write_marker(run_dir, "# Review\n\nVerdict: Changes Requested\n")
+            cases["changes_requested"] = self.check(run_dir)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = self._make_run_dir(tmp)
+            self._write_marker(run_dir, "Verdict: Maybe\n")
+            cases["unsupported"] = self.check(run_dir)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = self._make_run_dir(tmp)
+            real_file = Path(tmp) / "real.md"
+            real_file.write_text("Verdict: Approved\n", encoding="utf-8")
+            (run_dir / "execution" / "final-review.md").symlink_to(real_file)
+            cases["symlink"] = self.check(run_dir)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = self._make_run_dir(tmp)
+            fifo_path = run_dir / "execution" / "final-review.md"
+            os.mkfifo(fifo_path)
+            cases["fifo"] = self.check(run_dir)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = self._make_run_dir(tmp)
+            self._write_marker(run_dir, "# Review\n\nAll looks good.\n")
+            cases["no_verdict"] = self.check(run_dir)
+
+        for name, result in cases.items():
+            with self.subTest(case=name):
+                self.assertFalse(result.passed)
+                self.assertEqual(result.exit_code, self.EXIT_GATE_FAIL)
+                self.assertTrue(
+                    any("not a correctness guarantee" in issue for issue in result.issues),
+                    f"case {name!r}: 'not a correctness guarantee' missing in {result.issues}",
+                )
+
+
 if __name__ == "__main__":
     unittest.main()
