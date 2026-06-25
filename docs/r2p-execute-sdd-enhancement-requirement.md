@@ -246,11 +246,13 @@ The final whole-branch review must:
 3. dispatch **one** fix subagent carrying the complete findings list, not one
    fixer per finding;
 4. run on the most capable available model (cross-reference FR-A1);
-5. once the review is clean, write `execution/final-review.md` recording the
-   reviewed range, a `Verdict: Approved` line (or `Verdict: Changes Requested`
-   while findings remain), and a one-line summary; and note that `r2p-archive`
-   refuses to archive an executing run without this file carrying
-   `Verdict: Approved` (Part B).
+5. after the final review settles, write `execution/final-review.md` recording the
+   reviewed range, a one-line summary, and the verdict — `Verdict: Approved` when
+   the review is clean, `Verdict: Changes Requested` while findings remain; after a
+   fix wave clears the findings, append `Verdict: Approved` as the final unfenced
+   verdict (the gate reads the last one, FR-B1). Note that `r2p-archive` refuses to
+   archive an executing run unless this file's current verdict is `Verdict: Approved`
+   (Part B).
 
 ### Part B — Final-review marker gate (CLI-side)
 
