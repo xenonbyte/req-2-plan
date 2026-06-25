@@ -4,6 +4,7 @@ Tests for tools/workflow_cli/cli.py — CLI command router.
 from __future__ import annotations
 
 import json
+import re
 import tempfile
 import os
 from pathlib import Path
@@ -3849,12 +3850,13 @@ class TestRunArchiveFromExecuting:
         from tools.workflow_cli.state import RunStateManager
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
-            self._executing_run(
+            run_dir = self._executing_run(
                 base,
                 "WF-20260101-exec",
                 self._COMPLETE_LEDGER,
                 plan=self._TWO_TASK_PLAN,
             )
+            _seed_approved_final_review(run_dir)
             with pytest.raises(SystemExit) as exc:
                 main(["--base-path", str(base), "run-archive", "--work-id", "WF-20260101-exec"])
             assert exc.value.code == 0
@@ -4031,12 +4033,13 @@ class TestRunArchiveFromExecuting:
         ledger = "# Execution Progress\n\nwork_id: WF-20260101-exec\n\n- [x] PLAN-TASK-001 real task\n"
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
-            self._executing_run(
+            run_dir = self._executing_run(
                 base,
                 "WF-20260101-exec",
                 ledger,
                 plan=self._PLAN_WITH_READONLY_PHANTOM_TASK,
             )
+            _seed_approved_final_review(run_dir)
             with pytest.raises(SystemExit) as exc:
                 main(["--base-path", str(base), "run-archive", "--work-id", "WF-20260101-exec"])
             assert exc.value.code == 0
@@ -4049,8 +4052,339 @@ class TestRunArchiveFromExecuting:
         )
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
-            self._executing_run(base, "WF-20260101-exec", ledger, plan=self._TWO_TASK_PLAN)
+            run_dir = self._executing_run(base, "WF-20260101-exec", ledger, plan=self._TWO_TASK_PLAN)
+            _seed_approved_final_review(run_dir)
             with pytest.raises(SystemExit) as exc:
                 main(["--base-path", str(base), "run-archive", "--work-id", "WF-20260101-exec"])
             assert exc.value.code == 0
             assert (base / ".req-to-plan" / "archive" / "WF-20260101-exec" / "run.md").exists()
+
+
+# ---------------------------------------------------------------------------
+# Honesty-guard helper (SPEC-HONEST-001) — phrase/pattern-based, NOT substring.
+# ---------------------------------------------------------------------------
+
+_HONESTY_DENY = [
+    re.compile(r"\bverified\b", re.I),
+    re.compile(r"\bvalidated\b", re.I),
+    re.compile(r"\bguaranteed\s+correct\b", re.I),
+    re.compile(r"\bcorrect(?:ness)?\s+is\s+guaranteed\b", re.I),
+    re.compile(r"\bproven\s+correct\b", re.I),
+    re.compile(r"\breview\s+approved\b", re.I),  # ADJACENT words: \s+ whitespace-only
+    # "review not approved" (canonical msg) does NOT match — the \s+ gap is
+    # whitespace only, so "not " in between breaks the match.
+]
+
+
+def _is_honest(message: str) -> bool:
+    """Return True iff message contains none of the affirmative-claim patterns."""
+    return not any(p.search(message) for p in _HONESTY_DENY)
+
+
+def _seed_approved_final_review(run_dir):
+    """Seed execution/final-review.md with 'Verdict: Approved' in run_dir."""
+    exec_dir = run_dir / "execution"
+    exec_dir.mkdir(parents=True, exist_ok=True)
+    (exec_dir / "final-review.md").write_text(
+        "# Final Review\n\nVerdict: Approved\n", encoding="utf-8"
+    )
+
+
+# ---------------------------------------------------------------------------
+# New tests: SPEC-ARCHIVE-001, SPEC-SEED-001, SPEC-HONEST-001
+# ---------------------------------------------------------------------------
+
+class TestFinalReviewGateInArchive:
+    """SPEC-ARCHIVE-001: archive wires check_final_review_recorded after completion gate."""
+
+    _COMPLETE_LEDGER = (
+        "# Execution Progress\n\nwork_id: WF-20260101-exec\n\n"
+        "- [x] PLAN-TASK-001 first task\n- [x] PLAN-TASK-002 second task\n"
+    )
+    _TWO_TASK_PLAN = (
+        "# Plan\n\n## Tasks\n"
+        "### PLAN-TASK-001: first task\nFiles:\n- a.py\n"
+        "### PLAN-TASK-002: second task\nFiles:\n- b.py\n"
+    )
+
+    def _executing_run(self, base, wid_str, ledger, plan=None):
+        from tools.workflow_cli.state import RunStateManager, create_run_record
+        from tools.workflow_cli.models import RunStatus, Stage, WorkId
+        wid = WorkId(wid_str)
+        run_dir = base / ".req-to-plan" / wid_str
+        run_dir.mkdir(parents=True)
+        rec = create_run_record(wid)
+        rec.status = RunStatus.EXECUTING
+        rec.current_stage = Stage.CLOSED
+        RunStateManager(run_dir).save(rec)
+        if plan is not None:
+            from tools.workflow_cli.artifact import write_artifact
+            write_artifact(run_dir, Stage.PLAN, plan, version=1, status="approved")
+        if ledger is not None:
+            exec_dir = run_dir / "execution"
+            exec_dir.mkdir(parents=True, exist_ok=True)
+            (exec_dir / "progress.md").write_text(ledger, encoding="utf-8")
+        return run_dir
+
+    def test_executing_with_complete_ledger_no_marker_is_rejected(self, capsys):
+        """EXECUTING + complete ledger + NO final-review.md → exit 3, run stays EXECUTING."""
+        from tools.workflow_cli.state import RunStateManager
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            run_dir = self._executing_run(
+                base, "WF-20260101-exec", self._COMPLETE_LEDGER, plan=self._TWO_TASK_PLAN
+            )
+            # No final-review.md seeded
+            with pytest.raises(SystemExit) as exc:
+                main(["--base-path", str(base), "run-archive", "--work-id", "WF-20260101-exec"])
+            assert exc.value.code == 3  # EXIT_GATE_FAIL
+            assert run_dir.exists()  # run dir was NOT moved
+            assert not (base / ".req-to-plan" / "archive" / "WF-20260101-exec").exists()
+            assert RunStateManager(run_dir).load().status.value == "executing"
+
+    def test_executing_with_complete_ledger_and_approved_marker_succeeds(self):
+        """EXECUTING + complete ledger + approved marker → archive succeeds."""
+        from tools.workflow_cli.state import RunStateManager
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            run_dir = self._executing_run(
+                base, "WF-20260101-exec", self._COMPLETE_LEDGER, plan=self._TWO_TASK_PLAN
+            )
+            _seed_approved_final_review(run_dir)
+            with pytest.raises(SystemExit) as exc:
+                main(["--base-path", str(base), "run-archive", "--work-id", "WF-20260101-exec"])
+            assert exc.value.code == 0
+            archive_run = base / ".req-to-plan" / "archive" / "WF-20260101-exec"
+            assert archive_run.exists()
+            assert RunStateManager(archive_run).load().status.value == "archived"
+
+    def test_executing_force_bypasses_both_gates(self):
+        """EXECUTING + --force → bypasses completion AND final-review gate."""
+        # Incomplete ledger + no marker — force must still archive.
+        incomplete_ledger = (
+            "# Execution Progress\n\nwork_id: WF-20260101-exec\n\n"
+            "- [ ] PLAN-TASK-001 first task\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            self._executing_run(
+                base, "WF-20260101-exec", incomplete_ledger, plan=self._TWO_TASK_PLAN
+            )
+            # No final-review.md seeded
+            with pytest.raises(SystemExit) as exc:
+                main([
+                    "--base-path", str(base), "run-archive",
+                    "--work-id", "WF-20260101-exec", "--force",
+                ])
+            assert exc.value.code == 0
+            assert (base / ".req-to-plan" / "archive" / "WF-20260101-exec" / "run.md").exists()
+
+    def test_closed_at_plan_checkpoint_archive_no_marker_required(self):
+        """CLOSED_AT_PLAN_CHECKPOINT archive never reaches the gate; no marker needed."""
+        from tools.workflow_cli.state import RunStateManager, create_run_record
+        from tools.workflow_cli.models import RunStatus, Stage, WorkId
+        from tools.workflow_cli.artifact import write_artifact
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            wid = WorkId("WF-20260101-exec")
+            run_dir = base / ".req-to-plan" / "WF-20260101-exec"
+            run_dir.mkdir(parents=True)
+            rec = create_run_record(wid)
+            rec.status = RunStatus.CLOSED_AT_PLAN_CHECKPOINT
+            rec.current_stage = Stage.CLOSED
+            RunStateManager(run_dir).save(rec)
+            # No execution/ subdir at all
+            with pytest.raises(SystemExit) as exc:
+                main(["--base-path", str(base), "run-archive", "--work-id", "WF-20260101-exec"])
+            assert exc.value.code == 0
+            archive_run = base / ".req-to-plan" / "archive" / "WF-20260101-exec"
+            assert archive_run.exists()
+            assert RunStateManager(archive_run).load().status.value == "archived"
+
+
+class TestExecuteStartDoesNotSeedFinalReview:
+    """SPEC-SEED-001: run-execute-start must NOT create execution/final-review.md."""
+
+    def _closed_run_with_plan(self, base, wid_str, plan_body):
+        from tools.workflow_cli.state import RunStateManager, create_run_record
+        from tools.workflow_cli.models import RunStatus, Stage, WorkId
+        from tools.workflow_cli.artifact import write_artifact
+        wid = WorkId(wid_str)
+        run_dir = base / ".req-to-plan" / wid_str
+        run_dir.mkdir(parents=True)
+        rec = create_run_record(wid)
+        rec.status = RunStatus.CLOSED_AT_PLAN_CHECKPOINT
+        rec.current_stage = Stage.CLOSED
+        write_artifact(run_dir, Stage.PLAN, plan_body, version=1, status="approved")
+        RunStateManager(run_dir).save(rec)
+        return run_dir
+
+    def test_execute_start_does_not_create_final_review_marker(self):
+        """After run-execute-start, execution/final-review.md must NOT exist."""
+        plan = (
+            "# Plan\n\n## Tasks\n"
+            "### PLAN-TASK-001: first task\nFiles:\n- a.py\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            run_dir = self._closed_run_with_plan(base, "WF-20260101-exec", plan)
+            with pytest.raises(SystemExit) as exc:
+                main(["--base-path", str(base), "run-execute-start", "--work-id", "WF-20260101-exec"])
+            assert exc.value.code == 0
+            # progress.md must be created (sanity check the command ran)
+            assert (run_dir / "execution" / "progress.md").exists()
+            # final-review.md must NOT be seeded
+            assert not (run_dir / "execution" / "final-review.md").exists()
+
+
+class TestHonestyGuard:
+    """SPEC-HONEST-001: phrase/pattern honesty guard — not a substring match."""
+
+    # ------------------------------------------------------------------
+    # DENY: affirmative-claim patterns must be flagged as dishonest
+    # ------------------------------------------------------------------
+    def test_deny_verified(self):
+        assert not _is_honest("the result was verified"), "should be dishonest"
+
+    def test_deny_validated(self):
+        assert not _is_honest("output validated by tests"), "should be dishonest"
+
+    def test_deny_guaranteed_correct(self):
+        assert not _is_honest("guaranteed correct"), "should be dishonest"
+
+    def test_deny_review_approved_adjacent(self):
+        assert not _is_honest("review approved"), "should be dishonest"
+
+    def test_deny_proven_correct(self):
+        assert not _is_honest("proven correct"), "should be dishonest"
+
+    def test_deny_correctness_is_guaranteed(self):
+        assert not _is_honest("correctness is guaranteed"), "should be dishonest"
+
+    # ------------------------------------------------------------------
+    # ALLOW literals: canonical disclaimer + protocol literal must NOT trip guard
+    # ------------------------------------------------------------------
+    def test_allow_not_a_correctness_guarantee(self):
+        assert _is_honest("not a correctness guarantee"), "must be honest"
+
+    def test_allow_verdict_approved(self):
+        assert _is_honest("Verdict: Approved"), "must be honest"
+
+    def test_allow_canonical_not_approved_msg(self):
+        # The verbatim canonical message from gates.py must pass
+        msg = (
+            "Final whole-branch review not approved: execution/final-review.md is "
+            "missing, or its current (last unfenced) 'Verdict:' line is not "
+            "'Approved'. Presence check on the review audit trail — not a correctness "
+            "guarantee. Record 'Verdict: Approved', or re-run with --force to archive "
+            "an abandoned run."
+        )
+        assert _is_honest(msg), "canonical not-approved msg must be honest"
+
+    def test_allow_not_a_correctness_guarantee_phrase(self):
+        assert _is_honest("not a correctness guarantee"), "must be honest"
+
+    def test_allow_review_not_approved(self):
+        # "review not approved" must NOT trip the \breview\s+approved\b guard
+        assert _is_honest("Final whole-branch review not approved"), "must be honest"
+
+    def test_allow_arbitrary_honest_string(self):
+        assert _is_honest("Presence check on the review audit trail"), "must be honest"
+
+    # ------------------------------------------------------------------
+    # ALLOW coverage: every mode-specific gate failure message must be honest
+    # ------------------------------------------------------------------
+    def test_gate_messages_are_honest(self):
+        """Every failure message from check_final_review_recorded must pass _is_honest."""
+        from tools.workflow_cli.gates import check_final_review_recorded
+        import stat
+
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "run"
+            run_dir.mkdir()
+            exec_dir = run_dir / "execution"
+            exec_dir.mkdir()
+
+            # Case a: missing file
+            gate = check_final_review_recorded(run_dir)
+            assert not gate.passed
+            for msg in gate.issues:
+                assert _is_honest(msg), f"missing-file msg not honest: {msg!r}"
+
+            # Case d: file exists but no Verdict: line
+            marker = exec_dir / "final-review.md"
+            marker.write_text("# Review\n\nsome content\n", encoding="utf-8")
+            gate = check_final_review_recorded(run_dir)
+            assert not gate.passed
+            for msg in gate.issues:
+                assert _is_honest(msg), f"no-verdict msg not honest: {msg!r}"
+
+            # Case e: unsupported verdict value
+            marker.write_text("Verdict: Maybe\n", encoding="utf-8")
+            gate = check_final_review_recorded(run_dir)
+            assert not gate.passed
+            for msg in gate.issues:
+                assert _is_honest(msg), f"unsupported-verdict msg not honest: {msg!r}"
+
+            # Case f: changes requested
+            marker.write_text("Verdict: Changes Requested\n", encoding="utf-8")
+            gate = check_final_review_recorded(run_dir)
+            assert not gate.passed
+            for msg in gate.issues:
+                assert _is_honest(msg), f"changes-requested msg not honest: {msg!r}"
+
+            # Case b: symlink
+            marker.unlink()
+            outside = Path(tmp) / "outside.md"
+            outside.write_text("Verdict: Approved\n", encoding="utf-8")
+            marker.symlink_to(outside)
+            gate = check_final_review_recorded(run_dir)
+            assert not gate.passed
+            for msg in gate.issues:
+                assert _is_honest(msg), f"symlink msg not honest: {msg!r}"
+
+    @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="mkfifo unavailable")
+    def test_non_regular_file_gate_message_is_honest(self):
+        """Case c: not-a-regular-file message must pass _is_honest."""
+        from tools.workflow_cli.gates import check_final_review_recorded
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "run"
+            exec_dir = run_dir / "execution"
+            exec_dir.mkdir(parents=True)
+            os.mkfifo(exec_dir / "final-review.md")
+            gate = check_final_review_recorded(run_dir)
+            assert not gate.passed
+            for msg in gate.issues:
+                assert _is_honest(msg), f"non-regular msg not honest: {msg!r}"
+
+    def test_archive_success_output_is_honest(self, capsys):
+        """Archive success payload must be honest (no affirmative correctness wording)."""
+        from tools.workflow_cli.state import RunStateManager, create_run_record
+        from tools.workflow_cli.models import RunStatus, Stage, WorkId
+        from tools.workflow_cli.artifact import write_artifact
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            wid = WorkId("WF-20260101-exec")
+            run_dir = base / ".req-to-plan" / "WF-20260101-exec"
+            run_dir.mkdir(parents=True)
+            rec = create_run_record(wid)
+            rec.status = RunStatus.EXECUTING
+            rec.current_stage = Stage.CLOSED
+            RunStateManager(run_dir).save(rec)
+            plan = (
+                "# Plan\n\n## Tasks\n"
+                "### PLAN-TASK-001: first task\nFiles:\n- a.py\n"
+            )
+            write_artifact(run_dir, Stage.PLAN, plan, version=1, status="approved")
+            exec_dir = run_dir / "execution"
+            exec_dir.mkdir(parents=True, exist_ok=True)
+            (exec_dir / "progress.md").write_text(
+                "# Execution Progress\n\nwork_id: WF-20260101-exec\n\n"
+                "- [x] PLAN-TASK-001 first task\n",
+                encoding="utf-8",
+            )
+            _seed_approved_final_review(run_dir)
+            with pytest.raises(SystemExit):
+                main(["--base-path", str(base), "run-archive", "--work-id", "WF-20260101-exec"])
+            out = capsys.readouterr().out
+            assert _is_honest(out), f"archive success output not honest: {out!r}"

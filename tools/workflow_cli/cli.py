@@ -47,6 +47,7 @@ from tools.workflow_cli.gates import (
     check_quality_gate,
     check_forced_subagent_review,
     check_execution_complete,
+    check_final_review_recorded,
 )
 from tools.workflow_cli.output import (
     COMPACT_DETAIL_LIMIT,
@@ -655,6 +656,17 @@ def _cmd_run_archive(args):
                     exit_code=gate.exit_code,
                 ),
                 gate.exit_code,
+            )
+        # 0b. Final-review gate: the whole-branch review verdict must be recorded.
+        # --force bypasses (abandoned/superseded run already skips this block).
+        review_gate = check_final_review_recorded(run_dir)
+        if not review_gate.passed:
+            print_and_exit(
+                format_error(
+                    " ".join(review_gate.issues),
+                    exit_code=review_gate.exit_code,
+                ),
+                review_gate.exit_code,
             )
     # 1. Refuse to clobber an existing archived copy before mutating state.
     archive_dir = base / ".req-to-plan" / "archive" / str(record.work_id)
