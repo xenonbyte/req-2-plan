@@ -38,7 +38,7 @@ AI agent 执行很快，但模糊需求容易变成含糊计划、隐藏范围�
 - **支持 4 个平台**：为 Claude Code（`claude`）、Codex（`codex`）、Gemini（`gemini`）、opencode（`opencode`）安装匹配入口。
 - **单一生命周期 CLI**：`r2p install`、`r2p uninstall`、`r2p status`、`r2p version`、`r2p help`。
 - **Manifest-backed 安装安全**：覆盖前备份已存在文件，卸载只删除受管路径。
-- **Project Context Pack**：`--repo-path` 捕获真实仓库事实，用于 tier 估算和 PLAN 校验。
+- **Project Context Pack**：以真实仓库事实（默认当前目录，或用 `--repo-path <dir>`）支撑 tier 估算和 PLAN 校验。
 - **修复路径**：可重开 closed run、路由上游缺口，并关闭已修复的决策路线。
 - **执行交接**：`r2p-execute` 可以把获批 PLAN 接入当前分支上的实现循环。
 
@@ -101,18 +101,18 @@ r2p install --platform claude,codex,gemini,opencode
 安装平台 skill 后，在 agent 里启动一次工作流：
 
 ```text
-/r2p-start --repo-path . "Add rate limiting"
+/r2p-start "Add rate limiting"
 /r2p-continue
 ```
 
 也可以从需求文件启动，而不是传内联文本：
 
 ```text
-/r2p-start --repo-path . --file change-req.md
+/r2p-start --file change-req.md
 ```
 
-只要需求以代码仓库为上下文，就传 `--repo-path`。当前仓库传 `.`，跨项目需求传目标仓库路径。
-这会构建 Project Context Pack，供 tier 估算和 PLAN 引用校验使用。
+tier 估算和 Project Context Pack 默认以当前目录为基准。传 `--repo-path <dir>`
+可改为以另一个仓库为基准——例如跨项目需求里的目标仓库。
 
 工作流会在需要人或 agent 动作时停下：锁定 tier、填写 artifact、修复 quality gate、
 批准 checkpoint、执行 subagent review，或解决 gap。按输出里的 `next:` 命令执行，

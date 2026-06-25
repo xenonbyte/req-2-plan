@@ -43,7 +43,7 @@ important behavior, or when you want a durable handoff between agents.
 - **Four supported platforms**: installs matching surfaces for Claude Code (`claude`), Codex (`codex`), Gemini (`gemini`), and opencode (`opencode`).
 - **One lifecycle CLI**: `r2p install`, `r2p uninstall`, `r2p status`, `r2p version`, and `r2p help`.
 - **Manifest-backed install safety**: pre-existing files are backed up, and uninstall removes only managed paths.
-- **Project Context Pack**: `--repo-path` captures real repository facts for tiering and PLAN checks.
+- **Project Context Pack**: real repository facts (the current directory by default, or `--repo-path <dir>`) ground tiering and PLAN checks.
 - **Repair paths**: reopen closed runs, route upstream gaps, and resolve repaired decisions.
 - **Execution handoff**: `r2p-execute` can drive an approved PLAN through an in-place implementation loop.
 
@@ -109,20 +109,19 @@ r2p install --platform claude,codex,gemini,opencode
 Install the platform skills, then start a workflow from your agent:
 
 ```text
-/r2p-start --repo-path . "Add rate limiting"
+/r2p-start "Add rate limiting"
 /r2p-continue
 ```
 
 Start from a requirement file instead of inline text:
 
 ```text
-/r2p-start --repo-path . --file change-req.md
+/r2p-start --file change-req.md
 ```
 
-For repositories used as requirement context, pass `--repo-path`. Use `.` for the
-current repository or a path to the target repository for cross-project work.
-This builds the Project Context Pack used by tier estimation and PLAN reference
-checks.
+Tier estimation and the Project Context Pack are grounded in the current
+directory by default. Pass `--repo-path <dir>` to ground them in a different
+repository instead - for example, a target repository for cross-project work.
 
 The workflow stops whenever it needs a human or agent action: tier lock,
 artifact content, quality-gate repair, checkpoint approval, subagent review, or
