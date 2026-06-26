@@ -232,6 +232,36 @@ class TestExecuteTemplateContent(unittest.TestCase):
                     missing.append(f"{rel}:{tok}")
         self.assertEqual(missing, [], f"missing reviewer finding handoff contract: {missing}")
 
+    def test_execute_surfaces_do_not_require_generated_outputs_in_subagent_preflight(self):
+        surfaces = [
+            "tools/workflow_cli/agent_templates/claude/commands/r2p-execute.md",
+            "tools/workflow_cli/agent_templates/codex/skills/r2p-execute/SKILL.md",
+        ]
+        required = (
+            "Input paths must already exist and be readable",
+            "Output paths do not need to exist at preflight",
+            "treat generated output paths as destination paths",
+            "Their parent directories must resolve under the same `run_dir` / `work_id`",
+            "`execution/task-N-report.md`",
+            "`execution/task-N-review.md`",
+        )
+        forbidden = (
+            "Every Authoritative Context Set path, brief path, ledger path, review path, and diff path exists and is readable",
+        )
+        missing = []
+        offenders = []
+        for rel in surfaces:
+            text = (REPO_ROOT / rel).read_text(encoding="utf-8")
+            section = _get_role_section(text, "### Path Delivery and Fail-Closed Preflight")
+            for tok in required:
+                if tok not in section:
+                    missing.append(f"{rel}:{tok}")
+            for tok in forbidden:
+                if tok in section:
+                    offenders.append(f"{rel}:{tok}")
+        self.assertEqual(missing, [], f"missing generated-output preflight split: {missing}")
+        self.assertEqual(offenders, [], f"subagent preflight still requires generated outputs: {offenders}")
+
     def test_execute_surfaces_return_inline_status_summary_fields(self):
         surfaces = [
             "tools/workflow_cli/agent_templates/claude/commands/r2p-execute.md",

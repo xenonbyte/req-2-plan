@@ -96,10 +96,11 @@ Default position/ownership derives from the ledger's `PLAN-TASK-NNN <title>` lis
 ### Path Delivery and Fail-Closed Preflight
 
 The controller derives `run_dir = parent(plan)` from the execute output and hands absolute paths by default, or repository-root-relative paths paired with an explicit `repo_root`. Each subagent runs a preflight before acting:
-1. Every Authoritative Context Set path, brief path, ledger path, review path, and diff path exists and is readable.
-2. Every handed path resolves under the same `run_dir` / `work_id`.
-3. Any repo-root-relative path was resolved against the handed `repo_root`, not the process cwd.
-4. If any path is missing, unreadable, unresolved, or wired to a different run → `BLOCKED` — no silent continue on a partial/mixed set.
+1. Input paths must already exist and be readable. For each role, inputs include the Authoritative Context Set paths, the task brief path, the ledger path, and any handed report/review/diff path the subagent is meant to consume.
+2. Output paths do not need to exist at preflight. For each role, treat generated output paths as destination paths: implementer `execution/task-N-report.md`, task-reviewer `execution/task-N-review.md`, and final reviewer `execution/final-review-report.md`. Their parent directories must resolve under the same `run_dir` / `work_id` and be writable before the subagent writes.
+3. Every handed path resolves under the same `run_dir` / `work_id`.
+4. Any repo-root-relative path was resolved against the handed `repo_root`, not the process cwd.
+5. If any input path is missing or unreadable, any output parent is missing or unwritable, or any path is unresolved or wired to a different run → `BLOCKED` — no silent continue on a partial/mixed set.
 
 ## Per-Task Loop
 
