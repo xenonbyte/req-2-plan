@@ -12,3 +12,4 @@ venv/
 .codegraph
 .cursor
 .pytest_cache
+node_modules/
