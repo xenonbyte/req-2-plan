@@ -131,6 +131,20 @@ shared) and is intentionally left as-is.
 - **No change to the trust/audit model.** No receipt-based verification, no
   machine assertion that a marker is true. (Consistent with the deliberate
   rejection recorded in the `r2p-execution-gate-boundary` decision.)
+- **No per-task BASE durability hardening (disclosed residual).** Only the Task 1
+  BASE (`Execution BASE:`) is persisted to `execution/progress.md`; each later
+  task's BASE lives in the controller's context plus the implementer's returned
+  `commit_range` and the completion-ledger `Task N: complete (commits …)` line.
+  A mid-task resume can therefore recompute an empty/wrong *per-task* diff, but
+  the whole-branch final review (over the persisted Task 1 BASE) is the backstop,
+  so per-task BASE loss degrades only the cheaper per-task review and never
+  reaches the merge gate. Deliberately deferred — consistent with the project's
+  anti-over-defense stance; revisit only on a real mid-task-resume failure.
+- **No PLAN content-hash integrity binding (disclosed residual).**
+  `run-execute-start` and `plan-task-brief` each re-read `07-plan.md` live; the
+  PLAN is "frozen" by process discipline, not a content hash. A machine hash
+  check would be exactly the kind of assertion the trust/audit model above
+  rejects, so it is out of scope.
 
 ## Background: Current State (verified against code)
 
