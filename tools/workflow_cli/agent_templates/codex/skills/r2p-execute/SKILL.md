@@ -43,7 +43,7 @@ Use the least powerful model that can handle each role:
 
 ## Controller Narration Discipline
 
-Between tool calls, the controller narrates at most one short line. Use the prefix `Narration:` for these inter-call notes (e.g. `Narration: implementer returned DONE, writing diff`). Never paste a subagent's returned text — report body, diff content, or review findings — into a later dispatch; what the controller restates into its own context is bounded to `status`, `report_path` or diff path, `commit_range`, `test_summary`, and `concerns`.
+Between tool calls, the controller narrates at most one short line. Use the prefix `Narration:` for these inter-call notes (e.g. `Narration: implementer returned DONE, writing diff`). Never paste a subagent's returned text — report body, diff content, or review findings — into a later dispatch; reviewer findings move through `review_report_path`, not pasted text. What the controller restates into its own context is bounded to `status`, `report_path` or diff path, `review_report_path`, `commit_range`, `test_summary`, and `concerns`.
 
 ## Per-Task Loop
 
@@ -98,16 +98,23 @@ After the implementer reports DONE:
    - The `brief_path` returned by `r2p-task-brief` (not pasted task text). The reviewer reads `Spec References` from the task brief. Do not pass separate `Spec References`.
    - The implementer report file path (`execution/task-N-report.md`)
    - The diff file path (`.req-to-plan/<work-id>/logs/task-N-diff.md`)
+   - A review report file path (`execution/task-N-review.md`)
    - Global constraints from the plan (copy verbatim from `## Global Constraints`); never pre-judge a finding's severity; never paste prior-task summaries into a later dispatch
 
-The task-reviewer returns:
+The task-reviewer writes detailed findings, if any, to `execution/task-N-review.md` and returns only this inline summary:
+- `status`: APPROVED / CHANGES_REQUESTED / NEEDS_CONTEXT / BLOCKED
+- `review_report_path`: the review report file path
+- `test_summary`: one-line test summary, or `not run: <reason>`
+- `concerns`: `none` or a concise list of decision-relevant concerns, missing context, or blockers
+
+The review report records:
 - **Spec compliance**: checked against the task brief's `Spec References` and `Verification`
 - **Code quality**: clean, tested, maintainable
 - **⚠️ DEFER items**: explicit `cannot verify from diff` warnings for requirements satisfied by unchanged code, by sibling task work, or by evidence outside the task diff
 
 ### 6. Fix loop
 
-- Dispatch fix subagents for Critical and Important findings
+- Dispatch fix subagents for Critical and Important findings. Pass the `review_report_path` to the fix subagent with the instruction: Fix all Critical and Important findings in the review report. Do not paste the finding bodies into the dispatch.
 - Re-dispatch the task-reviewer after each fix wave
 - Before flipping the checkbox, adjudicate each reviewer "cannot verify from diff" warning by recording one line per finding in `execution/progress.md`:
   - `Resolved: <finding>` — clears the warning; a `Resolved:` claim about unchanged code must cite implementation and test evidence
@@ -125,9 +132,10 @@ After all tasks complete, dispatch a final whole-branch review subagent on the *
 - First create the whole-branch diff: `mkdir -p .req-to-plan/<work-id>/logs` then `git diff -U10 <execution-base-commit> HEAD > .req-to-plan/<work-id>/logs/final-diff.md`
 - Scope: review the complete execution range `git diff -U10 <execution-base-commit> HEAD`, where `<execution-base-commit>` is the Task 1 BASE captured before dispatching the first implementer
 - Include the diff file path (`.req-to-plan/<work-id>/logs/final-diff.md`) in the reviewer dispatch; do not ask the reviewer to infer the changed range
+- Provide a final review report path (`execution/final-review-report.md`) and require detailed findings there
 - **re-run the full verification suite** on the final HEAD and attach the fresh output (per-task greens do not catch cross-task regressions)
 - Walk the PLAN task-by-task as a line-by-line requirements checklist; report any gap
-- Dispatch ONE fix subagent carrying the complete findings list (not one fixer per finding)
+- Dispatch ONE fix subagent carrying the complete findings list by passing `execution/final-review-report.md`, not pasted findings (not one fixer per finding)
 - This whole-branch review is the merge gate
 
 After the review settles, write `execution/final-review.md` recording the reviewed range, a one-line summary, and the verdict:

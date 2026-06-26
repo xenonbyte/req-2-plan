@@ -193,6 +193,25 @@ class TestExecuteTemplateContent(unittest.TestCase):
         self.assertEqual(missing, [], f"missing reviewer defer contract tokens: {missing}")
         self.assertEqual(offenders, [], f"stale reviewer handoff contract remains: {offenders}")
 
+    def test_execute_surfaces_route_reviewer_findings_through_report_paths(self):
+        surfaces = [
+            "tools/workflow_cli/agent_templates/claude/commands/r2p-execute.md",
+            "tools/workflow_cli/agent_templates/codex/skills/r2p-execute/SKILL.md",
+        ]
+        required = (
+            "A review report file path (`execution/task-N-review.md`)",
+            "`review_report_path`: the review report file path",
+            "Pass the `review_report_path` to the fix subagent",
+            "Fix all Critical and Important findings in the review report",
+        )
+        missing = []
+        for rel in surfaces:
+            text = (REPO_ROOT / rel).read_text(encoding="utf-8")
+            for tok in required:
+                if tok not in text:
+                    missing.append(f"{rel}:{tok}")
+        self.assertEqual(missing, [], f"missing reviewer finding handoff contract: {missing}")
+
     def test_execute_surfaces_return_inline_status_summary_fields(self):
         surfaces = [
             "tools/workflow_cli/agent_templates/claude/commands/r2p-execute.md",
