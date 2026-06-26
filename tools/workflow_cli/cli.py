@@ -160,6 +160,22 @@ def _validate_work_id(raw: str) -> WorkId:
         print_and_exit(format_error(str(e), exit_code=EXIT_CLI_ERR), EXIT_CLI_ERR)
 
 
+def _has_line_break(value: str) -> bool:
+    """True if value carries a line boundary — embedded OR trailing.
+
+    Uses str.splitlines(), the same splitter the run.md reload parser relies on
+    (state._split_sections and state._parse_md_table), so this covers every
+    boundary it does: \\n \\r \\r\\n \\v \\f \\x1c-\\x1e \\x85 \\u2028 \\u2029.
+    Any such character lets a crafted CLI free-text value corrupt run.md on
+    reload — a "## "-prefixed heading injected into a raw section line, or a
+    table row split across the boundary — so callers that interpolate the value
+    into run.md must reject it. Comparing against ``[value]`` (not just
+    ``len(...) > 1``) also catches a single *trailing* boundary, which splits a
+    table cell from the column after it. An empty value has no boundary.
+    """
+    return bool(value) and value.splitlines() != [value]
+
+
 def _ensure_workspace_gitignore_or_exit(base_path: Path) -> None:
     try:
         ensure_workspace_gitignore(base_path)
@@ -516,6 +532,15 @@ def _cmd_run_reopen(args):
     # symlinked .req-to-plan/<work-id> outside the workspace.
     source_record, source_mgr, source_dir = _load_run(source_id, args.base_path)
 
+    # --reason is interpolated verbatim into reopen_lineage, a raw line under the
+    # last run.md section; a line boundary there could inject a "## "-prefixed
+    # heading that overwrites a real section on reload. Reject any line break.
+    if _has_line_break(args.reason):
+        print_and_exit(
+            format_error("--reason must be a single line", exit_code=EXIT_CLI_ERR),
+            EXIT_CLI_ERR,
+        )
+
     reopenable_statuses = {RunStatus.CLOSED_AT_PLAN_CHECKPOINT, RunStatus.EXECUTING}
     if source_record.status not in reopenable_statuses:
         print_and_exit(
@@ -842,7 +867,10 @@ def _cmd_gap_open(args):
             format_error("--required-action must be non-empty", exit_code=EXIT_CLI_ERR),
             EXIT_CLI_ERR,
         )
-    if "\n" in args.required_action or "\r" in args.required_action:
+    # required_action is interpolated into an open_routes table cell with a
+    # status column after it; an embedded OR trailing line boundary splits the
+    # row on reload (state._parse_md_table), corrupting run.md. Reject any break.
+    if _has_line_break(args.required_action):
         print_and_exit(
             format_error("--required-action must be a single line", exit_code=EXIT_CLI_ERR),
             EXIT_CLI_ERR,
@@ -2005,6 +2033,18 @@ def _cmd_checkpoint_decide(args):
                 exit_code=EXIT_REVIEW_REQ,
             ),
             EXIT_REVIEW_REQ,
+        )
+
+    # --downstream-authorization is stored in the Approved Checkpoints table.
+    # A line boundary there splits the row on reload, so reject embedded or
+    # trailing breaks before any approve-path mutation.
+    if args.downstream_authorization and _has_line_break(args.downstream_authorization):
+        print_and_exit(
+            format_error(
+                "--downstream-authorization must be a single line",
+                exit_code=EXIT_CLI_ERR,
+            ),
+            EXIT_CLI_ERR,
         )
 
     open_routes = [r.route_id for r in record.open_routes if r.status == "open"]

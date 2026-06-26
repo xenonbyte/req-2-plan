@@ -2396,6 +2396,56 @@ class TestCheckpointDecide:
             checkpoint = next(cp for cp in record.approved_checkpoints if cp.stage == Stage.RAW_REQUIREMENT)
             assert checkpoint.downstream_authorization == "custom_next"
 
+    def test_approve_rejects_multiline_downstream_authorization_without_mutation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work_id = "WF-20260527-cd2m"
+            self._to_review(tmp, work_id)
+            run_md_path = Path(tmp) / ".req-to-plan" / work_id / "run.md"
+            artifact_path = Path(tmp) / ".req-to-plan" / work_id / "00-raw-requirement.md"
+            run_md_before = run_md_path.read_text(encoding="utf-8")
+            artifact_before = artifact_path.read_text(encoding="utf-8")
+
+            invoke(
+                [
+                    "checkpoint-decide", "--work-id", work_id, "--stage", "raw_requirement",
+                    "--decision", "approved", "--confirm",
+                    "--downstream-authorization", "custom_next\n## Status\narchived",
+                ],
+                base_path=tmp,
+                expect_exit=2,
+            )
+
+            assert run_md_path.read_text(encoding="utf-8") == run_md_before
+            assert artifact_path.read_text(encoding="utf-8") == artifact_before
+            record = load_record(tmp, work_id)
+            assert record.status == RunStatus.CHECKPOINT_REVIEW
+            assert record.approved_checkpoints == []
+
+    def test_approve_rejects_trailing_newline_downstream_authorization_without_mutation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work_id = "WF-20260527-cd2t"
+            self._to_review(tmp, work_id)
+            run_md_path = Path(tmp) / ".req-to-plan" / work_id / "run.md"
+            artifact_path = Path(tmp) / ".req-to-plan" / work_id / "00-raw-requirement.md"
+            run_md_before = run_md_path.read_text(encoding="utf-8")
+            artifact_before = artifact_path.read_text(encoding="utf-8")
+
+            invoke(
+                [
+                    "checkpoint-decide", "--work-id", work_id, "--stage", "raw_requirement",
+                    "--decision", "approved", "--confirm",
+                    "--downstream-authorization", "custom_next\n",
+                ],
+                base_path=tmp,
+                expect_exit=2,
+            )
+
+            assert run_md_path.read_text(encoding="utf-8") == run_md_before
+            assert artifact_path.read_text(encoding="utf-8") == artifact_before
+            record = load_record(tmp, work_id)
+            assert record.status == RunStatus.CHECKPOINT_REVIEW
+            assert record.approved_checkpoints == []
+
     def test_approve_refuses_open_routes(self):
         with tempfile.TemporaryDirectory() as tmp:
             work_id = "WF-20260527-cd2b"
@@ -2842,6 +2892,74 @@ def test_gap_open_rejects_multiline_required_action_without_mutation():
         assert run_md_path.read_text(encoding="utf-8") == run_md_before
         rec = load_record(tmp, work_id)
         assert rec.open_routes == []
+
+
+def test_gap_open_rejects_trailing_newline_required_action_without_mutation():
+    # A single *trailing* newline has only one splitlines() element, so a
+    # `len(splitlines()) > 1` guard would pass it through — yet it still splits
+    # the open_routes table cell from its status column on reload, corrupting
+    # run.md. The single-line guard must reject trailing breaks too.
+    with tempfile.TemporaryDirectory() as tmp:
+        work_id, _ = _seed_plan_approved_run(tmp)
+        run_md_path = Path(tmp) / ".req-to-plan" / work_id / "run.md"
+        run_md_before = run_md_path.read_text(encoding="utf-8")
+
+        invoke(["gap-open", "--work-id", work_id, "--owner-stage", "design",
+                "--required-action", "repair traceability\n"], base_path=tmp, expect_exit=2)
+
+        assert run_md_path.read_text(encoding="utf-8") == run_md_before
+        rec = load_record(tmp, work_id)
+        assert rec.open_routes == []
+
+
+def test_run_reopen_rejects_multiline_reason_without_mutation():
+    with tempfile.TemporaryDirectory() as tmp:
+        source = "WF-20260605-reopen-multiline"
+        invoke(["run-start", "--work-id", source, "--requirement", "foo"], base_path=tmp)
+        record = load_record(tmp, source)
+        record.status = RunStatus.CLOSED_AT_PLAN_CHECKPOINT
+        record.current_stage = Stage.CLOSED
+        record.approved_checkpoints = [plan_checkpoint()]
+        save_record(tmp, record)
+
+        run_md_path = Path(tmp) / ".req-to-plan" / source / "run.md"
+        run_md_before = run_md_path.read_text(encoding="utf-8")
+
+        invoke(
+            ["run-reopen", "--from", source, "--stage", "plan",
+             "--reason", "line one\n## Status\narchived"],
+            base_path=tmp,
+            expect_exit=2,
+        )
+
+        assert run_md_path.read_text(encoding="utf-8") == run_md_before
+        assert not (Path(tmp) / ".req-to-plan" / f"{source}-r1").exists()
+
+
+def test_run_reopen_rejects_trailing_newline_reason_without_mutation():
+    # Trailing breaks are benign for reopen_lineage (a raw last-section line),
+    # but the shared single-line guard rejects them defensively — pin that.
+    with tempfile.TemporaryDirectory() as tmp:
+        source = "WF-20260605-reopen-trailing"
+        invoke(["run-start", "--work-id", source, "--requirement", "foo"], base_path=tmp)
+        record = load_record(tmp, source)
+        record.status = RunStatus.CLOSED_AT_PLAN_CHECKPOINT
+        record.current_stage = Stage.CLOSED
+        record.approved_checkpoints = [plan_checkpoint()]
+        save_record(tmp, record)
+
+        run_md_path = Path(tmp) / ".req-to-plan" / source / "run.md"
+        run_md_before = run_md_path.read_text(encoding="utf-8")
+
+        invoke(
+            ["run-reopen", "--from", source, "--stage", "plan",
+             "--reason", "reopened to fix design\n"],
+            base_path=tmp,
+            expect_exit=2,
+        )
+
+        assert run_md_path.read_text(encoding="utf-8") == run_md_before
+        assert not (Path(tmp) / ".req-to-plan" / f"{source}-r1").exists()
 
 
 def test_gap_open_rejects_duplicate_open_route():
