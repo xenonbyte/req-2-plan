@@ -45,6 +45,61 @@ Use the least powerful model that can handle each role:
 
 Between tool calls, the controller narrates at most one short line. Use the prefix `Narration:` for these inter-call notes (e.g. `Narration: implementer returned DONE, writing diff`). Never paste a subagent's returned text — report body, diff content, or review findings — into a later dispatch; reviewer findings move through `review_report_path`, not pasted text. What the controller restates into its own context is bounded to `status`, `report_path` or diff path, `review_report_path`, `commit_range`, `test_summary`, and `concerns`.
 
+## Authoritative Context Set
+
+Each subagent (implementer, reviewer, fix) receives these run-dir paths and reads them directly — bodies are never pasted:
+
+| Path | Domain |
+|---|---|
+| `02-project-context.md` | planning-time repository baseline |
+| `03-requirement-brief.md` | goal / scope / non-goals / acceptance |
+| `04-risk-discovery.md` | cross-task risks and mitigations |
+| `05-design.md` | chosen design and rejected alternatives |
+| `06-spec.md` | full behavior / interface / data / error / test contracts |
+| `execution/progress.md` | execution ledger (task ID + title list), read-only to subagents |
+
+`07-plan.md`, `00-raw-requirement.md`, and `01-intake-brief.md` are **not** in the set. No generated `task-N-context.md` bundle, `context-manifest.json`, sha256/content-hash, or drift gate is introduced.
+
+### Authority Responsibility Matrix
+
+Each authority owns exactly its domain — this is a matrix, not a priority order:
+
+| Authority | Owns |
+|---|---|
+| Task brief | Current task execution scope / files / steps / verification |
+| `03-requirement-brief.md` | Goal / scope / non-goals / acceptance |
+| `04-risk-discovery.md` | Risk constraints and mitigations |
+| `05-design.md` | Chosen architecture and rejected alternatives |
+| `06-spec.md` | Behavior / interface / data / error / test contracts |
+| `## Global Constraints` | Plan-wide execution constraints |
+| `02-project-context.md` | Planning-time repository baseline |
+| Current working tree / HEAD | Operational truth about code that exists now |
+| `00-raw-requirement.md` / `01-intake-brief.md` | Provenance only — never an execution authority |
+
+**`02` baseline-vs-working-tree rule**: a predecessor task's legitimate repo change makes the working tree the operational truth; an unexplained or conflicting difference → `BLOCKED`.
+
+**Ledger read-only rule**: only the controller flips checkboxes or appends `Resolved:`/`Gap:`/`Unresolved:`/`Minor:` records to `execution/progress.md`; subagents read but do not write to the ledger.
+
+### Conflict Rule
+
+No artifact silently overrides another outside its domain. If a task cannot satisfy all applicable authorities simultaneously, the subagent returns `BLOCKED`, names the conflicting files/IDs, and asks the human to **reopen** the owning stage — no guessing, no picking a winner, no patching around an upstream defect.
+
+### Required Consumption
+
+Each implementer, reviewer, and fix subagent must **read the full Authoritative Context Set before acting** — availability is not consumption. Subagents may skip the embedded `(read-only)` Upstream Summary / Project Context blocks within those files. On-demand depth applies only to the current codebase, git history, and prior task reports/reviews — never to whether to read an approved artifact. This rule is orthogonal to Model Selection: a cheap model on a mechanical task still reads the set.
+
+### Ledger Ownership and Sibling Escalation
+
+Default position/ownership derives from the ledger's `PLAN-TASK-NNN <title>` list (stay within the brief's Files/Steps; treat every other listed task ID as owned elsewhere). The full `07-plan.md` is not handed to subagents; whole-plan reasoning stays with the controller's Pre-flight read. An unclear sibling boundary → the subagent returns `NEEDS_CONTEXT` / `BLOCKED`; the controller resolves it or hands a specific `r2p-task-brief --task <M>` single-task brief and re-dispatches — never a whole-plan read or a guess from the title.
+
+### Path Delivery and Fail-Closed Preflight
+
+The controller derives `run_dir = parent(plan)` from the execute output and hands absolute paths by default, or repository-root-relative paths paired with an explicit `repo_root`. Each subagent runs a preflight before acting:
+1. Every Authoritative Context Set path, brief path, ledger path, review path, and diff path exists and is readable.
+2. Every handed path resolves under the same `run_dir` / `work_id`.
+3. Any repo-root-relative path was resolved against the handed `repo_root`, not the process cwd.
+4. If any path is missing, unreadable, unresolved, or wired to a different run → `BLOCKED` — no silent continue on a partial/mixed set.
+
 ## Per-Task Loop
 
 For each PLAN-TASK (in order):
@@ -59,7 +114,7 @@ Record BASE (`git rev-parse HEAD`) BEFORE dispatching the implementer — **neve
 
 Provide the subagent with:
 - The `brief_path` returned by `r2p-task-brief` (not pasted task text from `07-plan.md`)
-- Scene-setting context (project, dependencies, architectural constraints)
+- **Read the Authoritative Context Set before acting**: the `02-project-context.md` entry supplies the project/dependency/architecture baseline deterministically
 - Global Constraints from the PLAN (`## Global Constraints`), copied verbatim when present — the brief carries only the task body, so the implementer does not otherwise see plan-level constraints
 - TDD instructions: follow `Skeleton`/`Steps`; prove `Verification` with evidence
 - A report file path (`execution/task-N-report.md`)
@@ -96,6 +151,7 @@ The fresh implementer subagent verifies-then-removes ambiguity by evidence and T
 After the implementer reports DONE:
 1. `mkdir -p .req-to-plan/<work-id>/logs` then `git diff -U10 <base-commit> HEAD > .req-to-plan/<work-id>/logs/task-N-diff.md`. Keep diff scratch under `logs/` (gitignored), never under `execution/`.
 2. Dispatch a task-reviewer subagent with:
+   - **Read the Authoritative Context Set before acting**: the reviewer checks `Spec References` IDs against the full `06-spec.md` text, not the IDs alone
    - The `brief_path` returned by `r2p-task-brief` (not pasted task text). The reviewer reads `Spec References` from the task brief. Do not pass separate `Spec References`.
    - The implementer report file path (`execution/task-N-report.md`)
    - The diff file path (`.req-to-plan/<work-id>/logs/task-N-diff.md`)
@@ -117,8 +173,9 @@ The review report records:
 
 ### 6. Fix loop
 
-- Dispatch fix subagents for Critical and Important findings. Pass the `review_report_path` to the fix subagent with the instruction: Fix all Critical and Important findings in the review report. Do not paste the finding bodies into the dispatch.
-- Re-dispatch the task-reviewer after each fix wave
+- Dispatch fix subagents for Critical and Important findings. Pass the `review_report_path` to the fix subagent with the instruction: Fix all Critical and Important findings in the review report. Do not paste the finding bodies into the dispatch. Also hand: **Read the Authoritative Context Set before acting**, the task brief path (`brief_path`), and the current task diff path (`logs/task-N-diff.md`).
+- After each fix wave: the fix subagent commits only its intentionally-changed files (staging only files changed for this task, exactly as the §2 implementer does); then the loop regenerates `logs/task-N-diff.md` from the task's BASE to `HEAD` (`git diff -U10 <base-commit> HEAD > .req-to-plan/<work-id>/logs/task-N-diff.md`) — commit-then-diff — before re-dispatching the task-reviewer. The re-review must not run against an uncommitted working tree.
+- Re-dispatch the task-reviewer after each fix wave with the refreshed diff path
 - Before flipping the checkbox, adjudicate each reviewer "cannot verify from diff" warning. When `concerns` lists ⚠️ items, open `review_report_path` to adjudicate each; a `none`/empty `concerns` means no ⚠️ remains to adjudicate. Record one line per finding in `execution/progress.md`:
   - `Resolved: <finding>` — clears the warning; a `Resolved:` claim about unchanged code must cite implementation and test evidence
   - `Gap: <finding>` — blocks the flip and cannot be overridden on the controller's own judgment
