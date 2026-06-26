@@ -56,6 +56,22 @@ class TestAgentTemplateCheckpointGuidance(unittest.TestCase):
         )
 
 
+def _get_role_section(text, heading_prefix):
+    """Return text from the line starting with heading_prefix to the next ### or ## heading."""
+    lines = text.splitlines()
+    in_section = False
+    section_lines = []
+    for line in lines:
+        if in_section:
+            if line.startswith("### ") or line.startswith("## "):
+                break
+            section_lines.append(line)
+        elif line.startswith(heading_prefix):
+            in_section = True
+            section_lines.append(line)
+    return "\n".join(section_lines)
+
+
 class TestExecuteTemplateContent(unittest.TestCase):
     def test_execute_surfaces_call_installed_task_brief_wrapper(self):
         surfaces = [
@@ -342,6 +358,105 @@ class TestExecuteTemplateContent(unittest.TestCase):
                 if tok not in text:
                     missing.append(f"{rel}:{tok}")
         self.assertEqual(missing, [], f"missing final-diff logs mkdir guidance: {missing}")
+
+    def test_execute_surfaces_hand_authoritative_context_set(self):
+        """DES-TEST-001 / FR-AC7: ACS block, matrix, per-role read instruction, and exclusion split on both surfaces."""
+        surfaces = [
+            "tools/workflow_cli/agent_templates/claude/commands/r2p-execute.md",
+            "tools/workflow_cli/agent_templates/codex/skills/r2p-execute/SKILL.md",
+        ]
+
+        # Whole-file required tokens: ACS heading (1), six read-set paths (2–7),
+        # matrix (8), conflict rule BLOCKED+reopen (9–10), ledger read-only (11),
+        # sibling escalation (12–13), §6 diff regen (14), report-path regression (15–16).
+        required_whole = (
+            "## Authoritative Context Set",
+            "02-project-context.md",
+            "03-requirement-brief.md",
+            "04-risk-discovery.md",
+            "05-design.md",
+            "06-spec.md",
+            "execution/progress.md",
+            "Responsibility Matrix",
+            "BLOCKED",
+            "reopen",
+            "read-only to subagents",
+            "r2p-task-brief --task",
+            "NEEDS_CONTEXT",
+            "regenerates `logs/task-N-diff.md`",
+            "Pass the `review_report_path` to the fix subagent",
+            "Fix all Critical and Important findings in the review report",
+        )
+        # Whole-file forbidden tokens: Scene-setting context absent (17), r2p-gap-open absent (18).
+        forbidden_whole = (
+            "Scene-setting context",
+            "`r2p-gap-open`",
+        )
+
+        missing = []
+        offenders = []
+        for rel in surfaces:
+            text = (REPO_ROOT / rel).read_text(encoding="utf-8")
+            for tok in required_whole:
+                if tok not in text:
+                    missing.append(f"{rel}:{tok}")
+            for tok in forbidden_whole:
+                if tok in text:
+                    offenders.append(f"{rel}:{tok}")
+        self.assertEqual(missing, [], f"missing ACS tokens: {missing}")
+        self.assertEqual(offenders, [], f"forbidden ACS tokens present: {offenders}")
+
+        # Per-role slice: §2, §5, §6 each contain the ACS read instruction (check 8 per spec).
+        for rel in surfaces:
+            text = (REPO_ROOT / rel).read_text(encoding="utf-8")
+            for section_prefix in ("### 2.", "### 5.", "### 6."):
+                section = _get_role_section(text, section_prefix)
+                self.assertIn(
+                    "Read the Authoritative Context Set before acting",
+                    section,
+                    f"{rel}: section {section_prefix!r} must reference the ACS read instruction",
+                )
+
+        # ACS read-set / exclusion split (check 9 per spec):
+        # The exclusion sentence names 07-plan.md, 00-raw-requirement.md, 01-intake-brief.md.
+        # Split the ACS block at that line; verify the six read-set paths appear BEFORE it
+        # and the three excluded paths do NOT appear before it.
+        for rel in surfaces:
+            text = (REPO_ROOT / rel).read_text(encoding="utf-8")
+            acs_start = text.find("## Authoritative Context Set")
+            self.assertNotEqual(acs_start, -1, f"{rel}: missing ACS heading")
+            next_h2 = text.find("\n## ", acs_start + 1)
+            acs_block = text[acs_start:next_h2] if next_h2 != -1 else text[acs_start:]
+            acs_lines = acs_block.splitlines()
+            # Find the first line in the ACS block that names the excluded 07-plan.md
+            excl_idx = next(
+                (i for i, line in enumerate(acs_lines) if "`07-plan.md`" in line),
+                None,
+            )
+            self.assertIsNotNone(
+                excl_idx,
+                f"{rel}: ACS block lacks an exclusion sentence for 07-plan.md",
+            )
+            read_set_portion = "\n".join(acs_lines[:excl_idx])
+            # Six read-set paths must appear before the exclusion line
+            for path in (
+                "02-project-context.md",
+                "03-requirement-brief.md",
+                "04-risk-discovery.md",
+                "05-design.md",
+                "06-spec.md",
+                "execution/progress.md",
+            ):
+                self.assertIn(
+                    path, read_set_portion,
+                    f"{rel}: {path!r} missing from ACS read-set portion (before exclusion line)",
+                )
+            # Three excluded paths must NOT appear before the exclusion line
+            for path in ("07-plan.md", "00-raw-requirement.md", "01-intake-brief.md"):
+                self.assertNotIn(
+                    path, read_set_portion,
+                    f"{rel}: excluded path {path!r} found in ACS read-set portion",
+                )
 
     def test_gemini_execute_toml_mentions_in_place_and_archive(self):
         text = (REPO_ROOT / "tools/workflow_cli/agent_templates/gemini/commands/r2p-execute.toml").read_text(encoding="utf-8")
