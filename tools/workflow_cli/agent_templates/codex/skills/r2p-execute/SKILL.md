@@ -43,27 +43,34 @@ Use the least powerful model that can handle each role:
 
 ## Controller Narration Discipline
 
-Between tool calls, the controller narrates at most one short line. Use the prefix `Narration:` for these inter-call notes (e.g. `Narration: implementer returned DONE, writing diff`). Never paste a subagent's returned text — report body, diff content, or review findings — into a later dispatch; what the controller restates into its own context is bounded to a status (DONE / NEEDS_CONTEXT / BLOCKED) plus a pointer to the report or diff file path.
+Between tool calls, the controller narrates at most one short line. Use the prefix `Narration:` for these inter-call notes (e.g. `Narration: implementer returned DONE, writing diff`). Never paste a subagent's returned text — report body, diff content, or review findings — into a later dispatch; what the controller restates into its own context is bounded to `status`, `report_path` or diff path, `commit_range`, `test_summary`, and `concerns`.
 
 ## Per-Task Loop
 
 For each PLAN-TASK (in order):
 
-### 1. Run `plan-task-brief` and obtain the task-brief path
+### 1. Run `r2p-task-brief` and obtain the task-brief path
 
-Run `{{R2P_BIN_DIR}}/plan-task-brief --work-id <work-id> --task <N>` (where `<N>` is the task's integer, e.g. `2` for `PLAN-TASK-002`) for the current task. The command returns a `brief_path` pointing to a scoped brief file that contains the task's `Skeleton`, `Steps`, `Spec References`, and `Verification` criteria. Pass the `brief_path` as the handoff pointer to both the implementer and the reviewer — not pasted task text from `07-plan.md`. The controller uses the returned `brief_path` without eager-reading the full task body into its own context; the implementer and reviewer read the task-brief on demand.
+Run `{{R2P_BIN_DIR}}/r2p-task-brief --work-id <work-id> --task <N>` (where `<N>` is the task's integer, e.g. `2` for `PLAN-TASK-002`) for the current task. This installed wrapper delegates to the internal `plan-task-brief` CLI command. The command returns a `brief_path` pointing to a scoped brief file that contains the task's `Skeleton`, `Steps`, `Spec References`, and `Verification` criteria. Pass the `brief_path` as the handoff pointer to both the implementer and the reviewer — not pasted task text from `07-plan.md`. The controller uses the returned `brief_path` without eager-reading the full task body into its own context; the implementer and reviewer read the task-brief on demand.
 
 ### 2. Dispatch a fresh implementer subagent
 
 Record BASE (`git rev-parse HEAD`) BEFORE dispatching the implementer — **never use `HEAD~1`** as BASE (it drops all but the last commit of a multi-commit task). For Task 1, this BASE is also `<execution-base-commit>` for the final whole-branch review. Persist the Task 1 BASE immediately in tracked execution state by adding `Execution BASE: <execution-base-commit>` to `execution/progress.md`.
 
 Provide the subagent with:
-- The `brief_path` returned by `plan-task-brief` (not pasted task text from `07-plan.md`)
+- The `brief_path` returned by `r2p-task-brief` (not pasted task text from `07-plan.md`)
 - Scene-setting context (project, dependencies, architectural constraints)
 - TDD instructions: follow `Skeleton`/`Steps`; prove `Verification` with evidence
 - A report file path (`execution/task-N-report.md`)
 
-The implementer return contract is minimal: a status (DONE / DONE_WITH_CONCERNS / NEEDS_CONTEXT / BLOCKED) plus the report file path. The controller does not ask the implementer to restate the task.
+The implementer return contract is minimal and inline:
+- `status`: DONE / DONE_WITH_CONCERNS / NEEDS_CONTEXT / BLOCKED
+- `report_path`: the report file path
+- `commit_range`: `<base7>..<head7>` for committed task work, or `none` if no commit was created
+- `test_summary`: one-line test summary, or `not run: <reason>`
+- `concerns`: `none` or a concise list of decision-relevant concerns, missing context, or blockers
+
+The controller uses these fields to decide whether to continue without opening the full report. The controller does not ask the implementer to restate the task.
 
 The implementer must:
 1. Implement exactly what the task specifies, following TDD
@@ -88,14 +95,15 @@ The fresh implementer subagent verifies-then-removes ambiguity by evidence and T
 After the implementer reports DONE:
 1. `mkdir -p .req-to-plan/<work-id>/logs` then `git diff -U10 <base-commit> HEAD > .req-to-plan/<work-id>/logs/task-N-diff.md`. Keep diff scratch under `logs/` (gitignored), never under `execution/`.
 2. Dispatch a task-reviewer subagent with:
-   - The `brief_path` returned by `plan-task-brief` (not pasted task text) plus the task's `Spec References`
+   - The `brief_path` returned by `r2p-task-brief` (not pasted task text). The reviewer reads `Spec References` from the task brief. Do not pass separate `Spec References`.
    - The implementer report file path (`execution/task-N-report.md`)
    - The diff file path (`.req-to-plan/<work-id>/logs/task-N-diff.md`)
    - Global constraints from the plan (copy verbatim from `## Global Constraints`); never pre-judge a finding's severity; never paste prior-task summaries into a later dispatch
 
-The task-reviewer returns two verdicts:
-- **Spec compliance**: checked against `Spec References` + `Verification`
+The task-reviewer returns:
+- **Spec compliance**: checked against the task brief's `Spec References` and `Verification`
 - **Code quality**: clean, tested, maintainable
+- **⚠️ DEFER items**: explicit `cannot verify from diff` warnings for requirements satisfied by unchanged code, by sibling task work, or by evidence outside the task diff
 
 ### 6. Fix loop
 

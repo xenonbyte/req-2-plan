@@ -969,8 +969,16 @@ def _cmd_execute(ns: argparse.Namespace, base_path: Path) -> None:
 
 
 def _cmd_task_brief(ns: argparse.Namespace, base_path: Path) -> None:
+    work_id = ns.work_id
+    if not work_id:
+        pointer = read_active_pointer(base_path)
+        if not pointer:
+            print("no_selected_run: true\nnext: r2p-task-brief --work-id <id> --task <N>\n")
+            sys.exit(1)
+        work_id = pointer["selected_work_id"]
+    work_id = _validate_work_id(work_id)
     sys.exit(_run_cli(
-        ["plan-task-brief", "--work-id", ns.work_id, "--task", str(ns.task)],
+        ["plan-task-brief", "--work-id", work_id, "--task", str(ns.task)],
         base_path,
     ))
 
@@ -1073,7 +1081,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p_tier_lock.add_argument("--confirm", action="store_true")
 
     p_task_brief = sub.add_parser("task-brief")
-    p_task_brief.add_argument("--work-id", dest="work_id", required=True)
+    p_task_brief.add_argument("--work-id", dest="work_id", default=None)
     p_task_brief.add_argument("--task", type=int, required=True)
 
     p_gap_open = sub.add_parser("gap-open")

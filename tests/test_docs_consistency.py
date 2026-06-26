@@ -57,6 +57,22 @@ class TestAgentTemplateCheckpointGuidance(unittest.TestCase):
 
 
 class TestExecuteTemplateContent(unittest.TestCase):
+    def test_execute_surfaces_call_installed_task_brief_wrapper(self):
+        surfaces = [
+            "tools/workflow_cli/agent_templates/claude/commands/r2p-execute.md",
+            "tools/workflow_cli/agent_templates/codex/skills/r2p-execute/SKILL.md",
+        ]
+        missing = []
+        offenders = []
+        for rel in surfaces:
+            text = (REPO_ROOT / rel).read_text(encoding="utf-8")
+            if "{{R2P_BIN_DIR}}/r2p-task-brief" not in text:
+                missing.append(rel)
+            if "{{R2P_BIN_DIR}}/plan-task-brief" in text:
+                offenders.append(rel)
+        self.assertEqual(missing, [], f"missing installed r2p-task-brief wrapper call: {missing}")
+        self.assertEqual(offenders, [], f"execute surfaces call nonexistent wrapper: {offenders}")
+
     def test_execute_surfaces_carry_sdd_orchestration_tokens(self):
         surfaces = [
             "tools/workflow_cli/agent_templates/claude/commands/r2p-execute.md",
@@ -146,6 +162,58 @@ class TestExecuteTemplateContent(unittest.TestCase):
             "use a reopen/human repair path instead of r2p-gap-open: "
             + ", ".join(gap_open_offenders),
         )
+
+    def test_execute_surfaces_define_reviewer_defer_contract(self):
+        surfaces = [
+            "tools/workflow_cli/agent_templates/claude/commands/r2p-execute.md",
+            "tools/workflow_cli/agent_templates/codex/skills/r2p-execute/SKILL.md",
+        ]
+        required = (
+            "Do not pass separate `Spec References`",
+            "reviewer reads `Spec References` from the task brief",
+            "⚠️ DEFER",
+            "cannot verify from diff",
+            "satisfied by unchanged code",
+            "sibling task",
+        )
+        forbidden = (
+            "plus the task's `Spec References`",
+            "checked against `Spec References` + `Verification`",
+        )
+        missing = []
+        offenders = []
+        for rel in surfaces:
+            text = (REPO_ROOT / rel).read_text(encoding="utf-8")
+            for tok in required:
+                if tok not in text:
+                    missing.append(f"{rel}:{tok}")
+            for tok in forbidden:
+                if tok in text:
+                    offenders.append(f"{rel}:{tok}")
+        self.assertEqual(missing, [], f"missing reviewer defer contract tokens: {missing}")
+        self.assertEqual(offenders, [], f"stale reviewer handoff contract remains: {offenders}")
+
+    def test_execute_surfaces_return_inline_status_summary_fields(self):
+        surfaces = [
+            "tools/workflow_cli/agent_templates/claude/commands/r2p-execute.md",
+            "tools/workflow_cli/agent_templates/codex/skills/r2p-execute/SKILL.md",
+        ]
+        required = (
+            "`status`",
+            "`report_path`",
+            "`commit_range`",
+            "`test_summary`",
+            "`concerns`",
+            "one-line test summary",
+            "without opening the full report",
+        )
+        missing = []
+        for rel in surfaces:
+            text = (REPO_ROOT / rel).read_text(encoding="utf-8")
+            for tok in required:
+                if tok not in text:
+                    missing.append(f"{rel}:{tok}")
+        self.assertEqual(missing, [], f"missing inline status summary fields: {missing}")
 
     def test_execute_surfaces_block_dirty_code_tree_before_task_loop(self):
         surfaces = [

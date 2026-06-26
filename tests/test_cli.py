@@ -4760,6 +4760,31 @@ class TestTaskBriefShortcut:
             brief_sc = (run_dir_sc / "logs" / "task-2-brief.md").read_bytes()
             assert brief_cli == brief_sc
 
+    def test_task_brief_shortcut_uses_active_run_when_work_id_omitted(self, monkeypatch):
+        """Selected EXECUTING run: shortcut accepts --task without --work-id."""
+        from tools.workflow_cli.agent_shortcuts import main as shortcuts_main, write_active_pointer
+
+        monkeypatch.setenv("R2P_JSON", "1")
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            wid = "WF-20260626-sc-active"
+            run_dir = self._executing_run_with_plan(base, wid, self._MULTI_TASK_PLAN)
+            write_active_pointer(base, wid, reason="execute_resume")
+
+            out = io.StringIO()
+            shortcut_exit = None
+            with contextlib.redirect_stdout(out):
+                try:
+                    shortcuts_main(["task-brief", "--task", "2"], base_path=base)
+                except SystemExit as exc:
+                    shortcut_exit = exc.code
+
+            assert shortcut_exit == 0, f"shortcut exit: {shortcut_exit}"
+            payload = json.loads(out.getvalue().strip())
+            assert payload["work_id"] == wid
+            assert payload["task_id"] == "PLAN-TASK-002"
+            assert (run_dir / "logs" / "task-2-brief.md").exists()
+
     def test_task_brief_shortcut_conflict_exit_code_propagates(self, monkeypatch):
         """Non-EXECUTING run: shortcut exit code == CLI exit code (EXIT_CONFLICT=6)."""
         from tools.workflow_cli.agent_shortcuts import main as shortcuts_main
@@ -4846,7 +4871,9 @@ class TestTaskBriefShortcut:
         py_bin.mkdir()
         py3_link = py_bin / "python3"
         py3_link.symlink_to(sys.executable)
-        os.chmod(py3_link, 0o755)
+        # The symlink resolves to the already-executable interpreter. Do not
+        # chmod it: chmod follows symlinks and can mutate/fail on the host Python.
+        assert os.access(py3_link, os.X_OK)
 
         site_pkgs = sysconfig.get_path("purelib")
         base_pp = os.environ.get("PYTHONPATH", "")

@@ -578,6 +578,20 @@ class TestCmdStatus:
 
 
 # ---------------------------------------------------------------------------
+# TestCmdTaskBrief
+# ---------------------------------------------------------------------------
+
+
+class TestCmdTaskBrief:
+    def test_prints_no_selected_run_when_no_pointer(self, capsys):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            _invoke(["task-brief", "--task", "2"], base, expect_exit=1)
+            out = capsys.readouterr().out
+            assert "no_selected_run" in out
+
+
+# ---------------------------------------------------------------------------
 # TestCmdReopen
 # ---------------------------------------------------------------------------
 
