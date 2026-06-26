@@ -38,6 +38,7 @@ Use the least powerful model that can handle each role:
 - **Integration / judgment / debugging** (multi-file coordination, pattern matching): standard model.
 - **Architecture / design AND the final whole-branch review**: most capable model.
 - Always specify the model explicitly when dispatching; an omitted model inherits the session model.
+- Read the task brief on demand when sizing the implementer model; do not paste or retain a rewritten copy of it.
 - **Turn count beats token price**: use a mid-tier floor for reviewers and for implementers working from prose descriptions; drop to cheapest only for complete-code/single-file mechanical tasks.
 
 ## Controller Narration Discipline
@@ -59,6 +60,7 @@ Record BASE (`git rev-parse HEAD`) BEFORE dispatching the implementer — **neve
 Provide the subagent with:
 - The `brief_path` returned by `r2p-task-brief` (not pasted task text from `07-plan.md`)
 - Scene-setting context (project, dependencies, architectural constraints)
+- Global Constraints from the PLAN (`## Global Constraints`), copied verbatim when present — the brief carries only the task body, so the implementer does not otherwise see plan-level constraints
 - TDD instructions: follow `Skeleton`/`Steps`; prove `Verification` with evidence
 - A report file path (`execution/task-N-report.md`)
 
@@ -106,6 +108,8 @@ The task-reviewer writes detailed findings, if any, to `execution/task-N-review.
 - `test_summary`: one-line test summary, or `not run: <reason>`
 - `concerns`: `none` or a concise list of decision-relevant concerns, missing context, or blockers
 
+Surface in `concerns` every ⚠️ "cannot verify from diff" item and every unfixed Minor finding — do not leave them only in the report. This is how the controller learns there is something to adjudicate (§6) without opening the report on a clean task.
+
 The review report records:
 - **Spec compliance**: checked against the task brief's `Spec References` and `Verification`
 - **Code quality**: clean, tested, maintainable
@@ -115,7 +119,7 @@ The review report records:
 
 - Dispatch fix subagents for Critical and Important findings. Pass the `review_report_path` to the fix subagent with the instruction: Fix all Critical and Important findings in the review report. Do not paste the finding bodies into the dispatch.
 - Re-dispatch the task-reviewer after each fix wave
-- Before flipping the checkbox, adjudicate each reviewer "cannot verify from diff" warning by recording one line per finding in `execution/progress.md`:
+- Before flipping the checkbox, adjudicate each reviewer "cannot verify from diff" warning. When `concerns` lists ⚠️ items, open `review_report_path` to adjudicate each; a `none`/empty `concerns` means no ⚠️ remains to adjudicate. Record one line per finding in `execution/progress.md`:
   - `Resolved: <finding>` — clears the warning; a `Resolved:` claim about unchanged code must cite implementation and test evidence
   - `Gap: <finding>` — blocks the flip and cannot be overridden on the controller's own judgment
   - `Unresolved: <finding>` — blocks the flip and cannot be overridden on the controller's own judgment

@@ -92,6 +92,8 @@ class TestExecuteTemplateContent(unittest.TestCase):
             "hard prerequisite",       # no subagent degrade
             "NEEDS_CONTEXT",           # ambiguity ladder
             "Model Selection",         # FR-A1 model scaling
+            "Read the task brief on demand when sizing the implementer model",  # model sizing may re-read the brief
+            "copied verbatim when present",  # implementer dispatch also receives plan-level Global Constraints
             "HEAD~1",                  # FR-A3 BASE rule (never use HEAD~1)
             "execution/final-review.md",  # FR-A6 marker write
             "Verdict: Approved",       # FR-A6 verdict protocol literal
@@ -175,6 +177,8 @@ class TestExecuteTemplateContent(unittest.TestCase):
             "cannot verify from diff",
             "satisfied by unchanged code",
             "sibling task",
+            "Surface in `concerns` every ⚠️",          # FR-CM3 produce: defer/minor items surface inline
+            "open `review_report_path` to adjudicate",  # FR-CM3 consume: open report only when concerns flag ⚠️
         )
         forbidden = (
             "plus the task's `Spec References`",
