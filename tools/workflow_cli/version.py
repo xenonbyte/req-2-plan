@@ -1,1 +1,1 @@
-R2P_VERSION = "0.6.1"
+R2P_VERSION = "0.7.2"
