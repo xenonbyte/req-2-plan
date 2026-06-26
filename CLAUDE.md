@@ -2,6 +2,10 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+This file is self-contained: it does not depend on `AGENTS.md`. (`AGENTS.md`
+carries the same facts for other agent surfaces; if you change a project fact,
+update both.)
+
 ## What this is
 
 `@xenonbyte/req-2-plan` (npm) ships a Python CLI plus an installer that generates
@@ -93,6 +97,24 @@ doubt, read the module, not this file.
 | `install.py` / `install_cli.py` | Install/uninstall/status service + manifest safety; lifecycle binary |
 | `agent_templates/` | Install templates for Claude, Codex, Gemini (opencode derives from Claude) |
 
+### State machine (`models.py` → `ALLOWED_TRANSITIONS`)
+
+```text
+not_started -> active_stage_draft
+active_stage_draft -> active_stage_draft | entry_gate_failed | quality_gate_failed | ready_for_checkpoint_review | upstream_gap_routing
+entry_gate_failed -> active_stage_draft | upstream_gap_routing
+quality_gate_failed -> active_stage_draft | upstream_gap_routing
+ready_for_checkpoint_review -> active_stage_draft | checkpoint_review | upstream_gap_routing
+checkpoint_review -> active_stage_draft | checkpoint_changes_requested | checkpoint_approved | upstream_gap_routing
+checkpoint_changes_requested -> active_stage_draft | quality_gate_failed | upstream_gap_routing
+upstream_gap_routing -> active_stage_draft | upstream_gap_routing | ready_for_checkpoint_review | checkpoint_approved
+checkpoint_approved -> next_stage | closed_at_plan_checkpoint | upstream_gap_routing
+next_stage -> active_stage_draft | entry_gate_failed
+closed_at_plan_checkpoint -> executing | archived
+executing -> executing | closed_at_plan_checkpoint | archived
+archived -> none
+```
+
 ## Invariants (verify against code before changing)
 
 - **Exit codes** (`output.py`): `0` ok · `2` cli error · `3` gate fail · `4` dry
@@ -176,5 +198,6 @@ doubt, read the module, not this file.
   user-facing Claude install template is
   `tools/workflow_cli/agent_templates/claude/SKILL.md`.
 - `.codegraph/` is present and indexed — prefer `codegraph explore` /
-  `codegraph node` over grep+read when locating code.
+  `codegraph node` over grep+read when locating code. (See
+  `.cursor/rules/codegraph.mdc` for the per-tool decision table.)
 - `.drfx/` holds archived run artifacts (local history), not source.

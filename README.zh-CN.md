@@ -6,17 +6,20 @@
 [![node](https://img.shields.io/node/v/%40xenonbyte%2Freq-2-plan.svg)](https://nodejs.org)
 [![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
 
-> 把原始需求变成一份获批、执行器中立的实现 PLAN，并在 Claude Code、Codex、Gemini、opencode 上一致运行。
+> 把原始需求变成一份获批、执行器中立的实现 PLAN，再在原地把这份 PLAN 执行落地，并在 Claude Code、Codex、Gemini、opencode 上一致运行。
 
-`req-2-plan` 为 AI coding agent 安装 `r2p` 工作流。它把粗略需求推进到一条分阶段、
-门控的流程中：**requirement brief**、**risk discovery**、**DESIGN**、**SPEC**、
-**PLAN**。最终得到的计划有上下文、有审查记录，也能直接交给另一个 agent 或工程师执行。
+`req-2-plan` 为 AI coding agent 安装 `r2p` 工作流，分两个阶段工作。**规划（Plan）：**
+把粗略需求推进到一条分阶段、门控的流程中——**requirement brief**、**risk discovery**、
+**DESIGN**、**SPEC**、**PLAN**——让最终计划有上下文、有审查记录、可直接执行。
+**执行（Execute）：** 随后 `r2p-execute` 把这份获批 PLAN 接入当前分支上、由 subagent
+编排的原地实现循环——每个任务一个 implementer、每个任务后一次 review、最后一次整分支
+评审，然后自动归档——让规划这次改动的工具也能把它落地。
 
 这个 npm 包是生命周期安装器。目前它支持 4 个 agent 平台：**Claude Code**、**Codex**、
 **Gemini**、**opencode**。它从一份共享源生成各平台的 agent 入口，安装共享的
 `r2p-*` wrapper，并维护 owned manifest，确保卸载时只移除 `r2p` 自己管理的文件。
 
-**Contents:** [Why r2p](#why-r2p) · [Features](#features) · [Installation](#installation) · [Quick start](#quick-start) · [Workflow commands](#workflow-commands) · [Development](#development)
+**Contents:** [Why r2p](#why-r2p) · [Features](#features) · [Installation](#installation) · [Quick start](#quick-start) · [Workflow commands](#workflow-commands) · [Executing a PLAN](#executing-a-plan) · [Development](#development)
 
 ## Why r2p
 
@@ -27,7 +30,7 @@ AI agent 执行很快，但模糊需求容易变成含糊计划、隐藏范围�
 - 风险和未知点会在实现计划前暴露；
 - DESIGN、SPEC、PLAN 都要通过结构化 quality gate；
 - 必须由人选择的决定会被记录，而不是由 agent 猜；
-- 执行可以从 PLAN 开始，不需要重新决定范围。
+- 执行可以直接从 PLAN 开始——手动执行，或用 `r2p-execute`——不需要重新决定范围。
 
 当需求不只是单行修改、会影响重要行为，或需要在多个 agent 之间做稳定交接时，适合使用它。
 
@@ -40,7 +43,7 @@ AI agent 执行很快，但模糊需求容易变成含糊计划、隐藏范围�
 - **Manifest-backed 安装安全**：覆盖前备份已存在文件，卸载只删除受管路径。
 - **Project Context Pack**：以真实仓库事实（默认当前目录，或用 `--repo-path <dir>`）支撑 tier 估算和 PLAN 校验。
 - **修复路径**：可重开 closed run、路由上游缺口，并关闭已修复的决策路线。
-- **执行交接**：`r2p-execute` 可以把获批 PLAN 接入当前分支上的实现循环。
+- **原地执行 PLAN**：`r2p-execute` 在当前分支上通过 subagent 驱动的 SDD 循环执行获批 PLAN——每个任务一个全新 implementer、每个任务后接 task-reviewer 与 fix 循环，最后一次整分支评审会重跑完整验证套件，通过后 run 自动归档。它要求宿主能派发 subagent，且从不 push 或开 PR。
 
 ## Supported platforms
 
@@ -127,20 +130,40 @@ tier 估算和 Project Context Pack 默认以当前目录为基准。传 `--repo
 
 ## Workflow commands
 
-安装后，面向 agent 的命令会调用 `~/.req-to-plan/bin` 下的共享 wrapper。
+安装后，面向 agent 的命令会调用 `~/.req-to-plan/bin` 下的共享 wrapper。各命令的用途与
+参数如下——可选参数标注默认值，`—` 表示必须自行提供：
 
-| Command | Purpose |
-|---|---|
-| `r2p-start` | 从内联需求文本或 `--file <path>` 启动新 run。 |
-| `r2p-continue` | 把活动 run 推进到下一个停点或完成状态。 |
-| `r2p-status` | 只读查看活动 run；加 `--all` 可查看全部 run。 |
-| `r2p-switch` | 切换活动的 `--work-id`。 |
-| `r2p-tier-lock` | 用 `--base light\|standard` 和可选 modifier 锁定 tier。 |
-| `r2p-reopen` | 从指定阶段重开一个 closed 或 executing run，并选择新重开的 run。 |
-| `r2p-gap-open` | 把 open run 的上游缺口路由回 owner stage。 |
-| `r2p-gap-resolve` | 关闭一个已修复的上游缺口 route。 |
-| `r2p-archive` | 把 closed run 移到 `.req-to-plan/archive/`，并取消活动路径跟踪。 |
-| `r2p-execute` | 在当前分支原地执行 closed PLAN，然后归档该 run。 |
+| Command | Purpose | Parameter | 必填 / 可选 | 默认值 |
+|---|---|---|---|---|
+| `r2p-start` | 启动新 run，并基于仓库扫描给出 tier 建议。 | `<requirement>` 或 `--file <path>` | 二选一必填 | — |
+| | | `--repo-path <dir>` | 可选 | 当前目录 |
+| | | `--separate` | 可选 | 关 |
+| `r2p-continue` | 把活动 run 推进到下一个停点，并打印精确的 `next:` 动作。 | *(无)* | — | — |
+| `r2p-status` | 只读查看 run，不改状态。 | `--all` | 可选 | 关 |
+| `r2p-switch` | 把活动 run 标记指向另一个 run。 | `--work-id <id>` | 必填 | — |
+| `r2p-tier-lock` | 锁定活动 run 的复杂度 tier。 | `--work-id <id>` | 必填 | — |
+| | | `--base light\|standard` | 必填 | — |
+| | | `--confirm` | 必填 | — |
+| | | `--modifiers <a,b,…>` | 可选 | 无 |
+| | | `--override-floor` | 可选 | 关 |
+| `r2p-reopen` | 重开一个 closed 或 executing run 以修复上游 artifact。 | `--from <work-id>` | 必填 | — |
+| | | `--stage <stage>` | 必填 | — |
+| | | `--reason <text>` | 必填 | — |
+| `r2p-gap-open` | 在 open run 上把上游决策缺口路由回 owner stage。 | `--work-id <id>` | 必填 | — |
+| | | `--owner-stage <stage>` | 必填 | — |
+| | | `--required-action "<text>"` | 必填 | — |
+| `r2p-gap-resolve` | 关闭已修复的上游缺口 route。 | `--work-id <id>` | 必填 | — |
+| | | `--route-id <id>` | 必填 | — |
+| `r2p-archive` | 把 closed run 归档出活动工作区。 | `--work-id <id>` | 可选 | 活动 run |
+| | | `--force` | 可选 | 关 |
+| `r2p-execute` | 原地执行 closed PLAN，做整分支评审，然后归档。 | `--work-id <id>` | 可选 | 活动 run |
+
+说明：`--modifiers` 接受 `migration`、`cross_project`、`safety`、`dependency`、
+`scope_expanding` 的逗号分隔子集。`--stage` 与 `--owner-stage` 取流水线阶段
+（`raw_requirement` … `plan`）；gap 的 `--owner-stage` 须严格位于当前阶段上游，
+`--required-action` 须为单行。`--confirm` 才会让 tier 锁定真正生效，`--override-floor`
+允许锁到计算下限以下。`--separate` 可在已有 run 仍打开时另起一个并行 run。`--force`
+让 `r2p-archive` 能归档 PLAN-TASK 未全部勾选的 executing run。
 
 大多数 run 只需要 `r2p-start`，然后反复 `r2p-continue`。当工作流输出这些命令，
 或你明确需要切换、修复、重开、执行、归档时，再使用对应的专用命令。
@@ -194,6 +217,27 @@ CLI 负责状态、文件、gate 和结构化校验。
 Standard tier 的 DESIGN/SPEC/PLAN 阶段可能要求 subagent review，尤其当存在
 `migration`、`safety`、`cross_project` 等 tier modifier 时。如果后续阶段发现上游决策缺口，
 用 `r2p-gap-open` 路由回 owner stage，修复后再用 `r2p-gap-resolve` 关闭 route。
+
+## Executing a PLAN
+
+`r2p` 不止步于 PLAN。run 在 PLAN checkpoint 关闭后，`r2p-execute` 会在当前分支上原地
+实现它——不开新分支、不建 worktree、不 push。它假设宿主 agent 能派发 subagent，否则
+显式失败。
+
+这个循环采用 Spec-Driven Development（SDD）：
+
+- **Pre-flight**：先通读一遍 PLAN，在动工前把任何矛盾或缺陷一次性抛给你；上游缺陷会
+  路由回某个阶段重开，而不是在执行里打补丁。
+- **逐任务**：一个全新 implementer subagent 在 TDD 下只实现一个 PLAN-TASK，只提交自己
+  改动的文件并回报；随后 task-reviewer 对照 SPEC 与该任务的验证标准检查，fix 循环清掉
+  Critical 与 Important 发现后才勾选该任务。
+- **整分支评审**：全部任务完成后，由最强模型上的 final reviewer 在整个执行区间上重跑
+  完整验证套件，并把 PLAN 当作清单逐条核对。这次评审就是合并门槛。
+- **自动归档**：final review 干净地给出 `Verdict: Approved`，`r2p-execute` 才会归档该
+  run。commit 留在当前分支；`push` 和 pull request 仍需你单独显式请求。
+
+进度持久记录在 `execution/progress.md`，因此被打断的 run 会从第一个未勾选的任务继续，
+而不是从头再来。
 
 ## Development
 

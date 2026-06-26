@@ -38,6 +38,12 @@ bin/r2p.js version                                # package.json `prepack` runs 
 Never use bare `pytest` — it ignores the venv and fails on the missing `pyyaml`
 import. Never run `npm install -g` to develop; use the venv paths above.
 
+The local `.venv` is Python 3.10, so a few `tomllib`-dependent tests **skip**
+locally — expected, not a failure; they run on the CI 3.11/3.12 matrix. `pytest`
+is the only verification surface: there is **no** linter, formatter, or
+type-checker configured (no ruff/black/mypy/pyproject) — don't look for one or
+introduce one without being asked.
+
 ## Architecture & module map
 
 **Agent/CLI separation** (load-bearing invariant): the CLI manages state,
