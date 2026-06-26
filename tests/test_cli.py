@@ -4670,6 +4670,65 @@ class TestPlanTaskBrief:
             body = brief_path.read_text(encoding="utf-8")
             assert "PLAN-TASK-002" in body
 
+    def test_plan_task_brief_missing_plan_exits_not_found(self):
+        """EXECUTING run without a PLAN artifact → EXIT_NOT_FOUND, no brief written."""
+        from tools.workflow_cli.state import RunStateManager, create_run_record
+        from tools.workflow_cli.models import RunStatus, Stage, WorkId
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            wid = "WF-20260626-noplan"
+            run_dir = base / ".req-to-plan" / wid
+            run_dir.mkdir(parents=True)
+            rec = create_run_record(WorkId(wid))
+            rec.status = RunStatus.EXECUTING
+            rec.current_stage = Stage.CLOSED
+            RunStateManager(run_dir).save(rec)  # deliberately no PLAN artifact
+            with pytest.raises(SystemExit) as exc:
+                main(["--base-path", str(base), "plan-task-brief", "--work-id", wid, "--task", "1"])
+            assert exc.value.code == 7  # EXIT_NOT_FOUND
+            assert not (run_dir / "logs" / "task-1-brief.md").exists()
+
+    def test_plan_task_brief_unknown_work_id_exits_not_found(self):
+        """Unknown work-id (no run dir) → EXIT_NOT_FOUND."""
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            with pytest.raises(SystemExit) as exc:
+                main([
+                    "--base-path", str(base),
+                    "plan-task-brief", "--work-id", "WF-20260626-nope", "--task", "1",
+                ])
+            assert exc.value.code == 7  # EXIT_NOT_FOUND
+
+    def test_plan_task_brief_excludes_read_only_section_task(self):
+        """A PLAN-TASK nested in a read-only section is stripped: not selectable,
+        and a real task's brief carries no read-only content."""
+        plan = (
+            "# Plan\n\n"
+            "## Project Context (read-only)\n"
+            "### PLAN-TASK-099: phantom inside read-only\n"
+            "Should be stripped.\n"
+            "<!-- /r2p-read-only -->\n\n"
+            "### PLAN-TASK-001: real first\nBody 1.\n\n"
+            "### PLAN-TASK-002: real second\nBody 2.\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            wid = "WF-20260626-readonly"
+            run_dir = self._executing_run_with_plan(base, wid, plan)
+            # Phantom task inside the read-only section is excluded.
+            with pytest.raises(SystemExit) as exc:
+                main(["--base-path", str(base), "plan-task-brief", "--work-id", wid, "--task", "99"])
+            assert exc.value.code == 7  # EXIT_NOT_FOUND
+            assert not (run_dir / "logs" / "task-99-brief.md").exists()
+            # The real task still extracts; its brief carries no read-only content.
+            with pytest.raises(SystemExit) as exc2:
+                main(["--base-path", str(base), "plan-task-brief", "--work-id", wid, "--task", "1"])
+            assert exc2.value.code == 0
+            body = (run_dir / "logs" / "task-1-brief.md").read_text(encoding="utf-8")
+            assert "PLAN-TASK-001" in body
+            assert "read-only" not in body
+            assert "PLAN-TASK-099" not in body
+
 
 # ---------------------------------------------------------------------------
 # TestTaskBriefShortcut — SPEC-SURFACE-001 (PLAN-TASK-003)
