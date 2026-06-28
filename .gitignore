@@ -12,4 +12,5 @@ venv/
 .codegraph
 .cursor
 .pytest_cache
+.coverage
 node_modules/
