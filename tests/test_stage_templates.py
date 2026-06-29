@@ -1,3 +1,5 @@
+import json
+import re as _re
 import unittest
 from tools.workflow_cli.models import Stage, TierBase
 
@@ -165,3 +167,95 @@ class TestStageTemplates(unittest.TestCase):
                     "Future Task Ownership:", text,
                     f"{stage}/{tier} must not contain PLAN optional field"
                 )
+
+
+# ---------------------------------------------------------------------------
+# Batch 2: gate round-trip coverage (AC-4 + AC-5)
+# ---------------------------------------------------------------------------
+
+def _seed(tmp, plan_text):
+    """Write the minimal upstream fixture so trace-closure, file-ref, and context-pack checks pass."""
+    from tools.workflow_cli.models import STAGE_ARTIFACT_MAP, Stage as _Stage
+    (tmp / "02-project-context.json").write_text(json.dumps({"repo_root": str(tmp)}))
+    (tmp / "seed_fixture.py").write_text("# seed\n")  # referenced by Files; must exist under repo_root
+    (tmp / STAGE_ARTIFACT_MAP[_Stage.SPEC]).write_text("## SPEC-SEED-001 seed\ncontent\n")
+    (tmp / STAGE_ARTIFACT_MAP[_Stage.REQUIREMENT_BRIEF]).write_text(
+        "## In-Scope\n- SCOPE-IN-001 x\n## Out-of-Scope\n- SCOPE-OUT-001 y\n"
+    )
+    (tmp / STAGE_ARTIFACT_MAP[_Stage.PLAN]).write_text(plan_text)
+
+
+def _fill_required_tasks_minimally(template_text):
+    """Replace all PLAN template placeholders with gate-clean minimal content.
+
+    Fills PLAN-TASK-001 so it:
+    - consumes SPEC-SEED-001 (Spec References)
+    - carries SCOPE-IN-001 (Steps line, picked up by scope_in_not_closed)
+    - references seed_fixture.py under repo_root (Files, satisfies _check_plan_file_refs)
+    - has a real Skeleton code block (TDD Applicable: yes)
+    - has a real Verification command (no fill-in placeholder)
+    The seeded ## Risk Handling row (RISK-EXAMPLE-001 / [ADDRESSED]) is kept as-is.
+    """
+    t = template_text
+    t = t.replace("### PLAN-TASK-001 <!-- fill in -->",
+                  "### PLAN-TASK-001 Implement seed feature")
+    t = t.replace("Spec References: SPEC-BEHAVIOR-001",
+                  "Spec References: SPEC-SEED-001")
+    # Replace only the first "- <!-- fill in -->" (the Files list entry)
+    t = t.replace("- <!-- fill in -->", "- seed_fixture.py", 1)
+    t = t.replace("```python\n# <!-- fill in -->\n```",
+                  "```python\ndef seed(): pass\n```")
+    t = t.replace("- [ ] <!-- fill in -->",
+                  "- [ ] Implement seed feature for SCOPE-IN-001")
+    # Verification placeholder — gate blocks any <!-- fill in: ... --> comment
+    t = _re.sub(
+        r"Verification: <!-- fill in:.*?-->",
+        "Verification: `.venv/bin/python -m pytest tests/ -q` all pass. Evidence: paste output.",
+        t,
+    )
+    return t
+
+
+def test_seeded_plan_passes_gate_when_filled_minimally(tmp_path):
+    """AC-4: seeded Risk Handling row clears Check 3 and malformed-trace-ID check."""
+    from tools.workflow_cli.gates import check_quality_gate
+    from tools.workflow_cli.models import Stage, TierBase, TierEstimate
+    from tools.workflow_cli.stage_templates import template_for
+
+    plan = _fill_required_tasks_minimally(template_for(Stage.PLAN, TierBase.STANDARD))
+    _seed(tmp_path, plan)
+    tier = TierEstimate(base=TierBase.STANDARD, modifiers=frozenset())
+    r = check_quality_gate(tmp_path, Stage.PLAN, tier, [], plan)
+    assert r.passed, r.issues
+
+
+def test_plan_passes_gate_when_optional_sections_omitted(tmp_path):
+    """AC-5: optional sections/fields are removable; PLAN_TASK_FIELDS unchanged."""
+    from tools.workflow_cli.gates import check_quality_gate
+    from tools.workflow_cli.models import Stage, TierBase, TierEstimate
+
+    # PLAN without ## Execution Readiness, ## Risk Handling, Out-of-Task, Future Task Ownership
+    plan = (
+        "# Plan\n\n"
+        "## Tasks\n\n"
+        "### PLAN-TASK-001 Implement seed feature\n"
+        "Spec References: SPEC-SEED-001\n"
+        "Change Type: modify\n"
+        "TDD Applicable: yes\n"
+        "Files:\n"
+        "- seed_fixture.py\n"
+        "Skeleton:\n"
+        "```python\n"
+        "def seed(): pass\n"
+        "```\n"
+        "Steps:\n"
+        "- [ ] Implement seed feature for SCOPE-IN-001\n"
+        "Verification: `.venv/bin/python -m pytest tests/ -q` all pass. Evidence: paste output.\n\n"
+        "## Trace\n"
+        "| This ID | Upstream | Status |\n"
+        "|---|---|---|\n"
+    )
+    _seed(tmp_path, plan)
+    tier = TierEstimate(base=TierBase.STANDARD, modifiers=frozenset())
+    r = check_quality_gate(tmp_path, Stage.PLAN, tier, [], plan)
+    assert r.passed, r.issues
