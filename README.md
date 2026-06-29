@@ -261,8 +261,11 @@ The loop is Spec-Driven Development (SDD):
   archive the run. Commits stay on your current branch; `push` and pull requests
   remain a separate, explicit request.
 
-Progress is tracked durably in `execution/progress.md`, so an interrupted run
-resumes from the first unchecked task instead of restarting.
+Progress is tracked durably in `execution/progress.md`. If a run is interrupted,
+just run `r2p-execute` again on the same run: it detects the `executing` status,
+continues from the first unchecked task, and never re-runs completed work or
+restarts from scratch. If it cannot reconstruct where the interrupted task began,
+it stops and asks you rather than guessing.
 
 ## Development
 

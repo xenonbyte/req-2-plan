@@ -236,8 +236,9 @@ Standard tier 的 DESIGN/SPEC/PLAN 阶段可能要求 subagent review，尤其�
 - **自动归档**：final review 干净地给出 `Verdict: Approved`，`r2p-execute` 才会归档该
   run。commit 留在当前分支；`push` 和 pull request 仍需你单独显式请求。
 
-进度持久记录在 `execution/progress.md`，因此被打断的 run 会从第一个未勾选的任务继续，
-而不是从头再来。
+进度持久记录在 `execution/progress.md`。run 被打断后，直接对同一个 run 再次运行
+`r2p-execute` 即可：它会识别出 `executing` 状态，从第一个未勾选的任务继续，既不会重跑
+已完成的任务，也不会从头再来。若无法重建被打断任务的起点，它会停下来询问你，而不是瞎猜。
 
 ## Development
 
