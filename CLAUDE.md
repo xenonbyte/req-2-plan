@@ -87,7 +87,7 @@ doubt, read the module, not this file.
 | `repo_baseline.py` | Repo baseline scan: LOC, languages, monorepo/submodule signals |
 | `context_pack.py` | Project Context Pack: deps, test commands, entrypoints, config, source dirs |
 | `link_expander.py` | Local relative-link expansion for requirement intake |
-| `stage_schema.py` / `stage_templates.py` | Required headings per stage/tier + structural seed templates |
+| `stage_schema.py` / `stage_templates.py` | Required headings per stage/tier + structural seed templates; `stage_templates.py` also seeds PLAN's optional, removable **non-gate** sections (`## Execution Readiness`, `## Risk Handling`) and PLAN-TASK fields (`Out-of-Task`, `Future Task Ownership`) — absent from `STAGE_SCHEMA`/`PLAN_TASK_FIELDS`, so deleting them still passes the quality gate |
 | `markdown.py` / `atomic.py` | Fence-aware Markdown helpers; atomic text writes |
 | `workspace.py` | Neutral `.req-to-plan/` workspace helpers (imports neither `cli.py` nor `agent_shortcuts.py`): owns the workspace `.gitignore` and the path-limited git-commit primitive used by run-close (add) and run-archive (remove) |
 | `trace.py` | Derived trace model and closure checks |
@@ -174,7 +174,11 @@ archived -> none
     `execution/final-review.md`, `Verdict: Approved`,
     `re-run the full verification suite`) — and `r2p-execute` templates must
     **not** mention `r2p-gap-open` (execution runs are `closed`, so upstream
-    defects go through reopen/human repair, not gap routing).
+    defects go through reopen/human repair, not gap routing). A separate guard,
+    `test_execute_surfaces_carry_template_hardening_tokens`, pins the EXE-1..EXE-5
+    execution-protocol prose with distinctive load-bearing tokens that must appear
+    on **both** `r2p-execute` surfaces (claude command + codex SKILL) in lockstep;
+    deleting any from either surface fails the test.
 
 ## Extending
 

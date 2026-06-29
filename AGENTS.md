@@ -63,7 +63,7 @@ from Claude's Markdown command templates.
 | `tier.py` + `tier_keywords.yaml` | Keyword scan, tier floor, tier estimation |
 | `repo_baseline.py` / `context_pack.py` | Repo baseline scan + Project Context Pack |
 | `link_expander.py` | Local relative-link expansion for requirement intake |
-| `stage_schema.py` / `stage_templates.py` | Required headings per stage/tier; structural seed templates |
+| `stage_schema.py` / `stage_templates.py` | Required headings per stage/tier; structural seed templates (incl. PLAN's optional, removable non-gate sections — Execution Readiness, Risk Handling, Out-of-Task, Future Task Ownership — not in `STAGE_SCHEMA`/`PLAN_TASK_FIELDS`) |
 | `markdown.py` / `atomic.py` | Fence-aware Markdown helpers; atomic text writes |
 | `workspace.py` | Neutral helper (no CLI/shortcut import → no cycle): owns the workspace `.gitignore` + the path-limited `git commit` primitive used by run-close (add) and run-archive (remove) |
 | `trace.py` | Derived trace model and closure checks |
@@ -114,7 +114,7 @@ archived -> none
 - `print_and_exit` calls `sys.exit`; tests calling `cli.main()` must catch `SystemExit`.
 - `tests/test_docs_consistency.py` silently guards two things you can break when editing docs/templates:
   - `CLAUDE.md` must contain **no** hardcoded test count ("NN passing", "baseline: NN").
-  - Agent-template surfaces must carry required tokens (`r2p-continue` → "unresolved ambiguity"/"undecided point"; `r2p-execute` → the SDD token set) and `r2p-execute` templates must **not** mention `r2p-gap-open`.
+  - Agent-template surfaces must carry required tokens (`r2p-continue` → "unresolved ambiguity"/"undecided point"; `r2p-execute` → the SDD token set plus the EXE-1..EXE-5 hardening tokens guarded by `test_execute_surfaces_carry_template_hardening_tokens` on **both** surfaces in lockstep) and `r2p-execute` templates must **not** mention `r2p-gap-open`.
 
 ## Repo-layout gotchas
 
