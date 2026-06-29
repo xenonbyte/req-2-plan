@@ -26,6 +26,7 @@ from tools.workflow_cli.agent_shortcuts import (
     scan_open_runs,
     write_active_pointer,
     main,
+    _pointer_path,
 )
 from tools.workflow_cli.cli import main as cli_main
 from tools.workflow_cli.state import RunStateManager
@@ -566,6 +567,20 @@ class TestCmdStatus:
             out = capsys.readouterr().out
             assert "no_selected_run" in out
 
+    def test_prints_no_selected_run_when_pointer_missing_key(self, capsys):
+        # A non-empty pointer file lacking selected_work_id (hand-edited or
+        # externally corrupted) must behave like a missing pointer, not KeyError.
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            (base / ".req-to-plan").mkdir()
+            _pointer_path(base).write_text(
+                "updated_at: 2026-01-01T00:00:00Z\nreason: corrupted\n",
+                encoding="utf-8",
+            )
+            _invoke(["status"], base, expect_exit=0)
+            out = capsys.readouterr().out
+            assert "no_selected_run" in out
+
     def test_calls_status_run_when_pointer_exists(self, capsys):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
@@ -586,6 +601,20 @@ class TestCmdTaskBrief:
     def test_prints_no_selected_run_when_no_pointer(self, capsys):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
+            _invoke(["task-brief", "--task", "2"], base, expect_exit=1)
+            out = capsys.readouterr().out
+            assert "no_selected_run" in out
+
+    def test_prints_no_selected_run_when_pointer_missing_key(self, capsys):
+        # Shape-B fallback (ns.work_id empty): a corrupted pointer missing the
+        # selected_work_id key must fall through to no_selected_run, not KeyError.
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            (base / ".req-to-plan").mkdir()
+            _pointer_path(base).write_text(
+                "updated_at: 2026-01-01T00:00:00Z\nreason: corrupted\n",
+                encoding="utf-8",
+            )
             _invoke(["task-brief", "--task", "2"], base, expect_exit=1)
             out = capsys.readouterr().out
             assert "no_selected_run" in out

@@ -508,10 +508,11 @@ def _cmd_start(ns: argparse.Namespace, base_path: Path) -> None:
 
 def _cmd_continue(ns: argparse.Namespace, base_path: Path) -> None:
     pointer = read_active_pointer(base_path)
-    if not pointer:
+    work_id = pointer.get("selected_work_id") if pointer else None
+    if not work_id:
         print("no_selected_run: true\nnext: r2p-status --all\n")
         sys.exit(1)
-    work_id = _validate_work_id(pointer["selected_work_id"])
+    work_id = _validate_work_id(work_id)
     run_path = base_path / ".req-to-plan" / work_id / "run.md"
     if not run_path.exists():
         print(f"blocked: source_run_not_found\nwork_id: {work_id}\n")
@@ -744,11 +745,12 @@ def _cmd_status(ns: argparse.Namespace, base_path: Path) -> None:
         sys.exit(0)
 
     pointer = read_active_pointer(base_path)
-    if not pointer:
+    work_id = pointer.get("selected_work_id") if pointer else None
+    if not work_id:
         print("no_selected_run: true\nnext: r2p-status --all\n")
         sys.exit(0)
 
-    work_id = _validate_work_id(pointer["selected_work_id"])
+    work_id = _validate_work_id(work_id)
     exit_code = _run_cli(["status-run", "--work-id", work_id], base_path)
     sys.exit(exit_code)
 
@@ -816,10 +818,10 @@ def _cmd_archive(ns: argparse.Namespace, base_path: Path) -> None:
     work_id = ns.work_id
     if not work_id:
         pointer = read_active_pointer(base_path)
-        if not pointer:
+        work_id = pointer.get("selected_work_id") if pointer else None
+        if not work_id:
             print("no_selected_run: true\nnext: r2p-archive --work-id <id>\n")
             sys.exit(1)
-        work_id = pointer["selected_work_id"]
     work_id = _validate_work_id(work_id)
     archive_args = ["run-archive", "--work-id", work_id]
     if getattr(ns, "force", False):
@@ -854,10 +856,10 @@ def _cmd_execute(ns: argparse.Namespace, base_path: Path) -> None:
     work_id = ns.work_id
     if not work_id:
         pointer = read_active_pointer(base_path)
-        if not pointer:
+        work_id = pointer.get("selected_work_id") if pointer else None
+        if not work_id:
             print("no_selected_run: true\nnext: r2p-execute --work-id <id>\n")
             sys.exit(1)
-        work_id = pointer["selected_work_id"]
     work_id = _validate_work_id(work_id)
     r2p_dir = base_path / ".req-to-plan"
     run_dir = r2p_dir / work_id
@@ -972,10 +974,10 @@ def _cmd_task_brief(ns: argparse.Namespace, base_path: Path) -> None:
     work_id = ns.work_id
     if not work_id:
         pointer = read_active_pointer(base_path)
-        if not pointer:
+        work_id = pointer.get("selected_work_id") if pointer else None
+        if not work_id:
             print("no_selected_run: true\nnext: r2p-task-brief --work-id <id> --task <N>\n")
             sys.exit(1)
-        work_id = pointer["selected_work_id"]
     work_id = _validate_work_id(work_id)
     sys.exit(_run_cli(
         ["plan-task-brief", "--work-id", work_id, "--task", str(ns.task)],

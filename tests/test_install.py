@@ -238,6 +238,29 @@ class TestInstallService:
             "symlink target must not be written through"
         )
 
+    def test_strip_path_from_manifest_tolerates_non_dict_backup_entry(self, tmp_path):
+        # A malformed (non-dict) backups entry — e.g. from a hand-edited or legacy
+        # manifest — must not crash _strip_path_from_manifest with AttributeError.
+        # The matching dict backup is still stripped; the malformed scalar survives.
+        from tools.workflow_cli.install import _dump_manifest, _load_manifest
+
+        svc, manifest_root, _ = make_service(tmp_path)
+        svc.install("claude")
+        manifest_path = manifest_root / "install" / "claude.yaml"
+        manifest = _load_manifest(manifest_path)
+        target = manifest["installed_paths"][0]
+        manifest["backups"] = [{"target": target}, "not-a-dict-scalar"]
+        manifest_path.write_text(_dump_manifest(manifest), encoding="utf-8")
+
+        # Must not raise; previously raised AttributeError on the scalar entry.
+        svc._strip_path_from_manifest(manifest_path, target)
+
+        result = _load_manifest(manifest_path)
+        assert target not in result["installed_paths"], "target must be stripped"
+        assert result["backups"] == ["not-a-dict-scalar"], (
+            "matching dict backup removed, malformed scalar preserved"
+        )
+
     def test_obsolete_wrapper_cleanup_tolerates_symlinked_manifest(self, tmp_path):
         # A symlinked (unsafe) manifest sitting in install/ must neither be written
         # through nor abort cleanup of the remaining valid manifests. The valid

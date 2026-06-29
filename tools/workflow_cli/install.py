@@ -767,10 +767,15 @@ class InstallService:
             changed = True
 
         backups = manifest.get("backups", [])
-        kept = [bk for bk in backups if str(bk.get("target")) != path_str]
-        if len(kept) != len(backups):
-            manifest["backups"] = kept
-            changed = True
+        if isinstance(backups, list):
+            kept = [
+                bk
+                for bk in backups
+                if not isinstance(bk, dict) or str(bk.get("target")) != path_str
+            ]
+            if len(kept) != len(backups):
+                manifest["backups"] = kept
+                changed = True
 
         if changed:
             self._write_manifest_atomic(manifest_path, _dump_manifest(manifest))
