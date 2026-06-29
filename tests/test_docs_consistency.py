@@ -72,6 +72,26 @@ def _get_role_section(text, heading_prefix):
     return "\n".join(section_lines)
 
 
+EXECUTE_SURFACES = [
+    "tools/workflow_cli/agent_templates/claude/commands/r2p-execute.md",
+    "tools/workflow_cli/agent_templates/codex/skills/r2p-execute/SKILL.md",
+]
+
+REQUIRED_TEMPLATE_HARDENING_TOKENS = [
+    # EXE-1: final reviewer reads the full upstream context incl. 07-plan + per-task reports/reviews + Minor
+    "the final reviewer is the one role that reads `07-plan.md`",
+    # EXE-2: per-task boundary clean-tree invariant, distinct from the Task 1 check
+    "a non-clean code tree at a task boundary",
+    # EXE-3: brief-contents lists Files + reviewer compares changed files vs the brief's Files
+    "against the brief's `Files`",
+    # EXE-4: derive-on-resume BASE reconstruction (lowest-numbered unchecked task; preceding completion head7)
+    "reconstruct the in-progress task's BASE",
+    # EXE-5: report evidence sections; no Context-Read checklist
+    "Verification Evidence",
+    "Changed Files",
+]
+
+
 class TestExecuteTemplateContent(unittest.TestCase):
     def test_execute_surfaces_call_installed_task_brief_wrapper(self):
         surfaces = [
@@ -487,6 +507,18 @@ class TestExecuteTemplateContent(unittest.TestCase):
                     path, read_set_portion,
                     f"{rel}: excluded path {path!r} found in ACS read-set portion",
                 )
+
+    def test_execute_surfaces_carry_template_hardening_tokens(self):
+        """SPEC-GUARD-001: EXE-1..EXE-5 distinctive tokens on both r2p-execute surfaces."""
+        for surface in EXECUTE_SURFACES:
+            text = (REPO_ROOT / surface).read_text(encoding="utf-8")
+            for tok in REQUIRED_TEMPLATE_HARDENING_TOKENS:
+                self.assertIn(tok, text, f"{surface}: missing token: {tok!r}")
+            self.assertNotIn(
+                "`r2p-gap-open`",
+                text,
+                f"{surface}: execution runs are closed; must not reference r2p-gap-open",
+            )
 
     def test_gemini_execute_toml_mentions_in_place_and_archive(self):
         text = (REPO_ROOT / "tools/workflow_cli/agent_templates/gemini/commands/r2p-execute.toml").read_text(encoding="utf-8")

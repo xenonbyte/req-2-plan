@@ -107,9 +107,11 @@ For each PLAN-TASK (in order):
 
 ### 1. Run `r2p-task-brief` and obtain the task-brief path
 
-Run `{{R2P_BIN_DIR}}/r2p-task-brief --work-id <work-id> --task <N>` (where `<N>` is the task's integer, e.g. `2` for `PLAN-TASK-002`) for the current task. This installed wrapper delegates to the internal `plan-task-brief` CLI command. The command returns a `brief_path` pointing to a scoped brief file that contains the task's `Skeleton`, `Steps`, `Spec References`, and `Verification` criteria. Pass the `brief_path` as the handoff pointer to both the implementer and the reviewer — not pasted task text from `07-plan.md`. The controller uses the returned `brief_path` without eager-reading the full task body into its own context; the implementer and reviewer read the task-brief on demand.
+Run `{{R2P_BIN_DIR}}/r2p-task-brief --work-id <work-id> --task <N>` (where `<N>` is the task's integer, e.g. `2` for `PLAN-TASK-002`) for the current task. This installed wrapper delegates to the internal `plan-task-brief` CLI command. The command returns a `brief_path` pointing to a scoped brief file that contains the task's `Files`, `Skeleton`, `Steps`, `Spec References`, and `Verification` criteria. Pass the `brief_path` as the handoff pointer to both the implementer and the reviewer — not pasted task text from `07-plan.md`. The controller uses the returned `brief_path` without eager-reading the full task body into its own context; the implementer and reviewer read the task-brief on demand.
 
 ### 2. Dispatch a fresh implementer subagent
+
+**Per-task boundary clean-tree invariant**: before dispatching this task's implementer, run `git status --short -- ':!.req-to-plan'`; a non-clean code tree at a task boundary is a boundary-invariant violation (the previous task or fix wave left uncommitted work): stop and resolve before continuing. This per-task check is distinct from the Task 1 check in `## In-Place Execution`, which additionally negotiates pre-existing user dirty work.
 
 Record BASE (`git rev-parse HEAD`) BEFORE dispatching the implementer — **never use `HEAD~1`** as BASE (it drops all but the last commit of a multi-commit task). For Task 1, this BASE is also `<execution-base-commit>` for the final whole-branch review. Persist the Task 1 BASE immediately in tracked execution state by adding `Execution BASE: <execution-base-commit>` to `execution/progress.md`.
 
@@ -119,6 +121,7 @@ Provide the subagent with:
 - Global Constraints from the PLAN (`## Global Constraints`), copied verbatim when present — the brief carries only the task body, so the implementer does not otherwise see plan-level constraints
 - TDD instructions: follow `Skeleton`/`Steps`; prove `Verification` with evidence
 - A report file path (`execution/task-N-report.md`)
+  The implementer's `execution/task-N-report.md` must contain a `Verification Evidence` section (the command run and its fresh result) and a `Changed Files` section (the files the task actually changed). It must NOT contain a self-attested "Context Read" checklist. These sections are review aids; the `Changed Files` section also feeds the §5 reviewer comparison.
 
 The implementer return contract is minimal and inline:
 - `status`: DONE / DONE_WITH_CONCERNS / NEEDS_CONTEXT / BLOCKED
@@ -158,6 +161,7 @@ After the implementer reports DONE:
    - The diff file path (`.req-to-plan/<work-id>/logs/task-N-diff.md`)
    - A review report file path (`execution/task-N-review.md`)
    - Global constraints from the plan (copy verbatim from `## Global Constraints`); never pre-judge a finding's severity; never paste prior-task summaries into a later dispatch
+   - Compare the files actually changed in the task diff against the brief's `Files` list; a file changed outside that list requires an explicit, recorded justification, or the review returns `CHANGES_REQUESTED`. (Reviewer-protocol only — no CLI diff parsing or hard gate.)
 
 The task-reviewer writes detailed findings, if any, to `execution/task-N-review.md` and returns only this inline summary:
 - `status`: APPROVED / CHANGES_REQUESTED / NEEDS_CONTEXT / BLOCKED
@@ -190,6 +194,7 @@ The review report records:
 ## Final Whole-Branch Review
 
 After all tasks complete, dispatch a final whole-branch review subagent on the **most capable model**:
+- **Read context for the final reviewer**: the full Authoritative Context Set (`02-project-context.md`, `03-requirement-brief.md`, `04-risk-discovery.md`, `05-design.md`, `06-spec.md`, `execution/progress.md`) plus `07-plan.md`, every `execution/task-N-report.md`, every `execution/task-N-review.md`, and every `Minor:` ledger entry. Note: the final reviewer is the one role that reads `07-plan.md`; the per-task ACS exclusion of `07-plan.md` does not apply to this section.
 - First create the whole-branch diff: `mkdir -p .req-to-plan/<work-id>/logs` then `git diff -U10 <execution-base-commit> HEAD > .req-to-plan/<work-id>/logs/final-diff.md`
 - Scope: review the complete execution range `git diff -U10 <execution-base-commit> HEAD`, where `<execution-base-commit>` is the Task 1 BASE captured before dispatching the first implementer
 - Include the diff file path (`.req-to-plan/<work-id>/logs/final-diff.md`) in the reviewer dispatch; do not ask the reviewer to infer the changed range
@@ -223,6 +228,8 @@ Commits are already on the **current branch**. `push` and PR creation still requ
 
 Track progress in `execution/progress.md` (not only in todos). On resume, read the ledger and skip tasks already marked complete.
 On resume, read `execution/progress.md` before the final review and reuse its `Execution BASE:` line as `<execution-base-commit>`. Do not recalculate it from `HEAD` or from the latest task range. If the line is missing, stop and ask the human for the original Task 1 BASE instead of inferring a range.
+
+**Mid-task interruption recovery**: on resume, the in-progress task is the lowest-numbered unchecked (`- [ ]`) task; reconstruct the in-progress task's BASE from existing on-disk markers: Task 1 uses the ledger `Execution BASE:` line; Task N (N > 1) uses the `head7` of the immediately preceding `Task N-1: complete (commits <base7>..<head7>, review clean)` line. Then regenerate `logs/task-N-diff.md` from that BASE to HEAD and re-dispatch the task-reviewer idempotently — an already-committed, correct task is approved as-is; re-dispatch the implementer only if the review finds a gap. If neither marker can be resolved, stop and ask the human for the BASE. Never infer a range from `HEAD~1`; never capture a fresh BASE from HEAD on resume.
 
 ## Error Reference
 
