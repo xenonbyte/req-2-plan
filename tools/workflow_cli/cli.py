@@ -589,8 +589,10 @@ def _cmd_run_reopen(args):
 
     import shutil
 
+    new_run_dir_created = False
     try:
         new_run_dir.mkdir(parents=True, exist_ok=False)
+        new_run_dir_created = True
 
         # Copy artifacts up to (not including) target_stage
         for stage in STAGE_ORDER:
@@ -646,7 +648,8 @@ def _cmd_run_reopen(args):
     except Exception:
         # Roll back the partially-created new run dir so no orphan is left
         # when populate/save fails (mirrors the source-save rollback below).
-        shutil.rmtree(new_run_dir, ignore_errors=True)
+        if new_run_dir_created:
+            shutil.rmtree(new_run_dir, ignore_errors=True)
         raise
 
     if source_record.status == RunStatus.EXECUTING:
@@ -2095,7 +2098,7 @@ def _cmd_checkpoint_decide(args):
     if not review_result.passed:
         print_and_exit(
             format_gate_result(review_result, gate_type="subagent-review"),
-            EXIT_REVIEW_REQ,
+            review_result.exit_code,
         )
 
     from tools.workflow_cli.models import NEXT_STAGE_MAP

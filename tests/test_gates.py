@@ -553,8 +553,44 @@ class TestForcedSubagentReview(unittest.TestCase):
                 self.Stage.DESIGN, tier, reviews_dir, version=1
             )
         self.assertFalse(result.passed)
-        self.assertEqual(result.exit_code, 3)
+        self.assertEqual(result.exit_code, 6)
         self.assertTrue(any("symlink" in i.lower() for i in result.issues))
+
+    def test_fails_as_conflict_when_subagent_review_file_is_symlink(self):
+        """A symlinked subagent review file is an unsafe conflict, not a
+        missing-review request."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            reviews_dir = tmp / "reviews"
+            reviews_dir.mkdir()
+            outside = tmp / "outside-review.md"
+            outside.write_text("planted review", encoding="utf-8")
+            (reviews_dir / "design-subagent-review-v1.md").symlink_to(outside)
+            tier = self._locked_tier(
+                modifiers=frozenset({self.TierModifier.MIGRATION})
+            )
+            result = self.check_forced_subagent_review(
+                self.Stage.DESIGN, tier, reviews_dir, version=1
+            )
+        self.assertFalse(result.passed)
+        self.assertEqual(result.exit_code, 6)
+        self.assertTrue(any("symlink" in i.lower() for i in result.issues))
+
+    def test_fails_as_conflict_when_reviews_path_is_not_directory(self):
+        """A malformed reviews path must not crash when probing the child file."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            reviews_dir = tmp / "reviews"
+            reviews_dir.write_text("not a directory", encoding="utf-8")
+            tier = self._locked_tier(
+                modifiers=frozenset({self.TierModifier.MIGRATION})
+            )
+            result = self.check_forced_subagent_review(
+                self.Stage.DESIGN, tier, reviews_dir, version=1
+            )
+        self.assertFalse(result.passed)
+        self.assertEqual(result.exit_code, 6)
+        self.assertTrue(any("regular file" in i.lower() for i in result.issues))
 
     def test_passes_when_stage_is_requirement_brief(self):
         """Forced review does NOT apply to REQUIREMENT_BRIEF stage."""

@@ -32,7 +32,7 @@ from tools.workflow_cli.markdown import (
     unfenced_markdown_lines,
     unfenced_markdown_text,
 )
-from tools.workflow_cli.output import EXIT_GATE_FAIL
+from tools.workflow_cli.output import EXIT_CONFLICT, EXIT_GATE_FAIL
 from tools.workflow_cli.stage_schema import PLAN_TASK_FIELD_RE, PLAN_TASK_FIELDS
 
 # ---------------------------------------------------------------------------
@@ -43,7 +43,8 @@ from tools.workflow_cli.stage_schema import PLAN_TASK_FIELD_RE, PLAN_TASK_FIELDS
 class GateResult:
     passed: bool
     issues: list[str]
-    exit_code: int = 0  # 0=pass, 2=entry failure, 3=quality failure, 5=forced-subagent-review-required
+    # 0=pass, 2=input failure, 3=gate failure, 5=forced review required, 6=unsafe conflict
+    exit_code: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -1097,13 +1098,23 @@ def check_forced_subagent_review(
     subagent_file = reviews_dir / f"{stage_name}-subagent-review-v{version}.md"
     _text, sf_err = _read_regular_text_no_symlink(subagent_file)
     if sf_err == "symlink":
-        return _fail_gate(
-            "reviews/ is a symlink or the subagent review file is a symlink; "
-            "refusing to read outside the run directory. " + _FINAL_REVIEW_DISCLAIMER
+        return GateResult(
+            passed=False,
+            issues=[
+                "reviews/ is a symlink or the subagent review file is a symlink; "
+                "refusing to read outside the run directory. "
+                + _FINAL_REVIEW_DISCLAIMER
+            ],
+            exit_code=EXIT_CONFLICT,
         )
     if sf_err == "not_regular":
-        return _fail_gate(
-            "Subagent review file is not a regular file. " + _FINAL_REVIEW_DISCLAIMER
+        return GateResult(
+            passed=False,
+            issues=[
+                "Subagent review file is not a regular file. "
+                + _FINAL_REVIEW_DISCLAIMER
+            ],
+            exit_code=EXIT_CONFLICT,
         )
     if sf_err is None:
         return GateResult(passed=True, issues=[], exit_code=0)
@@ -1236,6 +1247,8 @@ def _read_regular_text_no_symlink(path: Path) -> tuple[str | None, str | None]:
     except OSError as exc:
         if exc.errno == errno.ELOOP:
             return None, "symlink"
+        if exc.errno == errno.ENOTDIR:
+            return None, "not_regular"
         raise
     finally:
         if fd is not None:

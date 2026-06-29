@@ -1057,6 +1057,53 @@ class TestRunReopen:
             assert not (base / ".req-to-plan" / f"{source}-r1").exists()
             assert (base / ".req-to-plan" / f"{source}-r2").exists()
 
+    def test_reopen_does_not_delete_candidate_created_by_concurrent_reopen(
+        self, monkeypatch
+    ):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            source = "WF-20260527-race"
+            invoke(["run-start", "--work-id", source, "--requirement", "foo"], base_path=base)
+            record = load_record(base, source)
+            record.status = RunStatus.CLOSED_AT_PLAN_CHECKPOINT
+            record.current_stage = Stage.CLOSED
+            record.approved_checkpoints = [plan_checkpoint()]
+            save_record(base, record)
+
+            raced_dir = base / ".req-to-plan" / f"{source}-r1"
+            original_mkdir = Path.mkdir
+
+            def create_then_race(self_path, *args, **kwargs):
+                if self_path == raced_dir:
+                    original_mkdir(self_path, parents=True, exist_ok=False)
+                    (self_path / "run.md").write_text(
+                        "created by concurrent reopen\n", encoding="utf-8"
+                    )
+                    raise FileExistsError("simulated concurrent reopen")
+                return original_mkdir(self_path, *args, **kwargs)
+
+            monkeypatch.setattr(Path, "mkdir", create_then_race)
+
+            with pytest.raises(FileExistsError):
+                main(
+                    [
+                        "--base-path",
+                        str(base),
+                        "run-reopen",
+                        "--from",
+                        source,
+                        "--stage",
+                        "spec",
+                        "--reason",
+                        "fix gap",
+                    ]
+                )
+
+            assert raced_dir.exists()
+            assert (raced_dir / "run.md").read_text(encoding="utf-8") == (
+                "created by concurrent reopen\n"
+            )
+
     def test_rejects_closed_as_target_stage(self):
         with tempfile.TemporaryDirectory() as tmp:
             source = "WF-20260527-test"
@@ -2569,6 +2616,35 @@ class TestCheckpointDecide:
                     "--decision", "approved", "--confirm"], base_path=tmp)
             record = load_record(tmp, work_id)
             assert record.status == RunStatus.CHECKPOINT_APPROVED
+
+    def test_forced_modifier_unsafe_review_exit_code_is_propagated(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work_id = "WF-20260527-cd4s"
+            invoke(["run-start", "--work-id", work_id, "--requirement", "foo"], base_path=tmp)
+            invoke(["tier-lock", "--work-id", work_id, "--base", "standard",
+                    "--modifiers", "safety", "--confirm"], base_path=tmp)
+            record = load_record(tmp, work_id)
+            record.current_stage = Stage.DESIGN
+            record.status = RunStatus.CHECKPOINT_REVIEW
+            from tools.workflow_cli.models import ActiveArtifact
+            record.active_artifacts = [ActiveArtifact(
+                stage=Stage.DESIGN, artifact="05-design.md", version=1, status="ready")]
+            save_record(tmp, record)
+            run_dir = Path(tmp) / ".req-to-plan" / work_id
+            (run_dir / "05-design.md").write_text("---\nr2p_version: 1\n---\nbody", encoding="utf-8")
+            reviews = run_dir / "reviews"
+            reviews.mkdir(parents=True, exist_ok=True)
+            (reviews / "design-checkpoint-review-v1.md").write_text("marker", encoding="utf-8")
+            outside = Path(tmp) / "outside-review.md"
+            outside.write_text("planted review", encoding="utf-8")
+            (reviews / "design-subagent-review-v1.md").symlink_to(outside)
+
+            invoke(["checkpoint-decide", "--work-id", work_id, "--stage", "design",
+                    "--decision", "approved", "--confirm"], base_path=tmp, expect_exit=6)
+
+            record = load_record(tmp, work_id)
+            assert record.status == RunStatus.CHECKPOINT_REVIEW
+            assert record.approved_checkpoints == []
 
     def test_forced_modifier_gate_quality_passes_but_approve_requires_review(self):
         with tempfile.TemporaryDirectory() as tmp:

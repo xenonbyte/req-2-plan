@@ -19,7 +19,7 @@ from pathlib import Path
 
 from tools.workflow_cli.atomic import atomic_write_text
 from tools.workflow_cli.models import RunStatus, WorkId
-from tools.workflow_cli.output import EXIT_CONFLICT, is_json_mode
+from tools.workflow_cli.output import EXIT_CONFLICT, EXIT_REVIEW_REQ, is_json_mode
 from tools.workflow_cli.workspace import ensure_workspace_gitignore
 
 ACTIVE_POINTER_FILE = ".workflow-active"
@@ -361,6 +361,16 @@ def _emit_checkpoint_stop(
         record.current_stage, record.tier_locked, reviews_dir, version
     )
     if not review_result.passed:
+        if review_result.exit_code != EXIT_REVIEW_REQ:
+            reason = "; ".join(review_result.issues) or "forced review gate failed"
+            print(
+                "blocked: unsafe_forced_review\n"
+                f"stage: {stage}\n"
+                f"reason: {reason}\n"
+                "next: remove the unsafe reviews/ path or subagent review file, "
+                "then r2p-continue\n"
+            )
+            sys.exit(EXIT_CONFLICT)
         review_file = reviews_dir / f"{stage}-subagent-review-v{version}.md"
         modifiers = (
             ", ".join(sorted(m.value for m in record.tier_locked.modifiers))

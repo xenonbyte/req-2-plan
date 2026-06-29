@@ -1573,6 +1573,68 @@ class TestCheckpointAmbiguityGuidance(unittest.TestCase):
         self.assertIn("needs_subagent_review", out)
         self.assertIn("ambiguity", out.lower())
 
+    def test_continue_blocks_symlinked_forced_review_in_checkpoint_review(self):
+        from tools.workflow_cli import agent_shortcuts as A
+        from tools.workflow_cli.models import (
+            RunStatus,
+            STAGE_ARTIFACT_MAP,
+            Stage,
+            TierBase,
+            TierEstimate,
+            TierModifier,
+            WorkId,
+        )
+        from tools.workflow_cli.output import EXIT_CONFLICT
+        from tools.workflow_cli.state import (
+            RunStateManager,
+            create_run_record,
+            upsert_active_artifact,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            work_id = "WF-20260101-symlink-review"
+            run_dir = base / ".req-to-plan" / work_id
+            run_dir.mkdir(parents=True)
+            outside = base / "outside-reviews"
+            outside.mkdir()
+            (outside / "design-subagent-review-v1.md").write_text(
+                "planted review\n", encoding="utf-8"
+            )
+            (run_dir / "reviews").symlink_to(outside, target_is_directory=True)
+
+            rec = create_run_record(WorkId(work_id))
+            rec.status = RunStatus.CHECKPOINT_REVIEW
+            rec.current_stage = Stage.DESIGN
+            rec.tier_locked = TierEstimate(
+                base=TierBase.STANDARD,
+                modifiers=frozenset({TierModifier.SAFETY}),
+            )
+            upsert_active_artifact(
+                rec,
+                stage=Stage.DESIGN,
+                artifact=STAGE_ARTIFACT_MAP[Stage.DESIGN],
+                version=1,
+                status="ready",
+            )
+            RunStateManager(run_dir).save(rec)
+            A.write_active_pointer(base, work_id)
+
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                with pytest.raises(SystemExit) as exc:
+                    A.main(["continue"], base_path=base)
+
+            out = buf.getvalue()
+            assert exc.value.code == EXIT_CONFLICT
+            assert "blocked: unsafe_forced_review" in out
+            assert "needs_subagent_review" not in out
+            assert "review_file:" not in out
+            assert (run_dir / "reviews").is_symlink()
+            assert sorted(p.name for p in outside.iterdir()) == [
+                "design-subagent-review-v1.md"
+            ]
+
 
 class TestIsTerminalArchived(unittest.TestCase):
     def test_archived_is_terminal(self):
