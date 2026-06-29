@@ -16,6 +16,10 @@ _TRACE_SKELETON = (
     "|---|---|---|\n"
 )
 
+_PLAN_GRANULARITY_NOTE = (
+    "<!-- Granularity: one PLAN-TASK = one implementer subagent, one task-reviewer; "
+    "split a task spanning too many files/behaviors, merge only one indivisible behavior. -->\n"
+)  # PLN-5, seeded under "## Tasks" (an HTML comment carries no gate-scanned placeholder token)
 
 _HEADING_BODY = {
     (Stage.REQUIREMENT_BRIEF, "## In-Scope"): "- SCOPE-IN-001 <!-- fill in -->\n",
@@ -35,7 +39,8 @@ _HEADING_BODY = {
     ),
     (Stage.SPEC, "## Behavior Contracts"): "### SPEC-BEHAVIOR-001 <!-- fill in -->\n",
     (Stage.PLAN, "## Tasks"): (
-        "### PLAN-TASK-001 <!-- fill in -->\n"
+        _PLAN_GRANULARITY_NOTE
+        + "### PLAN-TASK-001 <!-- fill in -->\n"
         "Spec References: SPEC-BEHAVIOR-001\n"
         "Change Type: modify\n"
         "TDD Applicable: yes\n"
@@ -47,8 +52,30 @@ _HEADING_BODY = {
         "```\n"
         "Steps:\n"
         "- [ ] <!-- fill in -->\n"
-        "Verification: <!-- fill in: objective pass/fail check (command + expected result), "
-        "e.g. `pytest tests/x.py::test_y` passes / `GET /foo` returns 429 when over limit -->\n"
+        "Verification: <!-- fill in: three-part — (1) targeted: `pytest tests/test_x.py::test_y -v` "
+        "passes; (2) full suite: `pytest tests/ -q` stays green; "
+        "(3) evidence: paste actual output showing pass count and zero failures -->\n"
+        "Out-of-Task: <!-- optional; list work deliberately deferred from this task -->\n"
+        "Future Task Ownership: PLAN-TASK-NNN <!-- optional; name the follow-on task that owns deferred work -->\n"
+    ),
+}
+
+_OPTIONAL_SECTIONS: dict[Stage, str] = {
+    Stage.PLAN: (
+        "## Execution Readiness\n"
+        "<!-- optional pre-execution self-check; remove if unused -->\n"
+        "- Requirement brief reviewed\n"
+        "- Design decisions resolved; decision requests pending none\n"
+        "- High-risk mitigations represented in tasks\n"
+        "- Non-goals protected\n"
+        "- Verification commands executable; expected changed files listed\n"
+        "- Future-task ownership clear; no unresolved ambiguity\n"
+        "\n"
+        "## Risk Handling\n"
+        "<!-- optional risk-to-task map; RISK-* IDs live in cells only, each row carries a same-line closure tag -->\n"
+        "| Risk | Handling Task | Closure |\n"
+        "|---|---|---|\n"
+        "| RISK-EXAMPLE-001 | PLAN-TASK-001 | [ADDRESSED] |\n"
     ),
 }
 
@@ -63,5 +90,6 @@ def template_for(stage: Stage, tier_base: TierBase) -> str:
     parts = [f"# {title}\n"]
     for h in headings:
         parts.append(f"{h}\n{_body_for(stage, h)}")
+    parts.append(_OPTIONAL_SECTIONS.get(stage, ""))  # additive; empty for non-PLAN stages
     parts.append(_TRACE_SKELETON)
-    return "\n".join(parts)
+    return "\n".join(p for p in parts if p)
