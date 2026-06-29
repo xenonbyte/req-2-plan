@@ -41,6 +41,8 @@ _HEADING_BODY = {
     (Stage.PLAN, "## Tasks"): (
         _PLAN_GRANULARITY_NOTE
         + "### PLAN-TASK-001 <!-- fill in -->\n"
+        "Out-of-Task: <!-- optional; list work deliberately deferred from this task -->\n"
+        "Future Task Ownership: PLAN-TASK-NNN <!-- optional; name the follow-on task that owns deferred work -->\n"
         "Spec References: SPEC-BEHAVIOR-001\n"
         "Change Type: modify\n"
         "TDD Applicable: yes\n"
@@ -55,8 +57,6 @@ _HEADING_BODY = {
         "Verification: <!-- fill in: three-part — (1) targeted: `pytest tests/test_x.py::test_y -v` "
         "passes; (2) full suite: `pytest tests/ -q` stays green; "
         "(3) evidence: paste actual output showing pass count and zero failures -->\n"
-        "Out-of-Task: <!-- optional; list work deliberately deferred from this task -->\n"
-        "Future Task Ownership: PLAN-TASK-NNN <!-- optional; name the follow-on task that owns deferred work -->\n"
     ),
 }
 

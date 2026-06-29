@@ -96,8 +96,17 @@ class TestStageTemplates(unittest.TestCase):
         self.assertIn("PLAN-TASK-NNN", text)
         # These lines must appear BEFORE ## Execution Readiness (inside the PLAN-TASK body)
         exec_ready_pos = text.index("## Execution Readiness")
+        spec_refs_pos = text.index("Spec References:")
+        steps_pos = text.index("Steps:")
+        verification_pos = text.index("Verification:")
         self.assertLess(text.index("Out-of-Task:"), exec_ready_pos)
         self.assertLess(text.index("Future Task Ownership:"), exec_ready_pos)
+        self.assertLess(text.index("Out-of-Task:"), spec_refs_pos)
+        self.assertLess(text.index("Future Task Ownership:"), spec_refs_pos)
+        self.assertLess(text.index("Out-of-Task:"), steps_pos)
+        self.assertLess(text.index("Future Task Ownership:"), steps_pos)
+        self.assertLess(text.index("Out-of-Task:"), verification_pos)
+        self.assertLess(text.index("Future Task Ownership:"), verification_pos)
 
     # --- PLN-3: enriched three-part Verification example ---
 
@@ -259,3 +268,39 @@ def test_plan_passes_gate_when_optional_sections_omitted(tmp_path):
     tier = TierEstimate(base=TierBase.STANDARD, modifiers=frozenset())
     r = check_quality_gate(tmp_path, Stage.PLAN, tier, [], plan)
     assert r.passed, r.issues
+
+
+def test_seeded_optional_fields_do_not_satisfy_blank_verification(tmp_path):
+    """Regression: optional PLAN-TASK fields must not make blank Verification non-empty."""
+    from tools.workflow_cli.gates import check_quality_gate
+    from tools.workflow_cli.models import Stage, TierBase, TierEstimate
+    from tools.workflow_cli.stage_templates import template_for
+
+    plan = _fill_required_tasks_minimally(template_for(Stage.PLAN, TierBase.STANDARD))
+    plan = _re.sub(r"^Verification: .*$", "Verification:", plan, count=1, flags=_re.MULTILINE)
+    _seed(tmp_path, plan)
+    tier = TierEstimate(base=TierBase.STANDARD, modifiers=frozenset())
+    r = check_quality_gate(tmp_path, Stage.PLAN, tier, [], plan)
+    assert not r.passed
+    assert any("Verification:" in issue for issue in r.issues)
+
+
+def test_seeded_optional_fields_do_not_satisfy_blank_steps(tmp_path):
+    """Regression: optional PLAN-TASK fields must not make blank Steps non-empty."""
+    from tools.workflow_cli.gates import check_quality_gate
+    from tools.workflow_cli.models import Stage, TierBase, TierEstimate
+    from tools.workflow_cli.stage_templates import template_for
+
+    plan = _fill_required_tasks_minimally(template_for(Stage.PLAN, TierBase.STANDARD))
+    plan = _re.sub(
+        r"^Steps:\n- \[ \] Implement seed feature for SCOPE-IN-001$",
+        "Steps:",
+        plan,
+        count=1,
+        flags=_re.MULTILINE,
+    )
+    _seed(tmp_path, plan)
+    tier = TierEstimate(base=TierBase.STANDARD, modifiers=frozenset())
+    r = check_quality_gate(tmp_path, Stage.PLAN, tier, [], plan)
+    assert not r.passed
+    assert any("Steps:" in issue for issue in r.issues)
