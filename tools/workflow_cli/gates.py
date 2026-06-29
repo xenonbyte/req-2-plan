@@ -1090,10 +1090,22 @@ def check_forced_subagent_review(
     if stage not in _FORCED_REVIEW_STAGES:
         return GateResult(passed=True, issues=[], exit_code=0)
 
-    # Condition 4: a real, version-matched subagent review must exist.
+    # Condition 4: a real, version-matched subagent review must exist. Read the
+    # file without following symlinks so a symlinked reviews/ directory (or a
+    # symlinked review file) cannot satisfy this forced-review gate.
     stage_name = stage.value
     subagent_file = reviews_dir / f"{stage_name}-subagent-review-v{version}.md"
-    if subagent_file.exists():
+    _text, sf_err = _read_regular_text_no_symlink(subagent_file)
+    if sf_err == "symlink":
+        return _fail_gate(
+            "reviews/ is a symlink or the subagent review file is a symlink; "
+            "refusing to read outside the run directory. " + _FINAL_REVIEW_DISCLAIMER
+        )
+    if sf_err == "not_regular":
+        return _fail_gate(
+            "Subagent review file is not a regular file. " + _FINAL_REVIEW_DISCLAIMER
+        )
+    if sf_err is None:
         return GateResult(passed=True, issues=[], exit_code=0)
 
     # All conditions met: require forced subagent review

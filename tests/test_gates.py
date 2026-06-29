@@ -536,6 +536,26 @@ class TestForcedSubagentReview(unittest.TestCase):
         self.assertTrue(result.passed)
         self.assertEqual(result.exit_code, 0)
 
+    def test_fails_when_reviews_dir_is_symlink_with_planted_review(self):
+        """A symlinked reviews/ must not satisfy the forced-review gate even when
+        a version-matched review file exists through the symlink."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            outside = tmp / "outside"
+            outside.mkdir()
+            (outside / "design-subagent-review-v1.md").write_text("planted review")
+            reviews_dir = tmp / "reviews"
+            reviews_dir.symlink_to(outside, target_is_directory=True)
+            tier = self._locked_tier(
+                modifiers=frozenset({self.TierModifier.MIGRATION})
+            )
+            result = self.check_forced_subagent_review(
+                self.Stage.DESIGN, tier, reviews_dir, version=1
+            )
+        self.assertFalse(result.passed)
+        self.assertEqual(result.exit_code, 3)
+        self.assertTrue(any("symlink" in i.lower() for i in result.issues))
+
     def test_passes_when_stage_is_requirement_brief(self):
         """Forced review does NOT apply to REQUIREMENT_BRIEF stage."""
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -1159,6 +1159,54 @@ class TestRunReopen:
                 f"Source must stay EXECUTING after failed save, got {source_rec.status}"
             )
 
+    def test_reopen_from_executing_rolls_back_new_run_on_new_record_save_failure(
+        self, monkeypatch
+    ):
+        """SPEC-STATE-001: if the NEW record save raises after new_run_dir is
+        populated, the new run dir must be removed (no orphan)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            source = "WF-20260527-exec-rb2"
+            invoke(
+                ["run-start", "--work-id", source, "--requirement", "foo"],
+                base_path=base,
+            )
+            record = load_record(base, source)
+            record.status = RunStatus.EXECUTING
+            record.current_stage = Stage.CLOSED
+            save_record(base, record)
+
+            from tools.workflow_cli.state import RunStateManager as _RSM
+
+            def patched_save(self_mgr, rec):
+                raise OSError("simulated disk failure on new record save")
+
+            monkeypatch.setattr(_RSM, "save", patched_save)
+
+            with pytest.raises((OSError, SystemExit)):
+                main(
+                    [
+                        "--base-path",
+                        str(base),
+                        "run-reopen",
+                        "--from",
+                        source,
+                        "--stage",
+                        "plan",
+                        "--reason",
+                        "repair plan",
+                    ]
+                )
+
+            new_run_dir = base / ".req-to-plan" / f"{source}-r1"
+            assert not new_run_dir.exists(), (
+                "Orphan new_run_dir must not exist after new-record save rollback"
+            )
+
+            monkeypatch.undo()
+            source_rec = load_record(base, source)
+            assert source_rec.status == RunStatus.EXECUTING
+
     def test_reopen_from_executing_normal_path_unchanged(self):
         """SPEC-STATE-001: normal reopen from EXECUTING still creates new run and
         transitions source to CLOSED_AT_PLAN_CHECKPOINT (existing behaviour)."""
@@ -2347,6 +2395,23 @@ class TestReviewCheckpoint:
                 "---\nr2p_version: 2\n---\nfoo", encoding="utf-8")
             invoke(["review-checkpoint", "--work-id", work_id, "--stage", "raw_requirement"],
                    base_path=tmp, expect_exit=6)
+
+    def test_review_checkpoint_rejects_symlinked_reviews_dir(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work_id = "WF-20260527-rcsym"
+            self._to_ready(tmp, work_id)
+            run_dir = Path(tmp) / ".req-to-plan" / work_id
+            outside = Path(tmp) / "outside-reviews"
+            outside.mkdir()
+            reviews_link = run_dir / "reviews"
+            reviews_link.symlink_to(outside, target_is_directory=True)
+
+            invoke(["review-checkpoint", "--work-id", work_id, "--stage", "raw_requirement"],
+                   base_path=tmp, expect_exit=6)
+
+            # Symlink must not be followed; the outside dir stays empty.
+            assert reviews_link.is_symlink()
+            assert list(outside.iterdir()) == []
 
 
 # ---------------------------------------------------------------------------

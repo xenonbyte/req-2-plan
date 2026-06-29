@@ -587,60 +587,67 @@ def _cmd_run_reopen(args):
             EXIT_CONFLICT,
         )
 
-    new_run_dir.mkdir(parents=True, exist_ok=False)
-
-    # Copy artifacts up to (not including) target_stage
     import shutil
-    for stage in STAGE_ORDER:
-        if stage == target_stage:
-            break
-        artifact_file = STAGE_ARTIFACT_MAP.get(stage)
-        if artifact_file:
-            src_path = source_dir / artifact_file
+
+    try:
+        new_run_dir.mkdir(parents=True, exist_ok=False)
+
+        # Copy artifacts up to (not including) target_stage
+        for stage in STAGE_ORDER:
+            if stage == target_stage:
+                break
+            artifact_file = STAGE_ARTIFACT_MAP.get(stage)
+            if artifact_file:
+                src_path = source_dir / artifact_file
+                if src_path.exists():
+                    shutil.copy2(src_path, new_run_dir / artifact_file)
+        for context_file in ("02-project-context.json", "02-project-context.md"):
+            src_path = source_dir / context_file
             if src_path.exists():
-                shutil.copy2(src_path, new_run_dir / artifact_file)
-    for context_file in ("02-project-context.json", "02-project-context.md"):
-        src_path = source_dir / context_file
-        if src_path.exists():
-            shutil.copy2(src_path, new_run_dir / context_file)
+                shutil.copy2(src_path, new_run_dir / context_file)
 
-    # Create new run record
-    new_record = create_run_record(new_work_id)
-    new_record.tier_estimate = source_record.tier_estimate
-    new_record.tier_locked = source_record.tier_locked
-    source_phase = (
-        "execution"
-        if source_record.status == RunStatus.EXECUTING
-        else "plan_checkpoint"
-    )
-    new_record.reopen_lineage = f"reopened_from: {source_id}@{source_phase} reason: {args.reason}"
-    new_record.current_stage = target_stage
+        # Create new run record
+        new_record = create_run_record(new_work_id)
+        new_record.tier_estimate = source_record.tier_estimate
+        new_record.tier_locked = source_record.tier_locked
+        source_phase = (
+            "execution"
+            if source_record.status == RunStatus.EXECUTING
+            else "plan_checkpoint"
+        )
+        new_record.reopen_lineage = f"reopened_from: {source_id}@{source_phase} reason: {args.reason}"
+        new_record.current_stage = target_stage
 
-    # Copy approved checkpoints before target stage
-    for cp in source_record.approved_checkpoints:
-        cp_stage_idx = STAGE_ORDER.index(cp.stage) if cp.stage in STAGE_ORDER else -1
-        target_idx = STAGE_ORDER.index(target_stage) if target_stage in STAGE_ORDER else 999
-        if cp_stage_idx < target_idx:
-            new_record.approved_checkpoints.append(cp)
+        # Copy approved checkpoints before target stage
+        for cp in source_record.approved_checkpoints:
+            cp_stage_idx = STAGE_ORDER.index(cp.stage) if cp.stage in STAGE_ORDER else -1
+            target_idx = STAGE_ORDER.index(target_stage) if target_stage in STAGE_ORDER else 999
+            if cp_stage_idx < target_idx:
+                new_record.approved_checkpoints.append(cp)
 
-    # Repopulate active_artifacts for copied stages so the reopened record
-    # matches the on-disk artifacts and approved checkpoints.
-    for cp in new_record.approved_checkpoints:
-        # Invariant: cp.artifact == STAGE_ARTIFACT_MAP[cp.stage] (artifacts are
-        # only ever created via the map, artifact.py:23). The existence check and
-        # the recorded name are therefore interchangeable; no drift path exists.
-        artifact_name = STAGE_ARTIFACT_MAP.get(cp.stage)
-        if artifact_name and (new_run_dir / artifact_name).exists():
-            upsert_active_artifact(
-                new_record,
-                stage=cp.stage,
-                artifact=cp.artifact,
-                version=cp.version,
-                status="approved",
-            )
+        # Repopulate active_artifacts for copied stages so the reopened record
+        # matches the on-disk artifacts and approved checkpoints.
+        for cp in new_record.approved_checkpoints:
+            # Invariant: cp.artifact == STAGE_ARTIFACT_MAP[cp.stage] (artifacts are
+            # only ever created via the map, artifact.py:23). The existence check and
+            # the recorded name are therefore interchangeable; no drift path exists.
+            artifact_name = STAGE_ARTIFACT_MAP.get(cp.stage)
+            if artifact_name and (new_run_dir / artifact_name).exists():
+                upsert_active_artifact(
+                    new_record,
+                    stage=cp.stage,
+                    artifact=cp.artifact,
+                    version=cp.version,
+                    status="approved",
+                )
 
-    new_mgr = RunStateManager(new_run_dir)
-    new_mgr.save(new_record)
+        new_mgr = RunStateManager(new_run_dir)
+        new_mgr.save(new_record)
+    except Exception:
+        # Roll back the partially-created new run dir so no orphan is left
+        # when populate/save fails (mirrors the source-save rollback below).
+        shutil.rmtree(new_run_dir, ignore_errors=True)
+        raise
 
     if source_record.status == RunStatus.EXECUTING:
         try:
@@ -1910,6 +1917,7 @@ def _cmd_review_checkpoint(args):
             EXIT_CONFLICT,
         )
     reviews_dir = run_dir / "reviews"
+    _reject_symlink_or_exit(reviews_dir, "unsafe_reviews_dir_symlink")
     reviews_dir.mkdir(parents=True, exist_ok=True)
     marker = reviews_dir / f"{stage.value}-checkpoint-review-v{aa.version}.md"
     marker.write_text(
@@ -2069,6 +2077,7 @@ def _cmd_checkpoint_decide(args):
         )
 
     reviews_dir = run_dir / "reviews"
+    _reject_symlink_or_exit(reviews_dir, "unsafe_reviews_dir_symlink")
     # Precondition: checkpoint-review marker for this version must exist (GR5).
     marker = reviews_dir / f"{stage.value}-checkpoint-review-v{aa.version}.md"
     if not marker.exists():
