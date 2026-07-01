@@ -280,14 +280,6 @@ def _scope_out_citation_is_anchored(
     )
 
 
-def _scope_out_citation_requests_implementation(line: str, scope_out_id: str) -> bool:
-    """Return True when the cited exclusion is being described as work to do."""
-    return any(
-        _scope_out_context_requests_implementation(context)
-        for context in _scope_out_citation_contexts(line, scope_out_id)
-    )
-
-
 def _scope_out_citation_contexts(line: str, scope_out_id: str) -> list[str]:
     contexts: list[str] = []
     for segment in _SCOPE_OUT_CLAUSE_BOUNDARY_RE.split(line):
