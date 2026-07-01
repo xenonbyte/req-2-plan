@@ -1416,6 +1416,54 @@ class TestTraceClosureInPlanGate(unittest.TestCase):
         self.assertFalse(any("scope overflow" in i.lower() for i in r.issues), r.issues)
         self.assertFalse(any("R20" in i for i in r.issues), r.issues)
 
+    def test_plan_gate_allows_anchored_scope_out_deferral_with_implementing(self):
+        import tempfile
+        from pathlib import Path
+        from tools.workflow_cli.gates import check_quality_gate
+        from tools.workflow_cli.models import Stage, TierBase, TierEstimate, STAGE_ARTIFACT_MAP
+        tier = TierEstimate(base=TierBase.LIGHT, modifiers=frozenset())
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            (run_dir / STAGE_ARTIFACT_MAP[Stage.REQUIREMENT_BRIEF]).write_text(
+                "## Out-of-Scope\n- SCOPE-OUT-001 PDF export\n", encoding="utf-8")
+            (run_dir / STAGE_ARTIFACT_MAP[Stage.SPEC]).write_text(
+                "## SPEC-AUTH-001 auth\nbehavior\n", encoding="utf-8")
+            plan = (
+                "## Tasks\n\n"
+                "### PLAN-TASK-001 keep exclusion visible\n"
+                "Spec References: SPEC-AUTH-001\n"
+                "Change Type: non_code\n"
+                "TDD Applicable: no\n"
+                "Files: N/A\n"
+                "Skeleton: N/A\n"
+                "Steps: Defer implementing PDF export to a later phase per SCOPE-OUT-001.\n"
+                "Verification: Confirm the plan does not implement PDF export.\n"
+            )
+            (run_dir / STAGE_ARTIFACT_MAP[Stage.PLAN]).write_text(plan, encoding="utf-8")
+            r = check_quality_gate(run_dir, Stage.PLAN, tier, [], plan)
+        self.assertFalse(any("scope overflow" in i.lower() for i in r.issues), r.issues)
+        self.assertFalse(any("R20" in i for i in r.issues), r.issues)
+
+    def test_design_gate_allows_runtime_defer_until_behavior(self):
+        import tempfile
+        from pathlib import Path
+        from tools.workflow_cli.gates import check_quality_gate
+        from tools.workflow_cli.models import Stage, TierBase, TierEstimate
+        tier = TierEstimate(base=TierBase.LIGHT, modifiers=frozenset())
+        design = (
+            "## Design Summary\n\n"
+            "### DES-FORM-001 Runtime validation\n"
+            "The form will defer validation until submit so users are not interrupted while typing.\n\n"
+            "## Chosen Design\n\n"
+            "Validation runs on submit and reports field-level errors inline. "
+            "The preview can defer loading until idle to keep input responsive.\n\n"
+            "## SPEC Handoff\n\n"
+            "Specify the submit-time validation behavior and error rendering.\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            r = check_quality_gate(Path(tmp), Stage.DESIGN, tier, [], design)
+        self.assertFalse(any("R20" in i for i in r.issues), r.issues)
+
     def test_plan_gate_rejects_unanchored_deferral_after_anchored_deferral_same_line(self):
         import tempfile
         from pathlib import Path
@@ -1498,6 +1546,36 @@ class TestTraceClosureInPlanGate(unittest.TestCase):
             r = check_quality_gate(run_dir, Stage.PLAN, tier, [], plan)
         self.assertFalse(any("scope overflow" in i.lower() for i in r.issues), r.issues)
         self.assertFalse(any("R20" in i for i in r.issues), r.issues)
+
+    def test_plan_gate_rejects_scope_out_implementation_before_comma_anchor(self):
+        import tempfile
+        from pathlib import Path
+        from tools.workflow_cli.gates import check_quality_gate
+        from tools.workflow_cli.models import Stage, TierBase, TierEstimate, STAGE_ARTIFACT_MAP
+        tier = TierEstimate(base=TierBase.LIGHT, modifiers=frozenset())
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            (run_dir / STAGE_ARTIFACT_MAP[Stage.REQUIREMENT_BRIEF]).write_text(
+                "## Out-of-Scope\n- SCOPE-OUT-001 admin UI\n", encoding="utf-8")
+            (run_dir / STAGE_ARTIFACT_MAP[Stage.SPEC]).write_text(
+                "## SPEC-AUTH-001 auth\nbehavior\n", encoding="utf-8")
+            plan = (
+                "## Tasks\n\n"
+                "### PLAN-TASK-001 implement auth\n"
+                "Spec References: SPEC-AUTH-001\n"
+                "Change Type: non_code\n"
+                "TDD Applicable: no\n"
+                "Files: N/A\n"
+                "Skeleton: N/A\n"
+                "Steps: Implement admin UI, excluded per SCOPE-OUT-001.\n"
+                "Verification: Confirm admin UI behavior is covered.\n"
+            )
+            (run_dir / STAGE_ARTIFACT_MAP[Stage.PLAN]).write_text(plan, encoding="utf-8")
+            r = check_quality_gate(run_dir, Stage.PLAN, tier, [], plan)
+        self.assertTrue(
+            any("SCOPE-OUT-001" in i and "scope overflow" in i.lower() for i in r.issues),
+            r.issues,
+        )
 
     def test_plan_gate_allows_in_scope_action_while_scope_out_remains_excluded(self):
         import tempfile
@@ -3485,6 +3563,15 @@ class TestUnanchoredDeferralGate(unittest.TestCase):
     def test_chinese_next_stage_handoff_not_flagged(self):
         issues = self._flagged(self.Stage.DESIGN, "## SPEC Handoff\n下一阶段产出 SPEC。\n")
         self.assertEqual(issues, [], "stage handoff prose is not a deferral")
+
+    def test_english_phase_handoff_not_flagged(self):
+        cases = [
+            "## SPEC Handoff\nThe next phase should specify the API contract.\n",
+            "## PLAN Handoff\nThe later phase should define the implementation tasks.\n",
+        ]
+        for content in cases:
+            with self.subTest(content=content):
+                self.assertEqual(self._flagged(self.Stage.DESIGN, content), [])
 
     def test_chinese_next_stage_with_deferral_verb_flagged(self):
         issues = self._flagged(self.Stage.DESIGN, "## Chosen Design\nPDF 导出推迟到下一阶段。\n")

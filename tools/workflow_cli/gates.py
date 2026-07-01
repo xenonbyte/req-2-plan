@@ -122,6 +122,25 @@ _PLACEHOLDER_PATTERNS = [
 # brief-anchored closures, not free-text deferral). Patterns stay high-precision
 # (whole phrases, not the bare words "later"/"future"/"后续") to avoid flagging
 # ordinary prose. A hit is allowed only when the same line cites a SCOPE-OUT-* ID.
+#
+# The defer VERB rule requires its target to be one of these project-planning
+# buckets. This is deliberate: a broad "defer X to/until Y" flagged common
+# runtime prose ("defer validation until submit", "defer loading until idle").
+# The tradeoff is a narrow, documented residual — a real deferral to a non-bucket
+# target ("defer PDF export to Q3 / to the redesign") is not caught here; those
+# are plainly visible to the human checkpoint. Do not widen this back to an open
+# target without reintroducing the runtime-prose false positives.
+_PROJECT_DEFERRAL_TARGET = (
+    r"(?:(?:a|the)\s+)?(?:(?:later|future|next|subsequent)\s+"
+    r"(?:phase|iteration|round|milestone|sprint|release|task|ticket|story)|"
+    r"follow[- ]?up\s+(?:phase|iteration|round|milestone|sprint|release|task|ticket|story)|"
+    r"(?:stakeholder|product|business|human)\s+approval|"
+    r"backlog)"
+)
+_BARE_PROJECT_PHASE_RE = re.compile(
+    r"(?i)\b(?:later|future|next|subsequent)\s+"
+    r"(?:phase|iteration|round|milestone|sprint)\b"
+)
 _DEFERRAL_PATTERNS = [
     re.compile(r"本轮(?:先)?不(?:做|实现|处理|支持|涉及)"),
     re.compile(r"暂不(?:做|实现|处理|支持|考虑|涉及)"),
@@ -132,17 +151,21 @@ _DEFERRAL_PATTERNS = [
     re.compile(r"(?:留|放|挪|推迟|延期|安排)到(?:以后|后续|下一?期|下个迭代|下一版|下一阶段)"),
     re.compile(r"(?:下一?期|下个迭代|下一版|下一阶段)(?:再|才)(?:做|实现|处理|支持|考虑)"),
     re.compile(r"以后再(?:做|实现|处理|说)"),
-    # Deferral is the VERB (defer/defers/deferring): "defer X to/until Y" (X up to
-    # 8 non-punctuation words). "deferred" is excluded here so the common adjectival
+    # Deferral is the VERB (defer/defers/deferring) and the target is plainly a
+    # project-planning bucket. "deferred" is excluded here so the common adjectival
     # sense ("deferred rendering/execution/tax ... to ...") is not caught by the window.
-    re.compile(r"(?i)\b(?:defer|defers|deferring)\b(?:\s+(?!(?:to|until)\b)[^\s,.;:]+){0,8}\s+(?:to|until)\b"),
+    re.compile(
+        r"(?i)\b(?:defer|defers|deferring)\b"
+        r"(?:\s+(?!(?:to|until)\b)[^\s,.;:]+){0,8}\s+(?:to|until)\s+"
+        + _PROJECT_DEFERRAL_TARGET
+    ),
     # "deferred to/until" adjacent only (deferral sense; e.g. "deferred to next sprint").
     re.compile(r"(?i)\bdeferred\s+(?:to|until)\b"),
     re.compile(r"(?i)\bdo\s+(?:it\s+|this\s+|that\s+)?later\b"),
     # "phase/iteration/round/milestone/sprint" denote project-planning deferral;
     # "version/release" are omitted — they collide with external-dependency prose,
     # and explicit "defer to a later release" is already caught by the defer rule.
-    re.compile(r"(?i)\b(?:later|future|next|subsequent)\s+(?:phase|iteration|round|milestone|sprint)\b"),
+    _BARE_PROJECT_PHASE_RE,
     re.compile(r"(?i)\bfuture\s+work\b"),
     # "not this <planning-noun>" only. The 'current'/'the current' variants are
     # deliberately NOT matched here — "the current phase/scope/round" is an
@@ -227,6 +250,14 @@ _DEFERRAL_CONTEXT_TAIL_BOUNDARY_RE = re.compile(
     r"(?i)(?:[,，]|\b(?:and|with|while|whereas|but|however|although|though|except|unless)\b)"
 )
 _SCOPE_OUT_CHINESE_IMPLEMENTATION_NEGATION_PREFIX_RE = re.compile(r"(?:不|无需|不需要|不用)\s*$")
+_HANDOFF_HEADING_RE = re.compile(r"(?i)^#{1,6}\s+.*\bhandoff\b")
+_HANDOFF_PHASE_PROSE_RE = re.compile(
+    r"(?i)\b(?:the\s+)?(?:later|next|subsequent|following)\s+"
+    r"(?:phase|stage)\s+"
+    r"(?:should|must|will|can|needs?\s+to)\s+"
+    r"(?:specify|define|document|describe|detail|cover|map|produce|"
+    r"translate|carry)\b"
+)
 
 # HTML comments carry template guidance, not agent prose; strip them (DOTALL, so
 # multi-line comments are dropped whole) before scanning.
@@ -296,7 +327,7 @@ def _scope_out_citation_contexts(line: str, scope_out_id: str) -> list[str]:
                 segment, context_start, id_start
             ):
                 candidate = segment[boundary.end():]
-                if _scope_out_context_is_anchoring(candidate):
+                if _scope_out_context_can_start_after_comma(candidate):
                     context_start = boundary.end()
             for boundary in _SCOPE_OUT_COORDINATING_CONTEXT_BOUNDARY_RE.finditer(
                 segment, context_start, id_start
@@ -313,6 +344,28 @@ def _scope_out_citation_contexts(line: str, scope_out_id: str) -> list[str]:
     return contexts
 
 
+def _scope_out_context_can_start_after_comma(candidate: str) -> bool:
+    if not _scope_out_context_is_anchoring(candidate):
+        return False
+    anchor_start = _scope_out_anchor_start(candidate)
+    if anchor_start is None:
+        return False
+    return bool(candidate[:anchor_start].strip())
+
+
+def _scope_out_anchor_start(context: str) -> int | None:
+    starts: list[int] = []
+    if match := _deferral_match(context):
+        starts.append(match.start())
+    for pat in (
+        *_SCOPE_OUT_EXCLUSION_CONTEXT_PATTERNS,
+        *_SCOPE_OUT_NON_IMPLEMENTATION_CONTEXT_PATTERNS,
+    ):
+        if match := pat.search(context):
+            starts.append(match.start())
+    return min(starts) if starts else None
+
+
 def _scope_out_context_is_anchoring(context: str) -> bool:
     if _deferral_match(context) is not None:
         return True
@@ -326,6 +379,8 @@ def _scope_out_context_is_anchoring(context: str) -> bool:
 
 
 def _scope_out_context_requests_implementation(context: str) -> bool:
+    if _deferral_match(context) is not None:
+        return False
     for match in _SCOPE_OUT_IMPLEMENTATION_ACTION_RE.finditer(context):
         prefix = context[:match.start()]
         prefix_window = prefix[-160:]
@@ -1225,13 +1280,18 @@ def _check_unanchored_deferral(
         return []
     decommented = _HTML_COMMENT_RE.sub("", content)
     issues: list[str] = []
+    in_handoff_section = False
     for line, _, _ in unfenced_markdown_lines(decommented):
+        if heading_level(line) is not None:
+            in_handoff_section = _HANDOFF_HEADING_RE.match(line.strip()) is not None
         for clause in _SCOPE_OUT_CLAUSE_BOUNDARY_RE.split(line):
             inspected_contexts: set[str] = set()
             for match in _deferral_matches(
                 clause,
                 allow_structured_deferred_status=(stage == Stage.RISK_DISCOVERY),
             ):
+                if in_handoff_section and _deferral_match_is_handoff_prose(line, match):
+                    continue
                 context = _deferral_match_context(clause, match)
                 if context in inspected_contexts:
                     continue
@@ -1244,6 +1304,13 @@ def _check_unanchored_deferral(
                     "exclusion in the brief's '## Out-of-Scope' (SCOPE-OUT-*) and cite that ID here."
                 )
     return issues
+
+
+def _deferral_match_is_handoff_prose(line: str, match: re.Match) -> bool:
+    return (
+        _BARE_PROJECT_PHASE_RE.fullmatch(match.group(0)) is not None
+        and _HANDOFF_PHASE_PROSE_RE.search(line) is not None
+    )
 
 
 def _deferral_match_is_scope_out_anchored(
