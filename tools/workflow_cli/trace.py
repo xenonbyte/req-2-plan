@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -33,8 +34,14 @@ class TraceModel:
     defined: dict = field(default_factory=dict)     # id -> stage value where first defined
 
 
-def _scope_ids_defined_in_brief_section(stage: Stage, content: str, heading: str) -> set[str]:
-    """SCOPE-* ids defined by bullet entries under one brief scope section."""
+def _scope_ids_in_brief_section(
+    stage: Stage,
+    content: str,
+    heading: str,
+    *,
+    bullet_only: bool,
+) -> set[str]:
+    """SCOPE-* ids mentioned under one brief scope section."""
     if stage != Stage.REQUIREMENT_BRIEF:
         return set()
     ids: set[str] = set()
@@ -50,9 +57,17 @@ def _scope_ids_defined_in_brief_section(stage: Stage, content: str, heading: str
             continue
         if capture and level is not None and level <= capture_level:
             capture = False
-        if capture and stripped.startswith(("- ", "* ")):
-            ids.update(m.group(0) for m in _ID_RE.finditer(line) if m.group(0).startswith("SCOPE-"))
+        if not capture:
+            continue
+        if bullet_only and not stripped.startswith(("- ", "* ")):
+            continue
+        ids.update(m.group(0) for m in _ID_RE.finditer(line) if m.group(0).startswith("SCOPE-"))
     return ids
+
+
+def _scope_ids_defined_in_brief_section(stage: Stage, content: str, heading: str) -> set[str]:
+    """SCOPE-* ids defined by bullet entries under one brief scope section."""
+    return _scope_ids_in_brief_section(stage, content, heading, bullet_only=True)
 
 
 def _scope_ids_defined_in_brief(stage: Stage, content: str) -> set[str]:
@@ -60,6 +75,19 @@ def _scope_ids_defined_in_brief(stage: Stage, content: str) -> set[str]:
     return (
         _scope_ids_defined_in_brief_section(stage, content, "## In-Scope")
         | _scope_ids_defined_in_brief_section(stage, content, "## Out-of-Scope")
+    )
+
+
+def _scope_ids_visible_for_plan_closure(stage: Stage, content: str) -> set[str]:
+    """SCOPE-* ids visible to PLAN closure.
+
+    New brief quality gates require bullet entries, but already-approved legacy
+    briefs may contain table/prose scope IDs. Keep those IDs visible so PLAN
+    closure cannot silently skip an in-scope item.
+    """
+    return (
+        _scope_ids_in_brief_section(stage, content, "## In-Scope", bullet_only=False)
+        | _scope_ids_in_brief_section(stage, content, "## Out-of-Scope", bullet_only=False)
     )
 
 
@@ -200,6 +228,8 @@ def build_trace(run_dir: Path) -> TraceModel:
         content = _artifact_text(run_dir, stage)
         heading_ids = _native_heading_ids(stage, content)
         definition_ids = heading_ids | _scope_ids_defined_in_brief(stage, content)
+        if stage == Stage.REQUIREMENT_BRIEF:
+            definition_ids |= _scope_ids_visible_for_plan_closure(stage, content)
         for id_ in definition_ids:
             model.defined.setdefault(id_, stage.value)
     return model
@@ -270,26 +300,37 @@ def defined_scope_out_ids(run_dir: Path) -> set[str]:
     }
 
 
-def scope_out_violations(run_dir: Path) -> list[str]:
+def scope_out_violations(
+    run_dir: Path,
+    plan_task_scope_out_allowed: Callable[[str, str], bool] | None = None,
+    consumed_spec_scope_out_allowed: Callable[[str, str], bool] | None = None,
+) -> list[str]:
     """SCOPE-OUT-* ids that PLAN-TASK bodies reference, directly or via a
     consumed SPEC block — a scope overflow (R8/R9). Non-goals subsections
     nested inside a consumed SPEC block are exempt (legitimate exclusion
     declarations)."""
     plan_text = _artifact_text(run_dir, Stage.PLAN)
-    plan_task_text = "\n".join(unfenced_markdown_text(body) for body in _plan_task_bodies(plan_text))
-    violations = {
-        m.group(0)
-        for m in _ID_RE.finditer(plan_task_text)
-        if m.group(0).startswith("SCOPE-OUT-")
-    }
+    violations: set[str] = set()
+    for body in _plan_task_bodies(plan_text):
+        for line, _, _ in unfenced_markdown_lines(body):
+            for match in _ID_RE.finditer(line):
+                scope_id = match.group(0)
+                if not scope_id.startswith("SCOPE-OUT-"):
+                    continue
+                if plan_task_scope_out_allowed and plan_task_scope_out_allowed(line, scope_id):
+                    continue
+                violations.add(scope_id)
     spec_blocks = _spec_blocks(_artifact_text(run_dir, Stage.SPEC))
     for spec_id in plan_consumed_spec_ids(run_dir):
         scanned = _strip_nested_non_goals(spec_blocks.get(spec_id, ""))
-        violations.update(
-            m.group(0)
-            for m in _ID_RE.finditer(scanned)
-            if m.group(0).startswith("SCOPE-OUT-")
-        )
+        for line, _, _ in unfenced_markdown_lines(scanned):
+            for match in _ID_RE.finditer(line):
+                scope_id = match.group(0)
+                if not scope_id.startswith("SCOPE-OUT-"):
+                    continue
+                if consumed_spec_scope_out_allowed and consumed_spec_scope_out_allowed(line, scope_id):
+                    continue
+                violations.add(scope_id)
     return sorted(violations)
 
 

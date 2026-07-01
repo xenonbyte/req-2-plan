@@ -1357,6 +1357,169 @@ class TestTraceClosureInPlanGate(unittest.TestCase):
         self.assertFalse(r.passed)
         self.assertTrue(any("SCOPE-OUT-001" in i for i in r.issues))
 
+    def test_plan_gate_keeps_legacy_non_bullet_scope_in_visible_to_closure(self):
+        import tempfile
+        from pathlib import Path
+        from tools.workflow_cli.gates import check_quality_gate
+        from tools.workflow_cli.models import Stage, TierBase, TierEstimate, STAGE_ARTIFACT_MAP
+        tier = TierEstimate(base=TierBase.LIGHT, modifiers=frozenset())
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            (run_dir / STAGE_ARTIFACT_MAP[Stage.REQUIREMENT_BRIEF]).write_text(
+                "## In-Scope\nSCOPE-IN-001 rate limit per IP\n"
+                "## Out-of-Scope\n| SCOPE-OUT-001 | admin UI |\n",
+                encoding="utf-8",
+            )
+            (run_dir / STAGE_ARTIFACT_MAP[Stage.SPEC]).write_text(
+                "## SPEC-AUTH-001 auth\nbehavior\n", encoding="utf-8")
+            plan = (
+                "## Tasks\n\n"
+                "### PLAN-TASK-001 implement auth\n"
+                "Spec References: SPEC-AUTH-001\n"
+                "Change Type: non_code\n"
+                "TDD Applicable: no\n"
+                "Files: N/A\n"
+                "Skeleton: N/A\n"
+                "Steps: Implement auth behavior.\n"
+                "Verification: Confirm auth behavior is covered.\n"
+            )
+            (run_dir / STAGE_ARTIFACT_MAP[Stage.PLAN]).write_text(plan, encoding="utf-8")
+            r = check_quality_gate(run_dir, Stage.PLAN, tier, [], plan)
+        self.assertFalse(r.passed)
+        self.assertTrue(any("SCOPE-IN-001" in i and "scope not closed" in i for i in r.issues), r.issues)
+
+    def test_plan_gate_allows_anchored_scope_out_deferral_line(self):
+        import tempfile
+        from pathlib import Path
+        from tools.workflow_cli.gates import check_quality_gate
+        from tools.workflow_cli.models import Stage, TierBase, TierEstimate, STAGE_ARTIFACT_MAP
+        tier = TierEstimate(base=TierBase.LIGHT, modifiers=frozenset())
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            (run_dir / STAGE_ARTIFACT_MAP[Stage.REQUIREMENT_BRIEF]).write_text(
+                "## Out-of-Scope\n- SCOPE-OUT-001 PDF export\n", encoding="utf-8")
+            (run_dir / STAGE_ARTIFACT_MAP[Stage.SPEC]).write_text(
+                "## SPEC-AUTH-001 auth\nbehavior\n", encoding="utf-8")
+            plan = (
+                "## Tasks\n\n"
+                "### PLAN-TASK-001 keep exclusion visible\n"
+                "Spec References: SPEC-AUTH-001\n"
+                "Change Type: non_code\n"
+                "TDD Applicable: no\n"
+                "Files: N/A\n"
+                "Skeleton: N/A\n"
+                "Steps: Defer PDF export to a follow-up task per SCOPE-OUT-001.\n"
+                "Verification: Confirm the plan does not implement PDF export.\n"
+            )
+            (run_dir / STAGE_ARTIFACT_MAP[Stage.PLAN]).write_text(plan, encoding="utf-8")
+            r = check_quality_gate(run_dir, Stage.PLAN, tier, [], plan)
+        self.assertFalse(any("scope overflow" in i.lower() for i in r.issues), r.issues)
+        self.assertFalse(any("R20" in i for i in r.issues), r.issues)
+
+    def test_plan_gate_allows_declared_scope_out_exclusion_citation_without_deferral_wording(self):
+        import tempfile
+        from pathlib import Path
+        from tools.workflow_cli.gates import check_quality_gate
+        from tools.workflow_cli.models import Stage, TierBase, TierEstimate, STAGE_ARTIFACT_MAP
+        tier = TierEstimate(base=TierBase.LIGHT, modifiers=frozenset())
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            (run_dir / STAGE_ARTIFACT_MAP[Stage.REQUIREMENT_BRIEF]).write_text(
+                "## Out-of-Scope\n- SCOPE-OUT-001 PDF export\n", encoding="utf-8")
+            (run_dir / STAGE_ARTIFACT_MAP[Stage.SPEC]).write_text(
+                "## SPEC-AUTH-001 auth\nbehavior\n", encoding="utf-8")
+            plan = (
+                "## Tasks\n\n"
+                "### PLAN-TASK-001 keep exclusion visible\n"
+                "Spec References: SPEC-AUTH-001\n"
+                "Change Type: non_code\n"
+                "TDD Applicable: no\n"
+                "Files: N/A\n"
+                "Skeleton: N/A\n"
+                "Steps: PDF export remains excluded per SCOPE-OUT-001.\n"
+                "Verification: Confirm the plan does not implement PDF export.\n"
+            )
+            (run_dir / STAGE_ARTIFACT_MAP[Stage.PLAN]).write_text(plan, encoding="utf-8")
+            r = check_quality_gate(run_dir, Stage.PLAN, tier, [], plan)
+        self.assertFalse(any("scope overflow" in i.lower() for i in r.issues), r.issues)
+        self.assertFalse(any("R20" in i for i in r.issues), r.issues)
+
+    def test_plan_gate_allows_consumed_spec_anchored_scope_out_deferral_line(self):
+        import tempfile
+        from pathlib import Path
+        from tools.workflow_cli.gates import check_quality_gate
+        from tools.workflow_cli.models import Stage, TierBase, TierEstimate, STAGE_ARTIFACT_MAP
+        tier = TierEstimate(base=TierBase.LIGHT, modifiers=frozenset())
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            (run_dir / STAGE_ARTIFACT_MAP[Stage.REQUIREMENT_BRIEF]).write_text(
+                "## Out-of-Scope\n- SCOPE-OUT-001 PDF export\n", encoding="utf-8")
+            spec = (
+                "## Behavior Contracts\n\n"
+                "### SPEC-EXPORT-001 CSV export\n"
+                "CSV export is implemented now; PDF is a future iteration per SCOPE-OUT-001.\n\n"
+                "## External Documentation Checked\n"
+                "N/A - no external dependencies\n\n"
+                "## PLAN Handoff\n"
+                "PLAN should implement SPEC-EXPORT-001.\n"
+            )
+            (run_dir / STAGE_ARTIFACT_MAP[Stage.SPEC]).write_text(spec, encoding="utf-8")
+            spec_result = check_quality_gate(run_dir, Stage.SPEC, tier, [], spec)
+            plan = (
+                "## Tasks\n\n"
+                "### PLAN-TASK-001 implement CSV export\n"
+                "Spec References: SPEC-EXPORT-001\n"
+                "Change Type: non_code\n"
+                "TDD Applicable: no\n"
+                "Files: N/A\n"
+                "Skeleton: N/A\n"
+                "Steps: Implement the CSV export behavior.\n"
+                "Verification: Confirm CSV export behavior is covered.\n"
+            )
+            (run_dir / STAGE_ARTIFACT_MAP[Stage.PLAN]).write_text(plan, encoding="utf-8")
+            plan_result = check_quality_gate(run_dir, Stage.PLAN, tier, [], plan)
+        self.assertFalse(any("R20" in i for i in spec_result.issues), spec_result.issues)
+        self.assertFalse(any("scope overflow" in i.lower() for i in plan_result.issues), plan_result.issues)
+        self.assertFalse(any("R20" in i for i in plan_result.issues), plan_result.issues)
+
+    def test_plan_gate_allows_consumed_spec_declared_scope_out_exclusion_citation_without_deferral_wording(self):
+        import tempfile
+        from pathlib import Path
+        from tools.workflow_cli.gates import check_quality_gate
+        from tools.workflow_cli.models import Stage, TierBase, TierEstimate, STAGE_ARTIFACT_MAP
+        tier = TierEstimate(base=TierBase.LIGHT, modifiers=frozenset())
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            (run_dir / STAGE_ARTIFACT_MAP[Stage.REQUIREMENT_BRIEF]).write_text(
+                "## Out-of-Scope\n- SCOPE-OUT-001 PDF export\n", encoding="utf-8")
+            spec = (
+                "## Behavior Contracts\n\n"
+                "### SPEC-EXPORT-001 CSV export\n"
+                "CSV export is implemented now; PDF export remains excluded per SCOPE-OUT-001.\n\n"
+                "## External Documentation Checked\n"
+                "N/A - no external dependencies\n\n"
+                "## PLAN Handoff\n"
+                "PLAN should implement SPEC-EXPORT-001.\n"
+            )
+            (run_dir / STAGE_ARTIFACT_MAP[Stage.SPEC]).write_text(spec, encoding="utf-8")
+            spec_result = check_quality_gate(run_dir, Stage.SPEC, tier, [], spec)
+            plan = (
+                "## Tasks\n\n"
+                "### PLAN-TASK-001 implement CSV export\n"
+                "Spec References: SPEC-EXPORT-001\n"
+                "Change Type: non_code\n"
+                "TDD Applicable: no\n"
+                "Files: N/A\n"
+                "Skeleton: N/A\n"
+                "Steps: Implement the CSV export behavior.\n"
+                "Verification: Confirm CSV export behavior is covered.\n"
+            )
+            (run_dir / STAGE_ARTIFACT_MAP[Stage.PLAN]).write_text(plan, encoding="utf-8")
+            plan_result = check_quality_gate(run_dir, Stage.PLAN, tier, [], plan)
+        self.assertFalse(any("R20" in i for i in spec_result.issues), spec_result.issues)
+        self.assertFalse(any("scope overflow" in i.lower() for i in plan_result.issues), plan_result.issues)
+        self.assertFalse(any("R20" in i for i in plan_result.issues), plan_result.issues)
+
     def test_plan_gate_ignores_scope_out_in_seeded_upstream_summary(self):
         import tempfile
         from pathlib import Path
@@ -1456,6 +1619,19 @@ class TestScopeFreeze(unittest.TestCase):
         self.assertFalse(r.passed)
         self.assertTrue(any("In-Scope" in i for i in r.issues))
         self.assertTrue(any("Out-of-Scope" in i for i in r.issues))
+
+    def test_non_bullet_scope_ids_do_not_satisfy_scope_freeze(self):
+        import tempfile
+        from pathlib import Path
+        content = self._brief(
+            "SCOPE-IN-001 rate limit per IP",
+            "| SCOPE-OUT-001 | admin UI |",
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            r = self.check(Path(tmp), self.Stage.REQUIREMENT_BRIEF, self.tier, [], content)
+        self.assertFalse(r.passed)
+        self.assertTrue(any("SCOPE-IN-001" in i and "bullet" in i.lower() for i in r.issues))
+        self.assertTrue(any("SCOPE-OUT-001" in i and "bullet" in i.lower() for i in r.issues))
 
     def test_standard_brief_without_assumptions_or_questions_fails(self):
         import tempfile
@@ -2972,8 +3148,47 @@ class TestUnanchoredDeferralGate(unittest.TestCase):
         issues = self._flagged(self.Stage.SPEC, "## Behavior Contracts\nPDF 导出后续版本再实现。\n")
         self.assertTrue(issues)
 
+    def test_chinese_next_stage_handoff_not_flagged(self):
+        issues = self._flagged(self.Stage.DESIGN, "## SPEC Handoff\n下一阶段产出 SPEC。\n")
+        self.assertEqual(issues, [], "stage handoff prose is not a deferral")
+
+    def test_chinese_next_stage_with_deferral_verb_flagged(self):
+        issues = self._flagged(self.Stage.DESIGN, "## Chosen Design\nPDF 导出推迟到下一阶段。\n")
+        self.assertTrue(issues)
+
     def test_defer_to_later_phase_flagged_in_plan(self):
         issues = self._flagged(self.Stage.PLAN, "### PLAN-TASK-001\nWe defer retries to a later phase.\n")
+        self.assertTrue(issues)
+
+    def test_transitive_defer_phrases_flagged(self):
+        cases = [
+            "## Chosen Design\nWe defer retries to a follow-up task.\n",
+            "## Chosen Design\nDefer PDF export until stakeholder approval.\n",
+            "## Chosen Design\nThe decision was deferred to next sprint.\n",
+        ]
+        for content in cases:
+            with self.subTest(content=content):
+                self.assertTrue(self._flagged(self.Stage.DESIGN, content))
+
+    def test_adjectival_deferred_not_flagged(self):
+        # "deferred" as an adjective/participle is a technical term, not a deferral:
+        # the transitive window applies only to defer/defers/deferring, so a stray
+        # "to"/"until" later in the clause must not trip R20.
+        cases = [
+            "## Chosen Design\nUse deferred rendering applied to the scene.\n",
+            "## Chosen Design\nDeferred execution is passed to the scheduler.\n",
+            "## Behavior Contracts\nThe deferred tax is credited to the account.\n",
+        ]
+        for content in cases:
+            with self.subTest(content=content):
+                self.assertEqual(self._flagged(self.Stage.DESIGN, content), [])
+
+    def test_do_later_phrase_flagged_in_design(self):
+        issues = self._flagged(self.Stage.DESIGN, "## Chosen Design\nPDF export: do later.\n")
+        self.assertTrue(issues)
+
+    def test_not_this_round_phrase_flagged_in_spec(self):
+        issues = self._flagged(self.Stage.SPEC, "## Behavior Contracts\nPDF export is not this round.\n")
         self.assertTrue(issues)
 
     def test_deferral_citing_brief_declared_scope_out_allowed(self):
@@ -3001,6 +3216,19 @@ class TestUnanchoredDeferralGate(unittest.TestCase):
     def test_risk_status_deferred_not_flagged(self):
         issues = self._flagged(self.Stage.RISK_DISCOVERY, "### RISK-SEC-001 x\nStatus: deferred\n")
         self.assertEqual(issues, [], "structured RISK closure is not agent-introduced deferral")
+
+    def test_risk_status_deferred_until_not_flagged(self):
+        issues = self._flagged(
+            self.Stage.RISK_DISCOVERY,
+            "### RISK-SEC-001 x\nStatus: deferred until the owner checkpoint\n",
+        )
+        self.assertEqual(issues, [], "structured RISK closure remains exempt with trailing detail")
+
+    def test_status_deferred_until_next_phase_flagged_outside_risk(self):
+        for stage in (self.Stage.DESIGN, self.Stage.SPEC, self.Stage.PLAN):
+            with self.subTest(stage=stage):
+                issues = self._flagged(stage, "Status: deferred until next phase\n")
+                self.assertTrue(issues)
 
     def test_closure_tag_deferred_not_flagged(self):
         issues = self._flagged(self.Stage.DESIGN, "## Requirements Coverage\nREQ-AUTH-001 [DEFERRED] per brief.\n")

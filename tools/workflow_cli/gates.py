@@ -128,31 +128,72 @@ _DEFERRAL_PATTERNS = [
     re.compile(r"延后(?:到|实现|处理|再)"),
     re.compile(r"后续(?:迭代|阶段|再做|再实现|再处理|再支持)"),
     re.compile(r"后续版本(?:中|里)?(?:再)?(?:做|实现|处理|支持)"),
-    re.compile(r"下(?:一期|个迭代|一版|一阶段)"),
-    re.compile(r"(?:留|放|挪)到(?:以后|后续|下一?期|下个)"),
+    re.compile(r"(?:留|放|挪|推迟|延期|安排)到(?:以后|后续|下一?期|下个迭代|下一版|下一阶段)"),
+    re.compile(r"(?:下一?期|下个迭代|下一版|下一阶段)(?:再|才)(?:做|实现|处理|支持|考虑)"),
     re.compile(r"以后再(?:做|实现|处理|说)"),
-    re.compile(r"(?i)\bdefer(?:red|ring|s)?\s+(?:to|until)\b"),
+    # Deferral is the VERB (defer/defers/deferring): "defer X to/until Y" (X up to
+    # 8 non-punctuation words). "deferred" is excluded here so the common adjectival
+    # sense ("deferred rendering/execution/tax ... to ...") is not caught by the window.
+    re.compile(r"(?i)\b(?:defer|defers|deferring)\b(?:\s+(?!(?:to|until)\b)[^\s,.;:]+){0,8}\s+(?:to|until)\b"),
+    # "deferred to/until" adjacent only (deferral sense; e.g. "deferred to next sprint").
+    re.compile(r"(?i)\bdeferred\s+(?:to|until)\b"),
+    re.compile(r"(?i)\bdo\s+(?:it\s+|this\s+|that\s+)?later\b"),
     # "phase/iteration/round/milestone/sprint" denote project-planning deferral;
     # "version/release" are omitted — they collide with external-dependency prose,
     # and explicit "defer to a later release" is already caught by the defer rule.
     re.compile(r"(?i)\b(?:later|future|next|subsequent)\s+(?:phase|iteration|round|milestone|sprint)\b"),
     re.compile(r"(?i)\bfuture\s+work\b"),
+    re.compile(r"(?i)\bnot\s+(?:this|the current)\s+(?:round|scope|iteration|phase|release)\b"),
     re.compile(r"(?i)\b(?:out of|not in)\s+(?:this|the current)\s+(?:round|scope|iteration|phase|release)\b"),
     re.compile(r"(?i)\bpunt(?:ed|ing|s)?\s+(?:on|to)\b"),
 ]
 
 # The brief-anchored exclusion citation that turns a deferral line from
-# "agent-introduced" into "carries a human-approved exclusion ID". The cited ID
-# only anchors the deferral if the brief actually declares it (see R20 check).
+# "agent-introduced" into "carries a human-approved exclusion ID". The same
+# citation is also allowed downstream when the line is plainly preserving an
+# exclusion/non-goal declaration rather than implementing it. The cited ID only
+# anchors the line if the brief actually declares it (see R20 check).
 _SCOPE_OUT_CITE_RE = re.compile(r"\bSCOPE-OUT-\d+\b")
+_SCOPE_OUT_EXCLUSION_CONTEXT_PATTERNS = [
+    re.compile(r"(?i)\bexclud(?:e|ed|es|ing|sion)\b"),
+    re.compile(r"(?i)\bout[- ]of[- ]scope\b"),
+    re.compile(r"(?i)\bnot\s+in\s+scope\b"),
+    re.compile(r"(?i)\bnon[- ]goals?\b"),
+    re.compile(r"(?:排除|范围外|不在(?:本轮|当前)?范围|非目标)"),
+]
 
 # HTML comments carry template guidance, not agent prose; strip them (DOTALL, so
 # multi-line comments are dropped whole) before scanning.
 _HTML_COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
+_STRUCTURED_DEFERRED_STATUS_RE = re.compile(r"(?i)^\s*Status:\s*deferred\b")
 
 _LEGACY_PLAN_DEFERRAL_FIELD_RE = re.compile(
     r"^[ \t]{0,3}(Out-of-Task|Future Task Ownership):"
 )
+
+
+def _deferral_match(line: str, *, allow_structured_deferred_status: bool = False):
+    if allow_structured_deferred_status and _STRUCTURED_DEFERRED_STATUS_RE.match(line):
+        return None
+    for pat in _DEFERRAL_PATTERNS:
+        match = pat.search(line)
+        if match:
+            return match
+    return None
+
+
+def _scope_out_citation_is_anchored(
+    line: str, scope_out_id: str, valid_scope_out: set[str]
+) -> bool:
+    decommented = _HTML_COMMENT_RE.sub("", line)
+    if scope_out_id not in valid_scope_out:
+        return False
+    if scope_out_id not in set(_SCOPE_OUT_CITE_RE.findall(decommented)):
+        return False
+    if _deferral_match(decommented) is not None:
+        return True
+    return any(pat.search(decommented) for pat in _SCOPE_OUT_EXCLUSION_CONTEXT_PATTERNS)
+
 
 # IDs that represent upstream references: REQ-*, RISK-*, DES-*, SPEC-*
 _UPSTREAM_ID_PATTERN = re.compile(
@@ -753,6 +794,20 @@ def _section_entry_ids(content: str, heading: str, id_prefix: str) -> list[str]:
     return ids
 
 
+def _section_non_bullet_scope_entries(content: str, heading: str, id_prefix: str) -> list[str]:
+    entries: list[str] = []
+    pattern = re.compile(rf"\b{re.escape(id_prefix)}-\d+\b")
+    for line in _section_body(content, heading).splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("<!--"):
+            continue
+        if stripped.startswith(("- ", "* ")):
+            continue
+        if pattern.search(stripped):
+            entries.append(stripped)
+    return entries
+
+
 def _section_has_bullets(content: str, heading: str) -> bool:
     return any(l.lstrip().startswith(("- ", "* ")) for l in _section_body(content, heading).splitlines())
 
@@ -898,19 +953,32 @@ def _check_scope_freeze(stage: Stage, content: str) -> list[str]:
     if stage != Stage.REQUIREMENT_BRIEF:
         return []
     issues: list[str] = []
-    for entry in _section_entries_missing_id(content, "## In-Scope", "SCOPE-IN"):
+    scope_content = _HTML_COMMENT_RE.sub("", content)
+    in_scope_ids = _section_entry_ids(scope_content, "## In-Scope", "SCOPE-IN")
+    out_scope_ids = _section_entry_ids(scope_content, "## Out-of-Scope", "SCOPE-OUT")
+    for entry in _section_entries_missing_id(scope_content, "## In-Scope", "SCOPE-IN"):
         issues.append(f"In-Scope entry must carry a SCOPE-IN-* stable ID (R8): {entry}")
-    for entry in _section_entries_missing_id(content, "## Out-of-Scope", "SCOPE-OUT"):
+    for entry in _section_entries_missing_id(scope_content, "## Out-of-Scope", "SCOPE-OUT"):
         issues.append(f"Out-of-Scope entry must carry a SCOPE-OUT-* stable ID (R8): {entry}")
-    for id_, count in Counter(_section_entry_ids(content, "## In-Scope", "SCOPE-IN")).items():
+    for entry in _section_non_bullet_scope_entries(scope_content, "## In-Scope", "SCOPE-IN"):
+        issues.append(
+            "In-Scope stable IDs must be declared as '- ' or '* ' bullet entries "
+            f"so trace can anchor them (R8): {entry}"
+        )
+    for entry in _section_non_bullet_scope_entries(scope_content, "## Out-of-Scope", "SCOPE-OUT"):
+        issues.append(
+            "Out-of-Scope stable IDs must be declared as '- ' or '* ' bullet entries "
+            f"so trace can anchor them (R8): {entry}"
+        )
+    for id_, count in Counter(in_scope_ids).items():
         if count > 1:
             issues.append(f"In-Scope stable ID {id_} is duplicate; scope IDs must be unique (R8).")
-    for id_, count in Counter(_section_entry_ids(content, "## Out-of-Scope", "SCOPE-OUT")).items():
+    for id_, count in Counter(out_scope_ids).items():
         if count > 1:
             issues.append(f"Out-of-Scope stable ID {id_} is duplicate; scope IDs must be unique (R8).")
-    if not re.search(r"\bSCOPE-IN-\d+\b", _section_body(content, "## In-Scope")):
+    if not in_scope_ids:
         issues.append("In-Scope must list at least one stable-ID entry (SCOPE-IN-001, ...); none found (R8).")
-    if not re.search(r"\bSCOPE-OUT-\d+\b", _section_body(content, "## Out-of-Scope")):
+    if not out_scope_ids:
         issues.append("Out-of-Scope must list at least one stable-ID entry (SCOPE-OUT-001, ...); none found (R8).")
     return issues
 
@@ -1010,18 +1078,20 @@ def _check_unanchored_deferral(
     decommented = _HTML_COMMENT_RE.sub("", content)
     issues: list[str] = []
     for line, _, _ in unfenced_markdown_lines(decommented):
+        match = _deferral_match(
+            line,
+            allow_structured_deferred_status=(stage == Stage.RISK_DISCOVERY),
+        )
+        if not match:
+            continue
         cited = set(_SCOPE_OUT_CITE_RE.findall(line))
         if cited & valid_scope_out:
             continue  # cites a brief-declared exclusion → anchored, allowed
-        for pat in _DEFERRAL_PATTERNS:
-            match = pat.search(line)
-            if match:
-                issues.append(
-                    f"Unanchored deferral {match.group(0)!r} (R20): a decomposition stage may "
-                    "not defer or drop requirement content. Implement it this run, or declare the "
-                    "exclusion in the brief's '## Out-of-Scope' (SCOPE-OUT-*) and cite that ID here."
-                )
-                break
+        issues.append(
+            f"Unanchored deferral {match.group(0)!r} (R20): a decomposition stage may "
+            "not defer or drop requirement content. Implement it this run, or declare the "
+            "exclusion in the brief's '## Out-of-Scope' (SCOPE-OUT-*) and cite that ID here."
+        )
     return issues
 
 
@@ -1094,9 +1164,22 @@ def check_quality_gate(
 
         # Check 5b (PLAN): trace closure — all upstream SPEC/RISK/SCOPE-IN IDs must be consumed.
         if stage == Stage.PLAN:
-            from tools.workflow_cli.trace import check_trace_closure, scope_out_violations
+            from tools.workflow_cli.trace import (
+                check_trace_closure,
+                defined_scope_out_ids,
+                scope_out_violations,
+            )
+            valid_scope_out = defined_scope_out_ids(run_dir)
             issues.extend(check_trace_closure(run_dir))
-            for sid in scope_out_violations(run_dir):
+            for sid in scope_out_violations(
+                run_dir,
+                plan_task_scope_out_allowed=lambda line, sid: (
+                    _scope_out_citation_is_anchored(line, sid, valid_scope_out)
+                ),
+                consumed_spec_scope_out_allowed=lambda line, sid: (
+                    _scope_out_citation_is_anchored(line, sid, valid_scope_out)
+                ),
+            ):
                 issues.append(f"PLAN references out-of-scope item {sid}; scope overflow (R8).")
             # R5.1: required fields + contiguous numbering
             issues.extend(_check_plan_task_fields(gate_content))
