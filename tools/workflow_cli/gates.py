@@ -125,6 +125,7 @@ _PLACEHOLDER_PATTERNS = [
 _DEFERRAL_PATTERNS = [
     re.compile(r"本轮(?:先)?不(?:做|实现|处理|支持|涉及)"),
     re.compile(r"暂不(?:做|实现|处理|支持|考虑|涉及)"),
+    re.compile(r"不在(?:本轮|当前|本次)范围(?:内)?"),
     re.compile(r"延后(?:到|实现|处理|再)"),
     re.compile(r"后续(?:迭代|阶段|再做|再实现|再处理|再支持)"),
     re.compile(r"后续版本(?:中|里)?(?:再)?(?:做|实现|处理|支持)"),
@@ -143,8 +144,25 @@ _DEFERRAL_PATTERNS = [
     # and explicit "defer to a later release" is already caught by the defer rule.
     re.compile(r"(?i)\b(?:later|future|next|subsequent)\s+(?:phase|iteration|round|milestone|sprint)\b"),
     re.compile(r"(?i)\bfuture\s+work\b"),
-    re.compile(r"(?i)\bnot\s+(?:this|the current)\s+(?:round|scope|iteration|phase|release)\b"),
-    re.compile(r"(?i)\b(?:out of|not in)\s+(?:this|the current)\s+(?:round|scope|iteration|phase|release)\b"),
+    # "not this <planning-noun>" only. The 'current'/'the current' variants are
+    # deliberately NOT matched here — "the current phase/scope/round" is an
+    # extremely common plain noun phrase ("not affect the current phase", "the
+    # current round trip"); deferrals against the current unit go through the
+    # "out of / not in (this|the current) ..." rule below instead.
+    re.compile(r"(?i)\bnot\s+this\s+(?:round|scope|iteration|phase|release)\b"),
+    # "not <impl/deliver verb> ... this/current <planning-noun>" (e.g. "not
+    # implement PDF export this round") is an explicit deferral even when the
+    # planning phrase is not adjacent to "not". Require the verb (not any {1,8}
+    # words) so descriptive prose ("does not affect the current phase") is safe.
+    re.compile(
+        r"(?i)\bnot\s+"
+        r"(?:implement|implemented|build|built|add|added|create|created|"
+        r"develop|developed|deliver|delivered|do|done|handle|handled|support|supported|"
+        r"cover|covered|include|included|address|addressed|ship|shipped|tackle|tackled)\b"
+        r"(?:\s+(?!(?:this|the\s+current|current)\b)[^\s,.;:]+){0,6}\s+(?:in\s+)?"
+        r"(?:this|(?:the\s+)?current)\s+(?:round|scope|iteration|phase|release)\b"
+    ),
+    re.compile(r"(?i)\b(?:out of|not in)\s+(?:this|(?:the\s+)?current)\s+(?:round|scope|iteration|phase|release)\b"),
     re.compile(r"(?i)\bpunt(?:ed|ing|s)?\s+(?:on|to)\b"),
 ]
 
@@ -161,6 +179,54 @@ _SCOPE_OUT_EXCLUSION_CONTEXT_PATTERNS = [
     re.compile(r"(?i)\bnon[- ]goals?\b"),
     re.compile(r"(?:排除|范围外|不在(?:本轮|当前)?范围|非目标)"),
 ]
+_SCOPE_OUT_NON_IMPLEMENTATION_CONTEXT_PATTERNS = [
+    re.compile(
+        r"(?i)\b(?:do|does|did|will|would|should|must|can|could|shall)\s+"
+        r"not\s+(?:implement|build|add|create|develop|deliver|enable|support)\b"
+    ),
+    re.compile(
+        r"(?i)\b(?:don't|doesn't|didn't|won't|can't|cannot|never)\s+"
+        r"(?:implement|build|add|create|develop|deliver|enable|support)\b"
+    ),
+    re.compile(
+        r"(?i)\bnot\s+(?:implemented|built|added|created|developed|delivered|enabled|supported)\b"
+    ),
+    re.compile(r"(?:不(?:实现|开发|构建|加入|支持|启用)|无需(?:实现|开发|构建|加入|支持|启用))"),
+]
+_SCOPE_OUT_IMPLEMENTATION_ACTION_RE = re.compile(
+    r"(?i)\b(?:implement|implements|implementing|build|builds|building|"
+    r"add|adds|adding|create|creates|creating|develop|develops|developing|"
+    r"deliver|delivers|delivering|enable|enables|enabling|support|supports|supporting)\b"
+)
+_SCOPE_OUT_IMPLEMENTATION_NEGATION_PREFIX_RE = re.compile(
+    r"(?i)(?:\b(?:do|does|did|will|would|should|must|can|could|shall)\s+not\s+|"
+    r"\b(?:don't|doesn't|didn't|won't|can't|cannot|never|not|without)\s+)$"
+)
+_SCOPE_OUT_COORDINATED_NEGATION_PREFIX_RE = re.compile(
+    r"(?i)(?:\b(?:do|does|did|will|would|should|must|can|could|shall)\s+not\s+|"
+    r"\b(?:don't|doesn't|didn't|won't|can't|cannot|never|without)\s+|"
+    r"\bnot\s+(?!(?:only|just|merely|necessarily)\b))"
+    r"(?:(?!\b(?:but|however)\b)[^.;!?。；！？])*"
+    r"\b(?:implement|implements|implementing|build|builds|building|"
+    r"add|adds|adding|create|creates|creating|develop|develops|developing|"
+    r"deliver|delivers|delivering|enable|enables|enabling|support|supports|supporting)\b"
+    r"(?:(?!\b(?:but|however)\b)[^.;!?。；！？])*"
+    r"\b(?:and|or|nor)\s+$"
+)
+_SCOPE_OUT_CHINESE_IMPLEMENTATION_ACTION_RE = re.compile(r"(?:实现|开发|构建|加入|支持|启用)")
+_SCOPE_OUT_CLAUSE_BOUNDARY_RE = re.compile(r"[.;!?。；！？]")
+_SCOPE_OUT_LOCAL_CONTEXT_BOUNDARY_RE = re.compile(
+    r"(?i)\b(?:with|while|whereas|but|however|although|though|except|unless)\b"
+)
+_SCOPE_OUT_COMMA_CONTEXT_BOUNDARY_RE = re.compile(r"[,，]\s*")
+_SCOPE_OUT_CONTEXT_TAIL_BOUNDARY_RE = re.compile(
+    r"(?i)(?:[,，]|\b(?:with|while|whereas|but|however|although|though|except|unless)\b)"
+)
+_SCOPE_OUT_COORDINATING_CONTEXT_BOUNDARY_RE = re.compile(r"(?i)\band\b")
+_DEFERRAL_CONTEXT_TAIL_BOUNDARY_RE = re.compile(
+    r"(?i)(?:[,，]|\b(?:and|with|while|whereas|but|however|although|though|except|unless)\b)"
+)
+_SCOPE_OUT_CHINESE_IMPLEMENTATION_NEGATION_PREFIX_RE = re.compile(r"(?:不|无需|不需要|不用)\s*$")
 
 # HTML comments carry template guidance, not agent prose; strip them (DOTALL, so
 # multi-line comments are dropped whole) before scanning.
@@ -172,14 +238,30 @@ _LEGACY_PLAN_DEFERRAL_FIELD_RE = re.compile(
 )
 
 
-def _deferral_match(line: str, *, allow_structured_deferred_status: bool = False):
+def _deferral_matches(
+    line: str, *, allow_structured_deferred_status: bool = False
+) -> list[re.Match]:
     if allow_structured_deferred_status and _STRUCTURED_DEFERRED_STATUS_RE.match(line):
-        return None
+        return []
+    matches: list[re.Match] = []
     for pat in _DEFERRAL_PATTERNS:
-        match = pat.search(line)
-        if match:
-            return match
-    return None
+        matches.extend(pat.finditer(line))
+    unique_matches: list[re.Match] = []
+    seen_spans: set[tuple[int, int]] = set()
+    for match in sorted(matches, key=lambda m: (m.start(), m.end())):
+        span = match.span()
+        if span in seen_spans:
+            continue
+        seen_spans.add(span)
+        unique_matches.append(match)
+    return unique_matches
+
+
+def _deferral_match(line: str, *, allow_structured_deferred_status: bool = False):
+    matches = _deferral_matches(
+        line, allow_structured_deferred_status=allow_structured_deferred_status
+    )
+    return matches[0] if matches else None
 
 
 def _scope_out_citation_is_anchored(
@@ -190,9 +272,83 @@ def _scope_out_citation_is_anchored(
         return False
     if scope_out_id not in set(_SCOPE_OUT_CITE_RE.findall(decommented)):
         return False
-    if _deferral_match(decommented) is not None:
+    contexts = _scope_out_citation_contexts(decommented, scope_out_id)
+    if any(_scope_out_context_requests_implementation(context) for context in contexts):
+        return False
+    return any(
+        _scope_out_context_is_anchoring(context) for context in contexts
+    )
+
+
+def _scope_out_citation_requests_implementation(line: str, scope_out_id: str) -> bool:
+    """Return True when the cited exclusion is being described as work to do."""
+    return any(
+        _scope_out_context_requests_implementation(context)
+        for context in _scope_out_citation_contexts(line, scope_out_id)
+    )
+
+
+def _scope_out_citation_contexts(line: str, scope_out_id: str) -> list[str]:
+    contexts: list[str] = []
+    for segment in _SCOPE_OUT_CLAUSE_BOUNDARY_RE.split(line):
+        search_from = 0
+        while True:
+            id_start = segment.find(scope_out_id, search_from)
+            if id_start < 0:
+                break
+            id_end = id_start + len(scope_out_id)
+            context_start = 0
+            for boundary in _SCOPE_OUT_LOCAL_CONTEXT_BOUNDARY_RE.finditer(segment, 0, id_start):
+                context_start = boundary.end()
+            for boundary in _SCOPE_OUT_COMMA_CONTEXT_BOUNDARY_RE.finditer(
+                segment, context_start, id_start
+            ):
+                candidate = segment[boundary.end():]
+                if _scope_out_context_is_anchoring(candidate):
+                    context_start = boundary.end()
+            for boundary in _SCOPE_OUT_COORDINATING_CONTEXT_BOUNDARY_RE.finditer(
+                segment, context_start, id_start
+            ):
+                candidate = segment[boundary.end():]
+                if _scope_out_context_is_anchoring(candidate):
+                    context_start = boundary.end()
+            context_end = len(segment)
+            boundary_after = _SCOPE_OUT_CONTEXT_TAIL_BOUNDARY_RE.search(segment, id_end)
+            if boundary_after:
+                context_end = boundary_after.start()
+            contexts.append(segment[context_start:context_end].strip())
+            search_from = id_end
+    return contexts
+
+
+def _scope_out_context_is_anchoring(context: str) -> bool:
+    if _deferral_match(context) is not None:
         return True
-    return any(pat.search(decommented) for pat in _SCOPE_OUT_EXCLUSION_CONTEXT_PATTERNS)
+    return any(
+        pat.search(context)
+        for pat in (
+            *_SCOPE_OUT_EXCLUSION_CONTEXT_PATTERNS,
+            *_SCOPE_OUT_NON_IMPLEMENTATION_CONTEXT_PATTERNS,
+        )
+    )
+
+
+def _scope_out_context_requests_implementation(context: str) -> bool:
+    for match in _SCOPE_OUT_IMPLEMENTATION_ACTION_RE.finditer(context):
+        prefix = context[:match.start()]
+        prefix_window = prefix[-160:]
+        if (
+            _SCOPE_OUT_IMPLEMENTATION_NEGATION_PREFIX_RE.search(prefix_window)
+            or _SCOPE_OUT_COORDINATED_NEGATION_PREFIX_RE.search(prefix_window)
+        ):
+            continue
+        return True
+    for match in _SCOPE_OUT_CHINESE_IMPLEMENTATION_ACTION_RE.finditer(context):
+        prefix_window = context[max(0, match.start() - 12):match.start()]
+        if _SCOPE_OUT_CHINESE_IMPLEMENTATION_NEGATION_PREFIX_RE.search(prefix_window):
+            continue
+        return True
+    return False
 
 
 # IDs that represent upstream references: REQ-*, RISK-*, DES-*, SPEC-*
@@ -1069,8 +1225,8 @@ def _check_unanchored_deferral(
     in scope must be implemented this run; the only things that may be skipped
     or deferred are the exclusions the brief itself declares in '## Out-of-Scope'
     (`valid_scope_out`). A high-signal deferral phrase in a scanned stage is a
-    defect unless the same line cites one of those brief-declared SCOPE-OUT-* IDs
-    — citing an id the brief never declared does not anchor the deferral. Fenced
+    defect unless the matched deferral clause cites one of those brief-declared
+    SCOPE-OUT-* IDs — citing an id the brief never declared does not anchor it. Fenced
     code and HTML comments (incl. multi-line) are not scanned; structured
     closures (RISK 'Status: deferred', '[DEFERRED]') do not match the phrase set."""
     if stage not in _DEFERRAL_SCANNED_STAGES:
@@ -1078,21 +1234,66 @@ def _check_unanchored_deferral(
     decommented = _HTML_COMMENT_RE.sub("", content)
     issues: list[str] = []
     for line, _, _ in unfenced_markdown_lines(decommented):
-        match = _deferral_match(
-            line,
-            allow_structured_deferred_status=(stage == Stage.RISK_DISCOVERY),
-        )
-        if not match:
-            continue
-        cited = set(_SCOPE_OUT_CITE_RE.findall(line))
-        if cited & valid_scope_out:
-            continue  # cites a brief-declared exclusion → anchored, allowed
-        issues.append(
-            f"Unanchored deferral {match.group(0)!r} (R20): a decomposition stage may "
-            "not defer or drop requirement content. Implement it this run, or declare the "
-            "exclusion in the brief's '## Out-of-Scope' (SCOPE-OUT-*) and cite that ID here."
-        )
+        for clause in _SCOPE_OUT_CLAUSE_BOUNDARY_RE.split(line):
+            inspected_contexts: set[str] = set()
+            for match in _deferral_matches(
+                clause,
+                allow_structured_deferred_status=(stage == Stage.RISK_DISCOVERY),
+            ):
+                context = _deferral_match_context(clause, match)
+                if context in inspected_contexts:
+                    continue
+                inspected_contexts.add(context)
+                if _deferral_match_is_scope_out_anchored(clause, match, valid_scope_out):
+                    continue
+                issues.append(
+                    f"Unanchored deferral {match.group(0)!r} (R20): a decomposition stage may "
+                    "not defer or drop requirement content. Implement it this run, or declare the "
+                    "exclusion in the brief's '## Out-of-Scope' (SCOPE-OUT-*) and cite that ID here."
+                )
     return issues
+
+
+def _deferral_match_is_scope_out_anchored(
+    clause: str, match: re.Match, valid_scope_out: set[str]
+) -> bool:
+    # Known residual (semantic, by design): a single deferral verb with a
+    # coordinated object mixing an in-scope and an out-of-scope item — e.g.
+    # "defer retries and PDF export to a later phase per SCOPE-OUT-001" — is
+    # exempted as a whole, so the in-scope "retries" deferral slips through. The
+    # gate cannot tell that "retries" is not part of what SCOPE-OUT-001 excludes;
+    # that is the coarse-SCOPE-OUT semantic gap the human checkpoint backstops.
+    # Separate deferral verbs and separate clauses ARE anchored individually.
+    context = _deferral_match_context(clause, match)
+    for scope_out_id in set(_SCOPE_OUT_CITE_RE.findall(context)) & valid_scope_out:
+        if _scope_out_citation_is_anchored(context, scope_out_id, valid_scope_out):
+            return True
+    return False
+
+
+def _deferral_match_context(clause: str, match: re.Match) -> str:
+    context_start = 0
+    for boundary in _DEFERRAL_CONTEXT_TAIL_BOUNDARY_RE.finditer(clause, 0, match.start()):
+        context_start = boundary.end()
+    context_end = len(clause)
+    search_from = match.end()
+    while True:
+        boundary_after = _DEFERRAL_CONTEXT_TAIL_BOUNDARY_RE.search(clause, search_from)
+        if not boundary_after:
+            break
+        if _deferral_tail_boundary_starts_new_context(clause, boundary_after):
+            context_end = boundary_after.start()
+            break
+        search_from = boundary_after.end()
+    return clause[context_start:context_end].strip()
+
+
+def _deferral_tail_boundary_starts_new_context(clause: str, boundary: re.Match) -> bool:
+    if boundary.group(0) not in {",", "，"}:
+        return True
+    next_boundary = _DEFERRAL_CONTEXT_TAIL_BOUNDARY_RE.search(clause, boundary.end())
+    segment_end = next_boundary.start() if next_boundary else len(clause)
+    return _deferral_match(clause[boundary.end():segment_end]) is not None
 
 
 # ---------------------------------------------------------------------------
