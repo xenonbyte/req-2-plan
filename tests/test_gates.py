@@ -1517,6 +1517,29 @@ class TestPlanTaskFields(unittest.TestCase):
                 f"expected missing field issue for {field}; got {r.issues}",
             )
 
+    def test_legacy_deferral_fields_fail(self):
+        plan = (
+            "## Tasks\n\n"
+            "### PLAN-TASK-001 do it\n"
+            "Spec References: SPEC-AUTH-001\n"
+            "Change Type: non_code\n"
+            "TDD Applicable: no\n"
+            "Files: n/a\n"
+            "Skeleton: outline the manual step\n"
+            "Steps:\n"
+            "- [ ] do it\n"
+            "Verification: pytest\n"
+            "Out-of-Task: implement PDF export later\n"
+            "Future Task Ownership: next PLAN owns retries\n"
+        )
+        r = self._gate(plan)
+        self.assertFalse(r.passed)
+        for field in ("Out-of-Task", "Future Task Ownership"):
+            self.assertTrue(
+                any(field in i and "legacy deferral field" in i for i in r.issues),
+                f"expected legacy field issue for {field}; got {r.issues}",
+            )
+
     def test_noncontiguous_numbering_fails(self):
         plan = ("## Tasks\n\n### PLAN-TASK-001 a\nSpec References: SPEC-AUTH-001\nVerification: pytest\n"
                 "\n### PLAN-TASK-003 c\nSpec References: SPEC-AUTH-001\nVerification: pytest\n")
@@ -2941,6 +2964,14 @@ class TestUnanchoredDeferralGate(unittest.TestCase):
         issues = self._flagged(self.Stage.SPEC, "## Behavior Contracts\nCSV only; PDF is a future iteration.\n")
         self.assertTrue(issues)
 
+    def test_chinese_future_version_compatibility_not_flagged(self):
+        issues = self._flagged(self.Stage.SPEC, "## Behavior Contracts\n客户端需兼容后续版本的 API。\n")
+        self.assertEqual(issues, [], "future-version compatibility prose is not a deferral")
+
+    def test_chinese_future_version_with_deferral_verb_flagged(self):
+        issues = self._flagged(self.Stage.SPEC, "## Behavior Contracts\nPDF 导出后续版本再实现。\n")
+        self.assertTrue(issues)
+
     def test_defer_to_later_phase_flagged_in_plan(self):
         issues = self._flagged(self.Stage.PLAN, "### PLAN-TASK-001\nWe defer retries to a later phase.\n")
         self.assertTrue(issues)
@@ -3029,6 +3060,39 @@ class TestUnanchoredDeferralGate(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             result = self._design_run(
                 tmp, "- SCOPE-OUT-005 pdf\n", "PDF 导出本轮先不做，见 SCOPE-OUT-999。"
+            )
+        self.assertTrue(any("R20" in i for i in result.issues), result.issues)
+
+    def test_wired_flags_deferral_citing_scope_out_token_only_in_in_scope(self):
+        from tools.workflow_cli.gates import check_quality_gate
+        from tools.workflow_cli.models import Stage, STAGE_ARTIFACT_MAP, TierBase, TierEstimate
+
+        tier = TierEstimate(base=TierBase.LIGHT, modifiers=frozenset())
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            (run_dir / STAGE_ARTIFACT_MAP[Stage.REQUIREMENT_BRIEF]).write_text(
+                "## In-Scope\n"
+                "- SCOPE-IN-001 x\n"
+                "- SCOPE-OUT-777 is mentioned here but not declared as excluded\n"
+                "## Out-of-Scope\n",
+                encoding="utf-8",
+            )
+            content = (
+                "## Design Summary\nx\n## Chosen Design\n### DES-ARCH-001 y\n"
+                "PDF 导出本轮先不做，见 SCOPE-OUT-777。\n## SPEC Handoff\nz\n"
+            )
+            result = check_quality_gate(run_dir, Stage.DESIGN, tier, [], content)
+        self.assertTrue(any("R20" in i for i in result.issues), result.issues)
+
+    def test_wired_flags_deferral_citing_scope_out_token_only_in_out_scope_comment_or_prose(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            result = self._design_run(
+                tmp,
+                (
+                    "Explanation only: SCOPE-OUT-777 is an example id.\n"
+                    "<!-- example SCOPE-OUT-999 -->\n"
+                ),
+                "PDF 导出本轮先不做，见 SCOPE-OUT-999。",
             )
         self.assertTrue(any("R20" in i for i in result.issues), result.issues)
 

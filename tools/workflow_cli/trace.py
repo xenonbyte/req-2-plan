@@ -18,6 +18,7 @@ from tools.workflow_cli.stage_schema import PLAN_TASK_FIELD_RE
 # REQ-AUTH-001 / RISK-SEC-001 / DES-AUTH-001 / SPEC-AUTH-001 / SCOPE-IN-001 / SCOPE-OUT-001 / PLAN-TASK-001
 _ID_RE = re.compile(r"(?:REQ|RISK|DES|SPEC)-[A-Z]+-\d+|SCOPE-(?:IN|OUT)-\d+|PLAN-TASK-\d+")
 _PLAN_TASK_HEADING_RE = re.compile(r"^###\s+PLAN-TASK-\d+\b")
+_HTML_COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
 _NATIVE_HEADING_ID_PREFIXES: dict[Stage, tuple[str, ...]] = {
     Stage.RAW_REQUIREMENT: ("REQ-",),
     Stage.RISK_DISCOVERY: ("RISK-",),
@@ -32,25 +33,34 @@ class TraceModel:
     defined: dict = field(default_factory=dict)     # id -> stage value where first defined
 
 
-def _scope_ids_defined_in_brief(stage: Stage, content: str) -> set[str]:
-    """SCOPE-* ids are defined by bullet entries in the brief scope sections."""
+def _scope_ids_defined_in_brief_section(stage: Stage, content: str, heading: str) -> set[str]:
+    """SCOPE-* ids defined by bullet entries under one brief scope section."""
     if stage != Stage.REQUIREMENT_BRIEF:
         return set()
     ids: set[str] = set()
     capture = False
     capture_level = 0
-    for line, _, _ in unfenced_markdown_lines(content):
+    decommented = _HTML_COMMENT_RE.sub("", content)
+    for line, _, _ in unfenced_markdown_lines(decommented):
         stripped = line.strip()
         level = heading_level(line)
-        if stripped in {"## In-Scope", "## Out-of-Scope"}:
+        if stripped == heading:
             capture = True
             capture_level = level or 0
             continue
         if capture and level is not None and level <= capture_level:
             capture = False
-        if capture:
+        if capture and stripped.startswith(("- ", "* ")):
             ids.update(m.group(0) for m in _ID_RE.finditer(line) if m.group(0).startswith("SCOPE-"))
     return ids
+
+
+def _scope_ids_defined_in_brief(stage: Stage, content: str) -> set[str]:
+    """SCOPE-* ids are defined by bullet entries in the brief scope sections."""
+    return (
+        _scope_ids_defined_in_brief_section(stage, content, "## In-Scope")
+        | _scope_ids_defined_in_brief_section(stage, content, "## Out-of-Scope")
+    )
 
 
 def _native_heading_ids(stage: Stage, content: str) -> set[str]:
@@ -253,7 +263,9 @@ def defined_scope_out_ids(run_dir: Path) -> set[str]:
     authority for what a downstream stage may treat as excluded/deferred (R20)."""
     content = _artifact_text(run_dir, Stage.REQUIREMENT_BRIEF)
     return {
-        i for i in _scope_ids_defined_in_brief(Stage.REQUIREMENT_BRIEF, content)
+        i for i in _scope_ids_defined_in_brief_section(
+            Stage.REQUIREMENT_BRIEF, content, "## Out-of-Scope"
+        )
         if i.startswith("SCOPE-OUT-")
     }
 

@@ -109,6 +109,23 @@ class TestTrace(unittest.TestCase):
                 "## Behavior Contracts\nno scope ref here\n", encoding="utf-8")
             self.assertTrue(any("SCOPE-IN-001" in i for i in check_trace_closure(run_dir)))
 
+    def test_defined_scope_out_ids_only_counts_out_of_scope_bullet_entries(self):
+        from tools.workflow_cli.trace import defined_scope_out_ids
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            (run_dir / STAGE_ARTIFACT_MAP[Stage.REQUIREMENT_BRIEF]).write_text(
+                "## In-Scope\n"
+                "- SCOPE-IN-001 x\n"
+                "## Out-of-Scope\n"
+                "Explanation only: SCOPE-OUT-777 is an example id.\n"
+                "<!-- example SCOPE-OUT-999 -->\n"
+                "- SCOPE-OUT-001 real exclusion\n"
+                "* SCOPE-OUT-002 another real exclusion\n"
+                "- <!-- SCOPE-OUT-003 commented example -->\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(defined_scope_out_ids(run_dir), {"SCOPE-OUT-001", "SCOPE-OUT-002"})
+
     def test_scope_in_carried_into_consumed_spec_closes(self):
         from tools.workflow_cli.trace import check_trace_closure
         with tempfile.TemporaryDirectory() as tmp:

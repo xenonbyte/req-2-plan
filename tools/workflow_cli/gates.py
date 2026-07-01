@@ -126,7 +126,8 @@ _DEFERRAL_PATTERNS = [
     re.compile(r"本轮(?:先)?不(?:做|实现|处理|支持|涉及)"),
     re.compile(r"暂不(?:做|实现|处理|支持|考虑|涉及)"),
     re.compile(r"延后(?:到|实现|处理|再)"),
-    re.compile(r"后续(?:迭代|版本|阶段|再做|再实现)"),
+    re.compile(r"后续(?:迭代|阶段|再做|再实现|再处理|再支持)"),
+    re.compile(r"后续版本(?:中|里)?(?:再)?(?:做|实现|处理|支持)"),
     re.compile(r"下(?:一期|个迭代|一版|一阶段)"),
     re.compile(r"(?:留|放|挪)到(?:以后|后续|下一?期|下个)"),
     re.compile(r"以后再(?:做|实现|处理|说)"),
@@ -148,6 +149,10 @@ _SCOPE_OUT_CITE_RE = re.compile(r"\bSCOPE-OUT-\d+\b")
 # HTML comments carry template guidance, not agent prose; strip them (DOTALL, so
 # multi-line comments are dropped whole) before scanning.
 _HTML_COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
+
+_LEGACY_PLAN_DEFERRAL_FIELD_RE = re.compile(
+    r"^[ \t]{0,3}(Out-of-Task|Future Task Ownership):"
+)
 
 # IDs that represent upstream references: REQ-*, RISK-*, DES-*, SPEC-*
 _UPSTREAM_ID_PATTERN = re.compile(
@@ -569,6 +574,16 @@ def _check_plan_task_fields(content: str) -> list[str]:
         if num is not None:
             numbers.append(num)
         label = _plan_task_label(body)
+        for line, _, _ in unfenced_markdown_lines(body):
+            legacy = _LEGACY_PLAN_DEFERRAL_FIELD_RE.match(line)
+            if legacy:
+                issues.append(
+                    f"{label} uses legacy deferral field '{legacy.group(1)}:'; "
+                    "PLAN-TASKs may not push scoped work to a later task. Remove "
+                    "the field and implement the work in this run, or declare the "
+                    "exclusion in the brief's '## Out-of-Scope' and cite its "
+                    "SCOPE-OUT-* ID."
+                )
         for field in PLAN_TASK_FIELDS:
             if not _plan_task_field_body(body, field).strip():
                 issues.append(f"{label} is missing a non-empty '{field}:' field.")
