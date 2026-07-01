@@ -162,6 +162,20 @@ archived -> none
   and HTML comments are excluded. It catches naked deferral prose, not semantic
   sub-coverage gaps under a coarse `SCOPE-IN`/`SPEC` — those still rely on brief
   granularity plus the human checkpoint.
+- **Keep R20 a high-signal tripwire — do not over-defend it**: `_DEFERRAL_PATTERNS`
+  and the SCOPE-OUT anchoring logic are a deliberate tripwire for the *obvious*
+  deferral cases, **not** a complete natural-language deferral detector. Do **not**
+  keep adding regex to chase rare phrasings or same-line "laundering" edge cases.
+  Every such round trades one error class for another — new false positives on
+  ordinary prose ("deferred rendering", "the current phase", "next phase should
+  specify …") and new false negatives from over-narrowing — while growing
+  unmaintainable NL-parsing regex; it is negative-sum. Accept the documented
+  residuals (`defer X to` a non-bucket target; a single defer verb over a
+  coordinated in-scope + out-of-scope object; coarse-`SCOPE` sub-coverage). The
+  **human checkpoint** (the universal semantic backstop, on every run) and the
+  **r2p-continue template rule** (which primes the agent) own the long tail. On a
+  real miss seen in practice, tighten an existing high-precision pattern or sharpen
+  the template/checkpoint prose — do not bolt on new brittle patterns.
 
 ## Test rules
 
