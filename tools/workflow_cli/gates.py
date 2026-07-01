@@ -139,9 +139,6 @@ _STAGE_NATIVE_HEADING_PATTERNS = {
 # Closure status tags
 _CLOSURE_TAGS = frozenset(["[ADDRESSED]", "[DEFERRED]", "[N/A]", "[OUT-OF-SCOPE]", "[CLOSED]"])
 
-# IDs of form [A-Z]+-[A-Z]+-[0-9]+ (definition context: heading or line-start)
-_DEFINED_ID_PATTERN = re.compile(r"\b([A-Z]+-[A-Z]+-\d+)\b")
-
 
 def _find_defined_ids(content: str) -> set[str]:
     """Return IDs that are defined in headings (i.e. the current artifact is defining them)."""
