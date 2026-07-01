@@ -41,8 +41,6 @@ _HEADING_BODY = {
     (Stage.PLAN, "## Tasks"): (
         _PLAN_GRANULARITY_NOTE
         + "### PLAN-TASK-001 <!-- fill in -->\n"
-        "Out-of-Task: <!-- optional; list work deliberately deferred from this task -->\n"
-        "Future Task Ownership: PLAN-TASK-NNN <!-- optional; name the follow-on task that owns deferred work -->\n"
         "Spec References: SPEC-BEHAVIOR-001\n"
         "Change Type: modify\n"
         "TDD Applicable: yes\n"
@@ -69,7 +67,7 @@ _OPTIONAL_SECTIONS: dict[Stage, str] = {
         "- High-risk mitigations represented in tasks\n"
         "- Non-goals protected\n"
         "- Verification commands executable; expected changed files listed\n"
-        "- Future-task ownership clear; no unresolved ambiguity\n"
+        "- No unresolved ambiguity; out-of-scope work is declared in the brief, not dropped here\n"
         "\n"
         "## Risk Handling\n"
         "<!-- optional risk-to-task map; RISK-* IDs live in cells only, each row carries a same-line closure tag -->\n"

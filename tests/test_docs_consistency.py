@@ -55,6 +55,23 @@ class TestAgentTemplateCheckpointGuidance(unittest.TestCase):
             + ", ".join(missing),
         )
 
+    def test_continue_surfaces_forbid_unanchored_deferral(self):
+        """R20: every r2p-continue surface must tell agents a decomposition stage
+        may not defer or drop requirement content (exclusions live in the brief)."""
+        surfaces = [
+            "tools/workflow_cli/agent_templates/claude/SKILL.md",
+            "tools/workflow_cli/agent_templates/claude/commands/r2p-continue.md",
+            "tools/workflow_cli/agent_templates/codex/skills/r2p-continue/SKILL.md",
+            "tools/workflow_cli/agent_templates/gemini/commands/r2p-continue.toml",
+        ]
+        pin = "everything the brief puts in scope must be implemented this run"
+        missing = [rel for rel in surfaces if pin not in (REPO_ROOT / rel).read_text(encoding="utf-8")]
+        self.assertEqual(
+            missing, [],
+            "Every r2p-continue surface must carry the no-deferral rule (R20). Missing: "
+            + ", ".join(missing),
+        )
+
 
 def _get_role_section(text, heading_prefix):
     """Return text from the line starting with heading_prefix to the next ### or ## heading."""

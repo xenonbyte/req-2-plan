@@ -87,7 +87,7 @@ doubt, read the module, not this file.
 | `repo_baseline.py` | Repo baseline scan: LOC, languages, monorepo/submodule signals |
 | `context_pack.py` | Project Context Pack: deps, test commands, entrypoints, config, source dirs |
 | `link_expander.py` | Local relative-link expansion for requirement intake |
-| `stage_schema.py` / `stage_templates.py` | Required headings per stage/tier + structural seed templates; `stage_templates.py` also seeds PLAN's optional, removable **non-gate** sections (`## Execution Readiness`, `## Risk Handling`) and PLAN-TASK fields (`Out-of-Task`, `Future Task Ownership`) — absent from `STAGE_SCHEMA`/`PLAN_TASK_FIELDS`, so deleting them still passes the quality gate |
+| `stage_schema.py` / `stage_templates.py` | Required headings per stage/tier + structural seed templates; `stage_templates.py` also seeds PLAN's optional, removable **non-gate** sections (`## Execution Readiness`, `## Risk Handling`) — absent from `STAGE_SCHEMA`/`PLAN_TASK_FIELDS`, so deleting them still passes the quality gate. There is no per-task "defer" field: a decomposition stage may not push requirement content to a later run (see R20) |
 | `markdown.py` / `atomic.py` | Fence-aware Markdown helpers; atomic text writes |
 | `workspace.py` | Neutral `.req-to-plan/` workspace helpers (imports neither `cli.py` nor `agent_shortcuts.py`): owns the workspace `.gitignore` and the path-limited git-commit primitive used by run-close (add) and run-archive (remove) |
 | `trace.py` | Derived trace model and closure checks |
@@ -150,6 +150,18 @@ archived -> none
   Stages 04–06 have no forward full-coverage gate by design (REQ→DES→SPEC is a
   legitimately many-to-many mapping; a hard symmetric-coverage gate produces false
   positives).
+- **No unanchored deferral (R20)**: `gates._check_unanchored_deferral` fails the
+  quality gate when a decomposition stage (04–07) carries a high-signal
+  "do-later / not-this-round" phrase (`_DEFERRAL_PATTERNS`, bilingual) unless the
+  same line cites a `SCOPE-OUT-*` **the brief actually declares**
+  (`trace.defined_scope_out_ids`; citing an undeclared id does not anchor it).
+  Exclusions are declared **once**, in the brief's
+  `## Out-of-Scope` (the only authority for what may be skipped) and may only be
+  *cited* downstream. The brief (03) is not scanned; structured closures (RISK
+  `Status: deferred`, the `[DEFERRED]` tag) are not deferral phrases; fenced code
+  and HTML comments are excluded. It catches naked deferral prose, not semantic
+  sub-coverage gaps under a coarse `SCOPE-IN`/`SPEC` — those still rely on brief
+  granularity plus the human checkpoint.
 
 ## Test rules
 

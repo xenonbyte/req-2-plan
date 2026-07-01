@@ -114,6 +114,41 @@ _PLACEHOLDER_PATTERNS = [
     re.compile(r"(?i)\bto be (?:decided|determined)\b"),    # english placeholder phrase
 ]
 
+# High-signal "agent-introduced deferral" phrases (R20). A decomposition stage
+# (04–07) must not invent a new "do-later / not-this-round" decision; exclusions
+# are declared once, in the brief's Out-of-Scope (SCOPE-OUT-*), and may only be
+# *cited* downstream. Structured closures — RISK "Status: deferred" and the
+# "[DEFERRED]" tag — are intentionally NOT matched (they are legitimate,
+# brief-anchored closures, not free-text deferral). Patterns stay high-precision
+# (whole phrases, not the bare words "later"/"future"/"后续") to avoid flagging
+# ordinary prose. A hit is allowed only when the same line cites a SCOPE-OUT-* ID.
+_DEFERRAL_PATTERNS = [
+    re.compile(r"本轮(?:先)?不(?:做|实现|处理|支持|涉及)"),
+    re.compile(r"暂不(?:做|实现|处理|支持|考虑|涉及)"),
+    re.compile(r"延后(?:到|实现|处理|再)"),
+    re.compile(r"后续(?:迭代|版本|阶段|再做|再实现)"),
+    re.compile(r"下(?:一期|个迭代|一版|一阶段)"),
+    re.compile(r"(?:留|放|挪)到(?:以后|后续|下一?期|下个)"),
+    re.compile(r"以后再(?:做|实现|处理|说)"),
+    re.compile(r"(?i)\bdefer(?:red|ring|s)?\s+(?:to|until)\b"),
+    # "phase/iteration/round/milestone/sprint" denote project-planning deferral;
+    # "version/release" are omitted — they collide with external-dependency prose,
+    # and explicit "defer to a later release" is already caught by the defer rule.
+    re.compile(r"(?i)\b(?:later|future|next|subsequent)\s+(?:phase|iteration|round|milestone|sprint)\b"),
+    re.compile(r"(?i)\bfuture\s+work\b"),
+    re.compile(r"(?i)\b(?:out of|not in)\s+(?:this|the current)\s+(?:round|scope|iteration|phase|release)\b"),
+    re.compile(r"(?i)\bpunt(?:ed|ing|s)?\s+(?:on|to)\b"),
+]
+
+# The brief-anchored exclusion citation that turns a deferral line from
+# "agent-introduced" into "carries a human-approved exclusion ID". The cited ID
+# only anchors the deferral if the brief actually declares it (see R20 check).
+_SCOPE_OUT_CITE_RE = re.compile(r"\bSCOPE-OUT-\d+\b")
+
+# HTML comments carry template guidance, not agent prose; strip them (DOTALL, so
+# multi-line comments are dropped whole) before scanning.
+_HTML_COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
+
 # IDs that represent upstream references: REQ-*, RISK-*, DES-*, SPEC-*
 _UPSTREAM_ID_PATTERN = re.compile(
     r"\b(REQ-[A-Z]+-\d+|RISK-[A-Z]+-\d+|DES-[A-Z]+-\d+|SPEC-[A-Z]+-\d+)\b"
@@ -936,6 +971,45 @@ def _check_stage_schema(stage: Stage, tier: TierEstimate, content: str) -> list[
     return issues
 
 
+# Decomposition stages where new exclusions may not be introduced (R20). The
+# brief (03) is the authoritative place to declare them, so it is not scanned.
+_DEFERRAL_SCANNED_STAGES = frozenset({
+    Stage.RISK_DISCOVERY, Stage.DESIGN, Stage.SPEC, Stage.PLAN,
+})
+
+
+def _check_unanchored_deferral(
+    stage: Stage, content: str, valid_scope_out: set[str]
+) -> list[str]:
+    """R20: a decomposition stage (04–07) must not introduce a new
+    "do-later / not-this-round" decision. Everything the requirement brief puts
+    in scope must be implemented this run; the only things that may be skipped
+    or deferred are the exclusions the brief itself declares in '## Out-of-Scope'
+    (`valid_scope_out`). A high-signal deferral phrase in a scanned stage is a
+    defect unless the same line cites one of those brief-declared SCOPE-OUT-* IDs
+    — citing an id the brief never declared does not anchor the deferral. Fenced
+    code and HTML comments (incl. multi-line) are not scanned; structured
+    closures (RISK 'Status: deferred', '[DEFERRED]') do not match the phrase set."""
+    if stage not in _DEFERRAL_SCANNED_STAGES:
+        return []
+    decommented = _HTML_COMMENT_RE.sub("", content)
+    issues: list[str] = []
+    for line, _, _ in unfenced_markdown_lines(decommented):
+        cited = set(_SCOPE_OUT_CITE_RE.findall(line))
+        if cited & valid_scope_out:
+            continue  # cites a brief-declared exclusion → anchored, allowed
+        for pat in _DEFERRAL_PATTERNS:
+            match = pat.search(line)
+            if match:
+                issues.append(
+                    f"Unanchored deferral {match.group(0)!r} (R20): a decomposition stage may "
+                    "not defer or drop requirement content. Implement it this run, or declare the "
+                    "exclusion in the brief's '## Out-of-Scope' (SCOPE-OUT-*) and cite that ID here."
+                )
+                break
+    return issues
+
+
 # ---------------------------------------------------------------------------
 # Quality Gate
 # ---------------------------------------------------------------------------
@@ -1041,6 +1115,15 @@ def check_quality_gate(
 
         # Check 10 (R12): standard DESIGN must resolve decision requests.
         issues.extend(_check_decision_requests(stage, tier, gate_content))
+
+        # Check 11 (R20): decomposition stages (04–07) may not introduce a new
+        # "do-later/not-this-round" decision; the only exclusions they may cite are
+        # the ones the brief actually declares in its Out-of-Scope section.
+        if stage in _DEFERRAL_SCANNED_STAGES:
+            from tools.workflow_cli.trace import defined_scope_out_ids
+            issues.extend(
+                _check_unanchored_deferral(stage, gate_content, defined_scope_out_ids(run_dir))
+            )
 
     return GateResult(
         passed=len(issues) == 0,

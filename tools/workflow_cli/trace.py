@@ -248,6 +248,16 @@ def _strip_nested_non_goals(block: str) -> str:
     return "".join(pieces)
 
 
+def defined_scope_out_ids(run_dir: Path) -> set[str]:
+    """SCOPE-OUT-* ids the brief declares in its Out-of-Scope section — the only
+    authority for what a downstream stage may treat as excluded/deferred (R20)."""
+    content = _artifact_text(run_dir, Stage.REQUIREMENT_BRIEF)
+    return {
+        i for i in _scope_ids_defined_in_brief(Stage.REQUIREMENT_BRIEF, content)
+        if i.startswith("SCOPE-OUT-")
+    }
+
+
 def scope_out_violations(run_dir: Path) -> list[str]:
     """SCOPE-OUT-* ids that PLAN-TASK bodies reference, directly or via a
     consumed SPEC block — a scope overflow (R8/R9). Non-goals subsections

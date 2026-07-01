@@ -84,29 +84,16 @@ class TestStageTemplates(unittest.TestCase):
         else:
             self.fail("RISK-EXAMPLE-001 not found in any line")
 
-    # --- PLN-2: optional PLAN-TASK field lines ---
+    # --- PLN-2: deferral fields removed (R20) ---
 
-    def test_plan_template_contains_optional_out_of_task_and_future_ownership(self):
-        """PLN-2: Out-of-Task and Future Task Ownership optional field lines in PLAN-TASK body."""
+    def test_plan_template_omits_out_of_task_and_future_ownership(self):
+        """PLN-2/R20: the deferral fields are gone — a decomposition stage may not
+        defer requirement content, so the PLAN-TASK body offers no slot to do so."""
         from tools.workflow_cli.stage_templates import template_for
-        text = template_for(Stage.PLAN, TierBase.STANDARD)
-        self.assertIn("Out-of-Task:", text)
-        self.assertIn("Future Task Ownership:", text)
-        # Future Task Ownership references the PLAN-TASK-NNN guidance form
-        self.assertIn("PLAN-TASK-NNN", text)
-        # These lines must appear BEFORE ## Execution Readiness (inside the PLAN-TASK body)
-        exec_ready_pos = text.index("## Execution Readiness")
-        spec_refs_pos = text.index("Spec References:")
-        steps_pos = text.index("Steps:")
-        verification_pos = text.index("Verification:")
-        self.assertLess(text.index("Out-of-Task:"), exec_ready_pos)
-        self.assertLess(text.index("Future Task Ownership:"), exec_ready_pos)
-        self.assertLess(text.index("Out-of-Task:"), spec_refs_pos)
-        self.assertLess(text.index("Future Task Ownership:"), spec_refs_pos)
-        self.assertLess(text.index("Out-of-Task:"), steps_pos)
-        self.assertLess(text.index("Future Task Ownership:"), steps_pos)
-        self.assertLess(text.index("Out-of-Task:"), verification_pos)
-        self.assertLess(text.index("Future Task Ownership:"), verification_pos)
+        for tier in (TierBase.LIGHT, TierBase.STANDARD):
+            text = template_for(Stage.PLAN, tier)
+            self.assertNotIn("Out-of-Task:", text)
+            self.assertNotIn("Future Task Ownership:", text)
 
     # --- PLN-3: enriched three-part Verification example ---
 
@@ -243,7 +230,7 @@ def test_plan_passes_gate_when_optional_sections_omitted(tmp_path):
     from tools.workflow_cli.gates import check_quality_gate
     from tools.workflow_cli.models import Stage, TierBase, TierEstimate
 
-    # PLAN without ## Execution Readiness, ## Risk Handling, Out-of-Task, Future Task Ownership
+    # PLAN without ## Execution Readiness or ## Risk Handling (both optional/removable)
     plan = (
         "# Plan\n\n"
         "## Tasks\n\n"

@@ -63,7 +63,7 @@ from Claude's Markdown command templates.
 | `tier.py` + `tier_keywords.yaml` | Keyword scan, tier floor, tier estimation |
 | `repo_baseline.py` / `context_pack.py` | Repo baseline scan + Project Context Pack |
 | `link_expander.py` | Local relative-link expansion for requirement intake |
-| `stage_schema.py` / `stage_templates.py` | Required headings per stage/tier; structural seed templates (incl. PLAN's optional, removable non-gate sections — Execution Readiness, Risk Handling, Out-of-Task, Future Task Ownership — not in `STAGE_SCHEMA`/`PLAN_TASK_FIELDS`) |
+| `stage_schema.py` / `stage_templates.py` | Required headings per stage/tier; structural seed templates (incl. PLAN's optional, removable non-gate sections — Execution Readiness, Risk Handling — not in `STAGE_SCHEMA`/`PLAN_TASK_FIELDS`). No per-task "defer" field: a decomposition stage may not push requirement content to a later run (R20) |
 | `markdown.py` / `atomic.py` | Fence-aware Markdown helpers; atomic text writes |
 | `workspace.py` | Neutral helper (no CLI/shortcut import → no cycle): owns the workspace `.gitignore` + the path-limited `git commit` primitive used by run-close (add) and run-archive (remove) |
 | `trace.py` | Derived trace model and closure checks |
@@ -83,6 +83,7 @@ from Claude's Markdown command templates.
 - **JSON mode**: set `R2P_JSON=1` for machine-readable output.
 - **Final-review marker gate** (`check_final_review_recorded`): a presence/audit check at the same trust level as the PLAN-TASK checkbox gate — it verifies `execution/final-review.md` exists and records `Verdict: Approved`. It **never** runs code, runs tests, or asserts the verdict is true.
 - **Cross-stage trace closure**: enforced only at the PLAN quality gate (every `SPEC-*` consumed by a PLAN-TASK, every `SCOPE-IN-*` carried into PLAN, every `RISK-*` closed). Intermediate stages enforce only "cited upstream ID ⇒ closure tag"; stages 04–06 have no forward full-coverage gate by design (REQ→DES→SPEC is a legitimately many-to-many mapping — a hard symmetric gate produces false positives).
+- **No unanchored deferral (R20)**: `gates._check_unanchored_deferral` fails the quality gate when a decomposition stage (04–07) carries a high-signal "do-later / not-this-round" phrase unless the same line cites a `SCOPE-OUT-*` the brief actually declares (`trace.defined_scope_out_ids`; an undeclared id does not anchor it). Exclusions are declared once, in the brief's `## Out-of-Scope` (the only authority for what may be skipped), and may only be cited downstream. The brief is not scanned; structured closures (`Status: deferred`, `[DEFERRED]`) are not deferral phrases.
 - **Scoped git commits** (primitive in `workspace.py`): closing a run at the PLAN checkpoint and archiving a run each do a path-limited, best-effort `git commit` scoped to `.req-to-plan/.gitignore` + that run's `.req-to-plan/<work-id>/` dir. They never run `git add -A`/`-f`, never force-add ignored paths, never push, and are a no-op outside a git work tree.
 
 ### State machine (`models.py` → `ALLOWED_TRANSITIONS`)

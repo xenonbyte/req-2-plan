@@ -2919,5 +2919,119 @@ class TestCheckFinalReviewRecorded(unittest.TestCase):
                 )
 
 
+class TestUnanchoredDeferralGate(unittest.TestCase):
+    """R20: stages 04–07 must not introduce new 'do-later/not-this-round'
+    decisions. Exclusions live once in the brief's Out-of-Scope (SCOPE-OUT-*)
+    and may only be *cited* downstream."""
+
+    def setUp(self):
+        from tools.workflow_cli.gates import _check_unanchored_deferral
+        from tools.workflow_cli.models import Stage
+        self.check = _check_unanchored_deferral
+        self.Stage = Stage
+
+    def _flagged(self, stage, content, valid_scope_out=frozenset()):
+        return self.check(stage, content, valid_scope_out)
+
+    def test_chinese_deferral_phrase_flagged_in_design(self):
+        issues = self._flagged(self.Stage.DESIGN, "## Chosen Design\n本轮先不做 PDF 导出，留待以后。\n")
+        self.assertTrue(issues, "naked Chinese deferral must be flagged")
+
+    def test_english_future_iteration_flagged_in_spec(self):
+        issues = self._flagged(self.Stage.SPEC, "## Behavior Contracts\nCSV only; PDF is a future iteration.\n")
+        self.assertTrue(issues)
+
+    def test_defer_to_later_phase_flagged_in_plan(self):
+        issues = self._flagged(self.Stage.PLAN, "### PLAN-TASK-001\nWe defer retries to a later phase.\n")
+        self.assertTrue(issues)
+
+    def test_deferral_citing_brief_declared_scope_out_allowed(self):
+        issues = self._flagged(
+            self.Stage.DESIGN,
+            "## Chosen Design\n本轮先不做 PDF 导出，见 SCOPE-OUT-005。\n",
+            valid_scope_out={"SCOPE-OUT-005"},
+        )
+        self.assertEqual(issues, [], "deferral citing a brief-declared SCOPE-OUT-* is anchored, allowed")
+
+    def test_deferral_citing_undeclared_scope_out_flagged(self):
+        # SCOPE-OUT-999 is not in the brief's Out-of-Scope → the citation does not anchor it.
+        issues = self._flagged(
+            self.Stage.DESIGN,
+            "## Chosen Design\n本轮先不做 PDF 导出，见 SCOPE-OUT-999。\n",
+            valid_scope_out={"SCOPE-OUT-005"},
+        )
+        self.assertTrue(issues, "citing an id the brief never declared must not exempt the deferral")
+
+    def test_multiline_html_comment_not_scanned(self):
+        content = "## Chosen Design\n<!-- guidance\n本轮先不做 x\n-->\nreal content\n"
+        self.assertEqual(self._flagged(self.Stage.DESIGN, content), [],
+                         "multi-line guidance comments are not agent prose")
+
+    def test_risk_status_deferred_not_flagged(self):
+        issues = self._flagged(self.Stage.RISK_DISCOVERY, "### RISK-SEC-001 x\nStatus: deferred\n")
+        self.assertEqual(issues, [], "structured RISK closure is not agent-introduced deferral")
+
+    def test_closure_tag_deferred_not_flagged(self):
+        issues = self._flagged(self.Stage.DESIGN, "## Requirements Coverage\nREQ-AUTH-001 [DEFERRED] per brief.\n")
+        self.assertEqual(issues, [], "the [DEFERRED] closure tag is not a deferral phrase")
+
+    def test_brief_stage_not_scanned(self):
+        issues = self._flagged(self.Stage.REQUIREMENT_BRIEF, "## Goal\n本轮先不做 X。\n")
+        self.assertEqual(issues, [], "the brief is the authoritative place to declare exclusions")
+
+    def test_fenced_code_not_scanned(self):
+        issues = self._flagged(self.Stage.DESIGN, "## Chosen Design\n```\n# 本轮先不做 this\n```\n")
+        self.assertEqual(issues, [], "fenced code is not prose")
+
+    def test_html_comment_not_scanned(self):
+        issues = self._flagged(self.Stage.DESIGN, "## Chosen Design\n<!-- 本轮先不做 guidance -->\nreal content\n")
+        self.assertEqual(issues, [], "template guidance comments are not agent prose")
+
+    def test_wired_into_quality_gate_for_design(self):
+        from tools.workflow_cli.gates import check_quality_gate
+        from tools.workflow_cli.models import Stage, TierBase, TierEstimate
+        tier = TierEstimate(base=TierBase.LIGHT, modifiers=frozenset())
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            content = (
+                "## Design Summary\nx\n## Chosen Design\n### DES-ARCH-001 y\n"
+                "本轮先不做 PDF 导出。\n## SPEC Handoff\nz\n"
+            )
+            result = check_quality_gate(run_dir, Stage.DESIGN, tier, [], content)
+        self.assertFalse(result.passed)
+        self.assertEqual(result.exit_code, 3)
+        self.assertTrue(any("R20" in i for i in result.issues), result.issues)
+
+    def _design_run(self, tmp, brief_out_of_scope, design_deferral_line):
+        from tools.workflow_cli.models import Stage, STAGE_ARTIFACT_MAP
+        run_dir = Path(tmp)
+        (run_dir / STAGE_ARTIFACT_MAP[Stage.REQUIREMENT_BRIEF]).write_text(
+            "## In-Scope\n- SCOPE-IN-001 x\n## Out-of-Scope\n" + brief_out_of_scope,
+            encoding="utf-8",
+        )
+        content = (
+            "## Design Summary\nx\n## Chosen Design\n### DES-ARCH-001 y\n"
+            f"{design_deferral_line}\n## SPEC Handoff\nz\n"
+        )
+        from tools.workflow_cli.gates import check_quality_gate
+        from tools.workflow_cli.models import TierBase, TierEstimate
+        tier = TierEstimate(base=TierBase.LIGHT, modifiers=frozenset())
+        return check_quality_gate(run_dir, Stage.DESIGN, tier, [], content)
+
+    def test_wired_allows_deferral_citing_brief_declared_scope_out(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            result = self._design_run(
+                tmp, "- SCOPE-OUT-005 pdf\n", "PDF 导出本轮先不做，见 SCOPE-OUT-005。"
+            )
+        self.assertFalse(any("R20" in i for i in result.issues), result.issues)
+
+    def test_wired_flags_deferral_citing_undeclared_scope_out(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            result = self._design_run(
+                tmp, "- SCOPE-OUT-005 pdf\n", "PDF 导出本轮先不做，见 SCOPE-OUT-999。"
+            )
+        self.assertTrue(any("R20" in i for i in result.issues), result.issues)
+
+
 if __name__ == "__main__":
     unittest.main()
