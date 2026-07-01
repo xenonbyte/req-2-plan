@@ -95,14 +95,16 @@ class TestStageTemplates(unittest.TestCase):
             self.assertNotIn("Out-of-Task:", text)
             self.assertNotIn("Future Task Ownership:", text)
 
-    # --- PLN-3: enriched three-part Verification example ---
+    # --- PLN-3: cost-aware Verification cadence ---
 
-    def test_plan_template_verification_enriched_three_part(self):
-        """PLN-3: Verification example is a three-part contract (targeted, full suite, evidence)."""
+    def test_plan_template_verification_cost_aware_cadence(self):
+        """PLN-3: the per-task Verification example is cost-aware — targeted tests plus
+        pasted evidence are the required inner loop; the mandatory full-suite regression run
+        is deferred to the final review, and per-task full runs are conditional (cheap suite
+        or wide blast radius), not demanded on every task."""
         from tools.workflow_cli.stage_templates import template_for
         text = template_for(Stage.PLAN, TierBase.STANDARD)
-        # The Verification placeholder comment must describe all three parts
-        # Find the Verification line
+        # The Verification placeholder comment is seeded as a single line.
         verification_line = None
         for line in text.splitlines():
             if line.startswith("Verification:"):
@@ -110,13 +112,13 @@ class TestStageTemplates(unittest.TestCase):
                 break
         self.assertIsNotNone(verification_line, "Verification: line must be present")
         lower = verification_line.lower()
+        # Required per-task inner loop: targeted tests + pasted evidence.
         self.assertIn("targeted", lower, "Verification must mention targeted command")
-        # Check for "full" (full suite) or "suite" phrasing
-        self.assertTrue(
-            "full" in lower or "suite" in lower,
-            "Verification must mention full/suite command"
-        )
         self.assertIn("evidence", lower, "Verification must mention evidence")
+        # Full-suite regression is the final review's job, not every task's.
+        self.assertIn("final review", lower, "Verification must point full-suite regression at the final review")
+        # Per-task full suite must be framed as conditional (cost-aware), not mandatory.
+        self.assertIn("only when", lower, "Verification must gate per-task full suite on a cost/blast-radius condition")
 
     # --- PLN-5: granularity comment ---
 

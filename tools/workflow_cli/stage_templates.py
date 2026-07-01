@@ -52,9 +52,10 @@ _HEADING_BODY = {
         "```\n"
         "Steps:\n"
         "- [ ] <!-- fill in -->\n"
-        "Verification: <!-- fill in: three-part — (1) targeted: `pytest tests/test_x.py::test_y -v` "
-        "passes; (2) full suite: `pytest tests/ -q` stays green; "
-        "(3) evidence: paste actual output showing pass count and zero failures -->\n"
+        "Verification: <!-- fill in: (1) targeted: `pytest tests/test_x.py::test_y -v` — this task's "
+        "plus directly-affected tests pass; (2) evidence: paste actual output showing pass count and "
+        "zero failures. Run the full suite here only when it is cheap or this task touches shared/core "
+        "code; the mandatory full-suite regression run happens once at the final review, not every task. -->\n"
     ),
 }
 
