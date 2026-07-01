@@ -3573,6 +3573,32 @@ class TestUnanchoredDeferralGate(unittest.TestCase):
             with self.subTest(content=content):
                 self.assertEqual(self._flagged(self.Stage.DESIGN, content), [])
 
+    def test_handoff_prose_under_nested_subheading_not_flagged(self):
+        # A handoff section organized with subheadings still exempts its phase
+        # prose: entering '### API' inside '## SPEC Handoff' must not drop the
+        # handoff exemption (regression: heading loop reset in_handoff_section).
+        content = (
+            "## SPEC Handoff\n"
+            "### API\n"
+            "The next phase should specify the API contract.\n"
+        )
+        self.assertEqual(self._flagged(self.Stage.DESIGN, content), [])
+
+    def test_deferral_after_handoff_section_ends_still_flagged(self):
+        # The exemption must not leak past the handoff section: a same-level
+        # sibling heading ends it, so a naked deferral under it is still caught.
+        content = (
+            "## SPEC Handoff\n"
+            "### API\n"
+            "The next phase should specify the API contract.\n"
+            "## Chosen Design\n"
+            "PDF export is a future iteration.\n"
+        )
+        self.assertTrue(
+            self._flagged(self.Stage.DESIGN, content),
+            "deferral after the handoff section closes must still be flagged",
+        )
+
     def test_chinese_next_stage_with_deferral_verb_flagged(self):
         issues = self._flagged(self.Stage.DESIGN, "## Chosen Design\nPDF 导出推迟到下一阶段。\n")
         self.assertTrue(issues)

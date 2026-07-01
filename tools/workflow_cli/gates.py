@@ -1278,9 +1278,16 @@ def _check_unanchored_deferral(
     decommented = _HTML_COMMENT_RE.sub("", content)
     issues: list[str] = []
     in_handoff_section = False
+    handoff_level = 0
     for line, _, _ in unfenced_markdown_lines(decommented):
-        if heading_level(line) is not None:
-            in_handoff_section = _HANDOFF_HEADING_RE.match(line.strip()) is not None
+        level = heading_level(line)
+        if level is not None:
+            if _HANDOFF_HEADING_RE.match(line.strip()) is not None:
+                in_handoff_section, handoff_level = True, level
+            elif in_handoff_section and level <= handoff_level:
+                # A sibling/higher heading closes the handoff section; a deeper
+                # subheading (level > handoff_level) stays inside it.
+                in_handoff_section = False
         for clause in _SCOPE_OUT_CLAUSE_BOUNDARY_RE.split(line):
             inspected_contexts: set[str] = set()
             for match in _deferral_matches(
