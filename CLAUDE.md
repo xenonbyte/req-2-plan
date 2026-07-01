@@ -220,7 +220,13 @@ archived -> none
 
 - `.req-to-plan/` run dirs (`<work-id>/`) are **tracked** — close/archive commit
   them via the path-scoped commit; only `.req-to-plan/archive`, `.workflow-active`,
-  and `<work-id>/logs/` are ignored (see `.req-to-plan/.gitignore`). `docs/` is
+  `<work-id>/logs/`, and `<work-id>/execution/` are ignored (see
+  `.req-to-plan/.gitignore`). `execution/` is ignored like `logs/` because the
+  SDD execution ledger/reports/reviews are local audit trail, never shared git
+  history — the durable outputs are the per-task code commits plus the archived
+  run dir; "ignored" here means "not shared via git," not "unimportant" (gates
+  still read `execution/progress.md` and `execution/final-review.md` from the
+  working tree). `docs/` is
   **tracked** design state (committed; e.g. requirement docs live here); only
   `docs/archive/` is gitignored local history. Check `.gitignore` before assuming
   a path is ignored.

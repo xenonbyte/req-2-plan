@@ -25,6 +25,17 @@ class TestEnsureWorkspaceGitignore(unittest.TestCase):
 
             self.assertIn("/*/logs/", gitignore.read_text(encoding="utf-8").splitlines())
 
+    def test_workspace_gitignore_includes_run_execution(self):
+        # Execution artifacts (progress.md, task-N-report/review.md, final-review*)
+        # are local audit trail, never shared git history — ignored like logs/ so a
+        # stray `git add -A` cannot sweep them into the code branch.
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            ensure_workspace_gitignore(base)
+            gitignore = base / ".req-to-plan" / ".gitignore"
+
+            self.assertIn("/*/execution/", gitignore.read_text(encoding="utf-8").splitlines())
+
     def test_appends_archive_line_when_missing(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
