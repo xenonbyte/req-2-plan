@@ -188,6 +188,19 @@ def _reject_symlink_or_exit(path: Path, message: str) -> None:
         print_and_exit(format_error(message, exit_code=EXIT_CONFLICT), EXIT_CONFLICT)
 
 
+def _reject_unsafe_checkpoint_marker_or_exit(marker: Path) -> None:
+    if marker.is_symlink():
+        print_and_exit(
+            format_error("unsafe_checkpoint_review_marker_symlink", exit_code=EXIT_CONFLICT),
+            EXIT_CONFLICT,
+        )
+    if marker.exists() and not marker.is_file():
+        print_and_exit(
+            format_error("unsafe_checkpoint_review_marker_not_regular", exit_code=EXIT_CONFLICT),
+            EXIT_CONFLICT,
+        )
+
+
 def _reject_symlinked_run_paths(work_id, base_path: Path | None) -> Path:
     """Reject a symlinked workspace or run directory, then return the run dir.
 
@@ -1923,10 +1936,11 @@ def _cmd_review_checkpoint(args):
     _reject_symlink_or_exit(reviews_dir, "unsafe_reviews_dir_symlink")
     reviews_dir.mkdir(parents=True, exist_ok=True)
     marker = reviews_dir / f"{stage.value}-checkpoint-review-v{aa.version}.md"
-    marker.write_text(
+    _reject_unsafe_checkpoint_marker_or_exit(marker)
+    atomic_write_text(
+        marker,
         f"# Checkpoint review marker\n\nstage: {stage.value}\nversion: {aa.version}\n"
         "status: ready for human decision\n",
-        encoding="utf-8",
     )
 
     if record.status == RunStatus.READY_FOR_CHECKPOINT_REVIEW:
@@ -2019,6 +2033,21 @@ def _cmd_checkpoint_decide(args):
             EXIT_CONFLICT,
         )
 
+    reviews_dir = run_dir / "reviews"
+    _reject_symlink_or_exit(reviews_dir, "unsafe_reviews_dir_symlink")
+    # Precondition: checkpoint-review marker for this version must exist (GR5).
+    marker = reviews_dir / f"{stage.value}-checkpoint-review-v{aa.version}.md"
+    _reject_unsafe_checkpoint_marker_or_exit(marker)
+    if not marker.exists():
+        print_and_exit(
+            format_error(
+                f"Missing checkpoint-review marker for {stage.value} v{aa.version}; "
+                "run review-checkpoint first",
+                exit_code=EXIT_REVIEW_REQ,
+            ),
+            EXIT_REVIEW_REQ,
+        )
+
     if args.decision == "changes_requested":
         record = update_run_status(record, RunStatus.CHECKPOINT_CHANGES_REQUESTED)
         update_resume_context(
@@ -2077,20 +2106,6 @@ def _cmd_checkpoint_decide(args):
                 exit_code=EXIT_CONFLICT,
             ),
             EXIT_CONFLICT,
-        )
-
-    reviews_dir = run_dir / "reviews"
-    _reject_symlink_or_exit(reviews_dir, "unsafe_reviews_dir_symlink")
-    # Precondition: checkpoint-review marker for this version must exist (GR5).
-    marker = reviews_dir / f"{stage.value}-checkpoint-review-v{aa.version}.md"
-    if not marker.exists():
-        print_and_exit(
-            format_error(
-                f"Missing checkpoint-review marker for {stage.value} v{aa.version}; "
-                "run review-checkpoint first",
-                exit_code=EXIT_REVIEW_REQ,
-            ),
-            EXIT_REVIEW_REQ,
         )
 
     # Forced-review guard (version-aware; subagent file required).

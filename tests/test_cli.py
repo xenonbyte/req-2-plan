@@ -2460,6 +2460,26 @@ class TestReviewCheckpoint:
             assert reviews_link.is_symlink()
             assert list(outside.iterdir()) == []
 
+    def test_review_checkpoint_rejects_symlinked_marker_without_writing_target(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work_id = "WF-20260527-rcmsym"
+            self._to_ready(tmp, work_id)
+            run_dir = Path(tmp) / ".req-to-plan" / work_id
+            reviews = run_dir / "reviews"
+            reviews.mkdir()
+            outside = Path(tmp) / "outside-marker.md"
+            outside.write_text("original", encoding="utf-8")
+            marker = reviews / "raw_requirement-checkpoint-review-v1.md"
+            marker.symlink_to(outside)
+
+            invoke(["review-checkpoint", "--work-id", work_id, "--stage", "raw_requirement"],
+                   base_path=tmp, expect_exit=6)
+
+            assert marker.is_symlink()
+            assert outside.read_text(encoding="utf-8") == "original"
+            record = load_record(tmp, work_id)
+            assert record.status == RunStatus.READY_FOR_CHECKPOINT_REVIEW
+
 
 # ---------------------------------------------------------------------------
 # checkpoint-decide
@@ -2577,6 +2597,64 @@ class TestCheckpointDecide:
             invoke(["checkpoint-decide", "--work-id", work_id, "--stage", "raw_requirement",
                     "--decision", "approved", "--confirm"], base_path=tmp, expect_exit=6)
 
+            record = load_record(tmp, work_id)
+            assert record.status == RunStatus.CHECKPOINT_REVIEW
+            assert record.approved_checkpoints == []
+            assert record.active_artifacts[0].status == "ready"
+
+    def test_approve_rejects_symlinked_checkpoint_marker_without_mutation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work_id = "WF-20260527-cd2s"
+            self._to_review(tmp, work_id)
+            run_dir = Path(tmp) / ".req-to-plan" / work_id
+            marker = run_dir / "reviews" / "raw_requirement-checkpoint-review-v1.md"
+            marker.unlink()
+            outside = Path(tmp) / "outside-marker.md"
+            outside.write_text("marker", encoding="utf-8")
+            marker.symlink_to(outside)
+
+            invoke(["checkpoint-decide", "--work-id", work_id, "--stage", "raw_requirement",
+                    "--decision", "approved", "--confirm"], base_path=tmp, expect_exit=6)
+
+            assert marker.is_symlink()
+            record = load_record(tmp, work_id)
+            assert record.status == RunStatus.CHECKPOINT_REVIEW
+            assert record.approved_checkpoints == []
+            assert record.active_artifacts[0].status == "ready"
+
+    def test_changes_requested_rejects_symlinked_checkpoint_marker_without_mutation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work_id = "WF-20260527-cd2cs"
+            self._to_review(tmp, work_id)
+            run_dir = Path(tmp) / ".req-to-plan" / work_id
+            marker = run_dir / "reviews" / "raw_requirement-checkpoint-review-v1.md"
+            marker.unlink()
+            outside = Path(tmp) / "outside-marker.md"
+            outside.write_text("marker", encoding="utf-8")
+            marker.symlink_to(outside)
+
+            invoke(["checkpoint-decide", "--work-id", work_id, "--stage", "raw_requirement",
+                    "--decision", "changes_requested"], base_path=tmp, expect_exit=6)
+
+            assert marker.is_symlink()
+            record = load_record(tmp, work_id)
+            assert record.status == RunStatus.CHECKPOINT_REVIEW
+            assert record.approved_checkpoints == []
+            assert record.active_artifacts[0].status == "ready"
+
+    def test_changes_requested_rejects_non_regular_checkpoint_marker_without_mutation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work_id = "WF-20260527-cd2cd"
+            self._to_review(tmp, work_id)
+            run_dir = Path(tmp) / ".req-to-plan" / work_id
+            marker = run_dir / "reviews" / "raw_requirement-checkpoint-review-v1.md"
+            marker.unlink()
+            marker.mkdir()
+
+            invoke(["checkpoint-decide", "--work-id", work_id, "--stage", "raw_requirement",
+                    "--decision", "changes_requested"], base_path=tmp, expect_exit=6)
+
+            assert marker.is_dir()
             record = load_record(tmp, work_id)
             assert record.status == RunStatus.CHECKPOINT_REVIEW
             assert record.approved_checkpoints == []

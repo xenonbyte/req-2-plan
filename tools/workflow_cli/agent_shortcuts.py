@@ -85,6 +85,32 @@ def _validate_work_id(raw: str) -> str:
         sys.exit(2)
 
 
+def _reject_symlinked_workspace_dir_or_exit(base_path: Path, work_id: str | None = None) -> Path:
+    r2p_dir = base_path / ".req-to-plan"
+    if r2p_dir.is_symlink():
+        work_id_line = f"work_id: {work_id}\n" if work_id else ""
+        print(
+            "blocked: unsafe_workspace_dir_symlink\n"
+            f"{work_id_line}"
+            f"path: {r2p_dir}\n"
+        )
+        sys.exit(EXIT_CONFLICT)
+    return r2p_dir
+
+
+def _reject_symlinked_run_paths_or_exit(base_path: Path, work_id: str) -> Path:
+    r2p_dir = _reject_symlinked_workspace_dir_or_exit(base_path, work_id)
+    run_dir = r2p_dir / work_id
+    if run_dir.is_symlink():
+        print(
+            "blocked: unsafe_run_dir_symlink\n"
+            f"work_id: {work_id}\n"
+            f"path: {run_dir}\n"
+        )
+        sys.exit(EXIT_CONFLICT)
+    return run_dir
+
+
 # ---------------------------------------------------------------------------
 # Open run scanner
 # ---------------------------------------------------------------------------
@@ -517,13 +543,15 @@ def _cmd_start(ns: argparse.Namespace, base_path: Path) -> None:
 
 
 def _cmd_continue(ns: argparse.Namespace, base_path: Path) -> None:
+    _reject_symlinked_workspace_dir_or_exit(base_path)
     pointer = read_active_pointer(base_path)
     work_id = pointer.get("selected_work_id") if pointer else None
     if not work_id:
         print("no_selected_run: true\nnext: r2p-status --all\n")
         sys.exit(1)
     work_id = _validate_work_id(work_id)
-    run_path = base_path / ".req-to-plan" / work_id / "run.md"
+    run_dir = _reject_symlinked_run_paths_or_exit(base_path, work_id)
+    run_path = run_dir / "run.md"
     if not run_path.exists():
         print(f"blocked: source_run_not_found\nwork_id: {work_id}\n")
         sys.exit(7)

@@ -17,7 +17,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from tools.workflow_cli.models import RunStatus, WorkId
+from tools.workflow_cli.models import RunStatus, Stage, TierBase, TierEstimate, WorkId
 from tools.workflow_cli.version import R2P_VERSION
 from tools.workflow_cli.agent_shortcuts import (
     generate_work_id,
@@ -464,6 +464,36 @@ class TestCmdContinue:
             out = capsys.readouterr().out
             assert "no_selected_run" in out
 
+    def test_rejects_symlinked_workspace_dir_before_missing_pointer(self, capsys):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            outside = base / "outside"
+            outside.mkdir()
+            (base / ".req-to-plan").symlink_to(outside, target_is_directory=True)
+
+            _invoke(["continue"], base, expect_exit=6)
+
+            out = capsys.readouterr().out
+            assert "unsafe_workspace_dir_symlink" in out
+            assert "no_selected_run" not in out
+
+    def test_rejects_symlinked_workspace_dir_before_reading_pointer(self, capsys):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            outside = base / "outside"
+            outside.mkdir()
+            (outside / ".workflow-active").write_text(
+                "selected_work_id: ../outside\n",
+                encoding="utf-8",
+            )
+            (base / ".req-to-plan").symlink_to(outside, target_is_directory=True)
+
+            _invoke(["continue"], base, expect_exit=6)
+
+            out = capsys.readouterr().out
+            assert "unsafe_workspace_dir_symlink" in out
+            assert "invalid_work_id" not in out
+
     def test_stops_at_tier_not_locked_for_open_run(self, capsys):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
@@ -490,6 +520,31 @@ class TestCmdContinue:
             out = capsys.readouterr().out
             assert "invalid_work_id" in out
             assert "tier_not_locked" not in out
+
+    def test_rejects_symlinked_run_dir_before_writing_inputs(self, capsys):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            work_id = "WF-20260527-continue-symlink"
+            outside = base / "outside"
+            run_md = _make_run(outside, work_id)
+            record = RunStateManager(run_md.parent).load()
+            record.current_stage = Stage.REQUIREMENT_BRIEF
+            record.tier_locked = TierEstimate(base=TierBase.LIGHT)
+            RunStateManager(run_md.parent).save(record)
+
+            r2p_dir = base / ".req-to-plan"
+            r2p_dir.mkdir()
+            (r2p_dir / work_id).symlink_to(run_md.parent, target_is_directory=True)
+            _pointer_path(base).write_text(
+                f"selected_work_id: {work_id}\n",
+                encoding="utf-8",
+            )
+
+            _invoke(["continue"], base, expect_exit=6)
+
+            out = capsys.readouterr().out
+            assert "unsafe_run_dir_symlink" in out
+            assert not (run_md.parent / "inputs").exists()
 
 
 # ---------------------------------------------------------------------------
