@@ -215,6 +215,12 @@ class TestGenerateWorkId:
         assert wid.startswith("WF-20260527-")
         assert len(wid) <= 48
 
+    def test_two_character_slug_falls_back_to_hash_id(self):
+        wid = generate_work_id("UI", today="20260527")
+
+        assert wid.startswith("WF-20260527-run-")
+        WorkId(wid)  # raises ValueError if invalid
+
     def test_deduplicates_if_path_exists(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)

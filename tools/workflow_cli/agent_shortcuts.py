@@ -168,7 +168,7 @@ def generate_work_id(
     # Truncate first, then strip dashes: stripping before truncation can leave a
     # trailing "-" at the slice boundary, producing an invalid WorkId.
     candidate = re.sub(r"-+", "-", candidate)[:max_slug_len].strip("-")
-    if len(candidate) < 2:
+    if len(candidate) < 3:
         import hashlib
         h = hashlib.md5(requirement.encode()).hexdigest()[:8]
         candidate = f"run-{h}"
