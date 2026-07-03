@@ -909,6 +909,38 @@ class TestInstallService:
 
         assert script.exists(), "shared bin scripts should remain for codex install"
 
+    def test_uninstall_defers_shared_bin_user_backup_until_final_platform(self, tmp_path):
+        svc, manifest_root, _ = make_service(tmp_path)
+        script = manifest_root / "bin" / "r2p-start"
+        script.parent.mkdir(parents=True, exist_ok=True)
+        script.write_text("USER ORIGINAL\n", encoding="utf-8")
+
+        svc.install("claude")
+        assert script.read_text(encoding="utf-8") != "USER ORIGINAL\n"
+
+        svc.install("codex")
+        svc.uninstall("claude")
+
+        assert script.exists(), "shared wrapper must remain managed while codex is installed"
+        assert script.read_text(encoding="utf-8") != "USER ORIGINAL\n"
+
+        from tools.workflow_cli.install import _load_manifest
+        codex_manifest = _load_manifest(manifest_root / "install" / "codex.yaml")
+        transferred = [
+            bk for bk in codex_manifest.get("backups", [])
+            if isinstance(bk, dict) and bk.get("target") == str(script)
+        ]
+        assert any(
+            Path(bk["backup"]).read_text(encoding="utf-8") == "USER ORIGINAL\n"
+            for bk in transferred
+        ), "user backup should be transferred to the remaining platform manifest"
+
+        result = svc.uninstall("codex")
+
+        assert str(script) in result["restored"]
+        assert script.exists(), "final uninstall must restore the user's original wrapper"
+        assert script.read_text(encoding="utf-8") == "USER ORIGINAL\n"
+
     # -----------------------------------------------------------------------
     # status
     # -----------------------------------------------------------------------

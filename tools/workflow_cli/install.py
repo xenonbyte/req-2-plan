@@ -280,7 +280,17 @@ class InstallService:
             backup_path = Path(bk["backup"])
             target_path = Path(bk["target"])
             if backup_path.exists():
-                if not self._is_managed_wrapper_backup(str(target_path), backup_path):
+                target_str = str(target_path)
+                is_managed_wrapper_backup = self._is_managed_wrapper_backup(
+                    target_str, backup_path
+                )
+                if (
+                    other_platforms_installed
+                    and self._is_current_shared_wrapper_target(target_path)
+                    and not is_managed_wrapper_backup
+                ):
+                    self._defer_shared_wrapper_backup(platform, target_path, backup_path)
+                elif not is_managed_wrapper_backup:
                     target_path.parent.mkdir(parents=True, exist_ok=True)
                     shutil.copy2(str(backup_path), str(target_path))
                     restored.append(str(target_path))
@@ -407,6 +417,57 @@ class InstallService:
             if self._manifest_path(platform).exists():
                 return True
         return False
+
+    def _is_current_shared_wrapper_target(self, target: Path) -> bool:
+        bin_dir = self.manifest_root / "bin"
+        if target.parent != bin_dir:
+            return False
+        return target.name in {
+            src.name for src in sorted(self.repo_root.glob("tools/r2p-*")) if src.is_file()
+        }
+
+    def _defer_shared_wrapper_backup(
+        self,
+        uninstalling_platform: str,
+        target_path: Path,
+        backup_path: Path,
+    ) -> None:
+        recipient = self._shared_backup_recipient(uninstalling_platform)
+        if recipient is None:
+            raise ValueError("unsafe_manifest: no_valid_shared_backup_recipient")
+        recipient_platform, recipient_manifest_path, recipient_manifest = recipient
+
+        backup_dir = self.manifest_root / "install" / "backups" / recipient_platform
+        self._validate_install_backup_dir(backup_dir)
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        deferred_backup_path = _backup_path(backup_dir, target_path)
+        shutil.copy2(str(backup_path), str(deferred_backup_path))
+        try:
+            recipient_manifest.setdefault("backups", []).append(
+                {"target": str(target_path), "backup": str(deferred_backup_path)}
+            )
+            self._write_manifest_atomic(
+                recipient_manifest_path,
+                _dump_manifest(recipient_manifest),
+            )
+        except BaseException:
+            deferred_backup_path.unlink(missing_ok=True)
+            raise
+        backup_path.unlink(missing_ok=True)
+
+    def _shared_backup_recipient(
+        self, excluding: str
+    ) -> tuple[str, Path, dict[str, Any]] | None:
+        for platform in SUPPORTED_PLATFORMS:
+            if platform == excluding:
+                continue
+            manifest_path = self._manifest_path(platform)
+            if not manifest_path.exists():
+                continue
+            manifest = _load_manifest(manifest_path)
+            self._validate_manifest_for_uninstall(platform, manifest)
+            return platform, manifest_path, manifest
+        return None
 
     def _validate_manifest_for_uninstall(self, platform: str, manifest: dict) -> None:
         shape_issues = _manifest_shape_issues(manifest, platform)
