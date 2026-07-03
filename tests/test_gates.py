@@ -1126,7 +1126,7 @@ class TestPlanCodeBlockGate(unittest.TestCase):
             self.assertFalse(r.passed)
             self.assertEqual(r.exit_code, 3)
 
-    def test_standard_plan_with_language_missing_from_skeleton_code_block_fails(self):
+    def test_standard_plan_with_language_missing_from_skeleton_code_block_passes(self):
         import tempfile
         with tempfile.TemporaryDirectory() as tmp:
             r = self._check_plan(
@@ -1134,8 +1134,7 @@ class TestPlanCodeBlockGate(unittest.TestCase):
                 self.standard,
                 self._plan(True, skeleton_override="```\ndef f():\n    return 1\n```\n"),
             )
-            self.assertFalse(r.passed)
-            self.assertEqual(r.exit_code, 3)
+            self.assertTrue(r.passed)
 
     def test_light_plan_without_code_block_exempt(self):
         import tempfile

@@ -888,7 +888,7 @@ def _has_complete_code_fence(content: str) -> bool:
                 has_body = True
             continue
 
-        if marker and marker.group(2).strip():
+        if marker:
             fence_char = marker.group(1)[0]
             fence_len = len(marker.group(1))
             has_body = False
