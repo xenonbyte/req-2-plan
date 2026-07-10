@@ -1,4 +1,2 @@
-name = "r2p-archive"
 description = "Archive a closed or executing workflow run out of the active workspace"
-command = "{{R2P_BIN_DIR}}/r2p-archive"
-version = "{{R2P_VERSION}}"
+prompt = "!{\"{{R2P_BIN_DIR}}/r2p-archive\" {{args}}}"

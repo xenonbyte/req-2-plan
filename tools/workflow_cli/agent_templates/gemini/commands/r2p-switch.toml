@@ -1,4 +1,2 @@
-name = "r2p-switch"
 description = "Switch the active run pointer to a different workflow run"
-command = "{{R2P_BIN_DIR}}/r2p-switch"
-version = "{{R2P_VERSION}}"
+prompt = "!{\"{{R2P_BIN_DIR}}/r2p-switch\" {{args}}}"

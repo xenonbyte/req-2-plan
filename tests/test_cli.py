@@ -24,6 +24,7 @@ from tools.workflow_cli.models import (
     Stage,
     TierBase,
     TierEstimate,
+    TierModifier,
     WorkId,
 )
 from tools.workflow_cli.state import RunStateManager
@@ -124,6 +125,21 @@ def test_seed_plan_approved_run_roundtrips():
             Stage.PLAN,
         }
         assert all(aa.status == "approved" for aa in rec.active_artifacts)
+
+
+def test_load_run_rejects_directory_and_record_work_id_mismatch(tmp_path):
+    from tools.workflow_cli.state import create_run_record
+
+    requested = "WF-20260605-directory-id"
+    embedded = "WF-20260605-embedded-id"
+    run_dir = tmp_path / ".req-to-plan" / requested
+    RunStateManager(run_dir).save(create_run_record(WorkId(embedded)))
+
+    invoke(
+        ["status-run", "--work-id", requested],
+        base_path=tmp_path,
+        expect_exit=6,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -984,6 +1000,48 @@ class TestRunClose:
 
 
 class TestRunReopen:
+    @pytest.mark.parametrize(
+        ("source_name", "target_stage"),
+        [
+            ("00-raw-requirement.md", "requirement_brief"),
+            ("02-project-context.json", "raw_requirement"),
+            ("02-project-context.md", "raw_requirement"),
+        ],
+    )
+    def test_reopen_rejects_symlinked_source_files(
+        self, tmp_path, source_name, target_stage
+    ):
+        source = "WF-20260605-reopen-symlink"
+        invoke(
+            ["run-start", "--work-id", source, "--requirement", "add rate limiting"],
+            base_path=tmp_path,
+        )
+        record = load_record(tmp_path, source)
+        record.status = RunStatus.CLOSED_AT_PLAN_CHECKPOINT
+        record.current_stage = Stage.CLOSED
+        record.approved_checkpoints = [plan_checkpoint()]
+        save_record(tmp_path, record)
+
+        source_path = tmp_path / ".req-to-plan" / source / source_name
+        source_path.unlink()
+        outside = tmp_path / f"outside-{source_name.replace('/', '-')}"
+        outside.write_text("PRIVATE OUTSIDE CONTENT\n", encoding="utf-8")
+        source_path.symlink_to(outside)
+
+        invoke(
+            [
+                "run-reopen",
+                "--from", source,
+                "--stage", target_stage,
+                "--reason", "repair upstream",
+            ],
+            base_path=tmp_path,
+            expect_exit=6,
+        )
+
+        assert not (tmp_path / ".req-to-plan" / f"{source}-r1").exists()
+        assert outside.read_text(encoding="utf-8") == "PRIVATE OUTSIDE CONTENT\n"
+
     def test_reopen_copies_context_pack_files(self, tmp_path):
         source = "WF-20260605-reopen-context"
         repo = tmp_path / "repo"
@@ -1036,6 +1094,26 @@ class TestRunReopen:
 
             assert (Path(tmp) / ".req-to-plan" / f"{source}-r1").exists()
             assert (Path(tmp) / ".req-to-plan" / f"{source}-r2").exists()
+
+    def test_reopen_truncates_long_slug_to_leave_room_for_suffix(self, tmp_path):
+        source = f"WF-20260605-{'a' * 40}"
+        invoke(
+            ["run-start", "--work-id", source, "--requirement", "foo"],
+            base_path=tmp_path,
+        )
+        record = load_record(tmp_path, source)
+        record.status = RunStatus.CLOSED_AT_PLAN_CHECKPOINT
+        record.current_stage = Stage.CLOSED
+        record.approved_checkpoints = [plan_checkpoint()]
+        save_record(tmp_path, record)
+
+        invoke(
+            ["run-reopen", "--from", source, "--stage", "plan", "--reason", "repair"],
+            base_path=tmp_path,
+        )
+
+        expected = f"WF-20260605-{'a' * 37}-r1"
+        assert (tmp_path / ".req-to-plan" / expected / "run.md").is_file()
 
     def test_reopen_skips_suffix_reserved_by_archived_run(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1298,6 +1376,41 @@ class TestRunReopen:
 
 
 class TestTierLock:
+    @pytest.mark.parametrize(
+        ("locked_base", "modifier"),
+        [
+            (TierBase.LIGHT, TierModifier.SAFETY),
+            (TierBase.LIGHT, TierModifier.MIGRATION),
+            (TierBase.STANDARD, TierModifier.SCOPE_EXPANDING),
+        ],
+    )
+    def test_relock_cannot_remove_escalated_tier_without_override(
+        self, tmp_path, locked_base, modifier
+    ):
+        work_id = f"WF-20260605-relock-{modifier.value.replace('_', '-')}"
+        invoke(
+            ["run-start", "--work-id", work_id, "--requirement", "small change"],
+            base_path=tmp_path,
+        )
+        record = load_record(tmp_path, work_id)
+        record.tier_estimate = TierEstimate(base=TierBase.LIGHT)
+        record.tier_locked = TierEstimate(
+            base=locked_base,
+            modifiers=frozenset({modifier}),
+        )
+        save_record(tmp_path, record)
+
+        invoke(
+            ["tier-lock", "--work-id", work_id, "--base", "light", "--confirm"],
+            base_path=tmp_path,
+            expect_exit=2,
+        )
+
+        locked = load_record(tmp_path, work_id).tier_locked
+        assert locked is not None
+        assert locked.base == locked_base
+        assert locked.modifiers == frozenset({modifier})
+
     def test_lock_requires_confirm(self):
         with tempfile.TemporaryDirectory() as tmp:
             work_id = "WF-20260527-test"
@@ -3547,6 +3660,31 @@ def test_status_next_surfaces_gap_route_progress(capsys, monkeypatch):
 
 
 class TestContextBuildCommand:
+    def test_context_build_rejects_mismatched_run_identity_before_writing(
+        self, tmp_path
+    ):
+        from tools.workflow_cli.state import create_run_record
+
+        requested = "WF-20260605-context-directory"
+        embedded = "WF-20260605-context-embedded"
+        run_dir = tmp_path / ".req-to-plan" / requested
+        RunStateManager(run_dir).save(create_run_record(WorkId(embedded)))
+        repo = tmp_path / "repo"
+        repo.mkdir()
+
+        invoke(
+            [
+                "context-build",
+                "--work-id", requested,
+                "--repo-path", str(repo),
+            ],
+            base_path=tmp_path,
+            expect_exit=6,
+        )
+
+        assert not (run_dir / "02-project-context.json").exists()
+        assert not (run_dir / "02-project-context.md").exists()
+
     def test_context_build_writes_pack_into_run_dir(self, tmp_path):
         repo = tmp_path / "repo"
         repo.mkdir()
@@ -5256,33 +5394,26 @@ class TestTaskBriefShortcut:
         run_dir_sc = self._executing_run_with_plan(base_sc, wid, self._MULTI_TASK_PLAN)
         run_dir_cli = self._executing_run_with_plan(base_cli, wid, self._MULTI_TASK_PLAN)
 
-        # Symlink sys.executable as "python3" in a tmp bin dir so the wrapper
-        # always finds a dependency-complete interpreter regardless of CI PATH.
-        # Also propagate site-packages via PYTHONPATH so yaml is available even
-        # when sys.executable is itself a symlink to the base cpython binary
-        # (as in a uv-managed venv on local dev) and Python can't locate pyvenv.cfg
-        # through the extra symlink indirection.
-        import sysconfig
+        # Put a python3 shim on PATH that execs the actual active interpreter.
+        # An extra interpreter symlink can hide pyvenv.cfg from Python, while
+        # the wrapper's isolated mode intentionally ignores PYTHONPATH.
+        import shlex
         py_bin = tmp_path / "pybin"
         py_bin.mkdir()
-        py3_link = py_bin / "python3"
-        py3_link.symlink_to(sys.executable)
-        # The symlink resolves to the already-executable interpreter. Do not
-        # chmod it: chmod follows symlinks and can mutate/fail on the host Python.
-        assert os.access(py3_link, os.X_OK)
-
-        site_pkgs = sysconfig.get_path("purelib")
-        base_pp = os.environ.get("PYTHONPATH", "")
-        extra_pp = site_pkgs if site_pkgs else ""
-        child_pythonpath = (extra_pp + os.pathsep + base_pp).strip(os.pathsep) if extra_pp or base_pp else ""
+        py3_shim = py_bin / "python3"
+        py3_shim.write_text(
+            "#!/usr/bin/env bash\n"
+            f"exec {shlex.quote(sys.executable)} \"$@\"\n",
+            encoding="utf-8",
+        )
+        py3_shim.chmod(0o755)
 
         child_env: dict[str, str] = {
             **os.environ,
             "PATH": str(py_bin) + os.pathsep + os.environ["PATH"],
             "R2P_JSON": "1",
         }
-        if child_pythonpath:
-            child_env["PYTHONPATH"] = child_pythonpath
+        child_env.pop("PYTHONPATH", None)
 
         # Run wrapper; cwd=base_sc so agent_shortcuts uses it as base_path
         result = subprocess.run(

@@ -1,4 +1,2 @@
-name = "r2p-continue"
 description = "Continue the active requirement-to-PLAN workflow run. At checkpoints, only approve DESIGN/SPEC/PLAN artifacts with no unresolved ambiguity or undecided point. A decomposition stage may not defer or drop requirement content: everything the brief puts in scope must be implemented this run."
-command = "{{R2P_BIN_DIR}}/r2p-continue"
-version = "{{R2P_VERSION}}"
+prompt = "!{\"{{R2P_BIN_DIR}}/r2p-continue\" {{args}}}"

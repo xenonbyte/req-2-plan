@@ -7,8 +7,10 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import shutil
+import stat
 import sys
 from pathlib import Path
 
@@ -97,12 +99,25 @@ def _load_run(work_id: str, base_path: Path | None = None):
     run_dir = _reject_symlinked_run_paths(work_id, base_path)
     mgr = RunStateManager(run_dir)
     try:
-        return mgr.load(), mgr, run_dir
+        record = mgr.load()
     except FileNotFoundError:
         print_and_exit(
             format_error(f"Run not found: {work_id}", exit_code=EXIT_NOT_FOUND),
             EXIT_NOT_FOUND,
         )
+    requested = str(work_id)
+    embedded = str(record.work_id)
+    if run_dir.name != requested or embedded != requested:
+        print_and_exit(
+            format_error(
+                "Run identity mismatch: "
+                f"requested={requested!r}, directory={run_dir.name!r}, "
+                f"record={embedded!r}",
+                exit_code=EXIT_CONFLICT,
+            ),
+            EXIT_CONFLICT,
+        )
+    return record, mgr, run_dir
 
 
 def _write_recovery_list(run_dir: Path, work_id: str, filename: str, items: list[str]) -> str | None:
@@ -537,6 +552,89 @@ def _cmd_run_close(args):
     )
 
 
+class _UnsafeReopenSourceError(ValueError):
+    pass
+
+
+def _reopen_candidate_work_id(base_work_id: str, suffix: int) -> WorkId:
+    """Append ``-rN`` while shortening only the slug when length requires it."""
+    match = re.fullmatch(r"(WF-\d{8}-)(.+)", base_work_id)
+    if match is None:
+        raise ValueError(f"Invalid base WorkId for reopen: {base_work_id!r}")
+    prefix, slug = match.groups()
+    suffix_text = f"-r{suffix}"
+    while slug:
+        candidate = f"{prefix}{slug}{suffix_text}"
+        try:
+            return WorkId(candidate)
+        except ValueError:
+            slug = slug[:-1].rstrip("-")
+    raise ValueError(f"Could not construct a reopen WorkId for {base_work_id!r}")
+
+
+def _copy_reopen_regular_file(source: Path, destination: Path) -> bool:
+    """Copy one existing regular file without following a source symlink.
+
+    ``lstat`` plus an inode/device comparison closes the fallback race on
+    platforms where ``O_NOFOLLOW`` is unavailable.  The function returns
+    ``False`` only when the source does not exist at all; every non-regular
+    source is an explicit conflict.
+    """
+    try:
+        before = source.lstat()
+    except FileNotFoundError:
+        return False
+    if not stat.S_ISREG(before.st_mode):
+        raise _UnsafeReopenSourceError(
+            f"reopen source is not a regular file: {source}"
+        )
+
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        source_fd = os.open(source, flags)
+    except OSError as exc:
+        raise _UnsafeReopenSourceError(
+            f"could not safely open reopen source {source}: {exc}"
+        ) from exc
+
+    destination_created = False
+    try:
+        opened = os.fstat(source_fd)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or opened.st_dev != before.st_dev
+            or opened.st_ino != before.st_ino
+        ):
+            raise _UnsafeReopenSourceError(
+                f"reopen source changed during validation: {source}"
+            )
+
+        destination_fd = os.open(
+            destination,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+            stat.S_IMODE(opened.st_mode),
+        )
+        destination_created = True
+        with os.fdopen(source_fd, "rb") as source_stream:
+            source_fd = -1
+            with os.fdopen(destination_fd, "wb") as destination_stream:
+                shutil.copyfileobj(source_stream, destination_stream)
+        os.chmod(destination, stat.S_IMODE(opened.st_mode))
+        os.utime(
+            destination,
+            ns=(opened.st_atime_ns, opened.st_mtime_ns),
+            follow_symlinks=False,
+        )
+    except Exception:
+        if destination_created:
+            destination.unlink(missing_ok=True)
+        raise
+    finally:
+        if source_fd >= 0:
+            os.close(source_fd)
+    return True
+
+
 def _cmd_run_reopen(args):
     source_id = str(_validate_work_id(args.from_id))
     target_stage = _parse_reopen_stage(args.stage)
@@ -576,19 +674,22 @@ def _cmd_run_reopen(args):
         suffix = int(m.group(2)) + 1
 
     new_work_id = None
-    new_work_id_str = ""
     new_run_dir = None
     for candidate_suffix in range(suffix, 100):
-        candidate = f"{base}-r{candidate_suffix}"
         try:
-            candidate_work_id = WorkId(candidate)
-        except ValueError as e:
-            print_and_exit(format_error(str(e), exit_code=EXIT_CLI_ERR), EXIT_CLI_ERR)
+            candidate_work_id = _reopen_candidate_work_id(base, candidate_suffix)
+        except ValueError:
+            continue
+        candidate = str(candidate_work_id)
         candidate_dir = _get_run_dir(candidate, args.base_path)
-        candidate_archive_dir = (args.base_path or Path.cwd()) / ".req-to-plan" / "archive" / candidate
+        candidate_archive_dir = (
+            (args.base_path or Path.cwd())
+            / ".req-to-plan"
+            / "archive"
+            / candidate
+        )
         if not candidate_dir.exists() and not candidate_archive_dir.exists():
             new_work_id = candidate_work_id
-            new_work_id_str = candidate
             new_run_dir = candidate_dir
             break
     if new_work_id is None or new_run_dir is None:
@@ -599,8 +700,6 @@ def _cmd_run_reopen(args):
             ),
             EXIT_CONFLICT,
         )
-
-    import shutil
 
     new_run_dir_created = False
     try:
@@ -614,12 +713,12 @@ def _cmd_run_reopen(args):
             artifact_file = STAGE_ARTIFACT_MAP.get(stage)
             if artifact_file:
                 src_path = source_dir / artifact_file
-                if src_path.exists():
-                    shutil.copy2(src_path, new_run_dir / artifact_file)
+                _copy_reopen_regular_file(
+                    src_path, new_run_dir / artifact_file
+                )
         for context_file in ("02-project-context.json", "02-project-context.md"):
             src_path = source_dir / context_file
-            if src_path.exists():
-                shutil.copy2(src_path, new_run_dir / context_file)
+            _copy_reopen_regular_file(src_path, new_run_dir / context_file)
 
         # Create new run record
         new_record = create_run_record(new_work_id)
@@ -658,6 +757,13 @@ def _cmd_run_reopen(args):
 
         new_mgr = RunStateManager(new_run_dir)
         new_mgr.save(new_record)
+    except _UnsafeReopenSourceError as exc:
+        if new_run_dir_created:
+            shutil.rmtree(new_run_dir, ignore_errors=True)
+        print_and_exit(
+            format_error(str(exc), exit_code=EXIT_CONFLICT),
+            EXIT_CONFLICT,
+        )
     except Exception:
         # Roll back the partially-created new run dir so no orphan is left
         # when populate/save fails (mirrors the source-save rollback below).
@@ -1059,17 +1165,32 @@ def _cmd_tier_lock(args):
     base = _parse_tier_base(args.base)
     modifiers = _parse_modifiers(args.modifiers)
 
+    from tools.workflow_cli.models import _TIER_BASE_ORDER, TierEstimate
+
     if record.tier_estimate is None:
-        # If no estimate, create a minimal one
-        from tools.workflow_cli.models import TierEstimate
-        record.tier_estimate = TierEstimate(base=TierBase.LIGHT, modifiers=frozenset())
+        # If no estimate, create a minimal one.
+        record.tier_estimate = TierEstimate(
+            base=TierBase.LIGHT, modifiers=frozenset()
+        )
 
     if args.override_floor:
-        from tools.workflow_cli.models import TierEstimate
         record.tier_locked = TierEstimate(base=base, modifiers=modifiers)
     else:
+        effective_floor = record.tier_estimate
+        if record.tier_locked is not None:
+            effective_floor = TierEstimate(
+                base=max(
+                    record.tier_estimate.base,
+                    record.tier_locked.base,
+                    key=_TIER_BASE_ORDER.index,
+                ),
+                modifiers=(
+                    record.tier_estimate.modifiers
+                    | record.tier_locked.modifiers
+                ),
+            )
         try:
-            record.tier_locked = record.tier_estimate.lock(base, modifiers)
+            record.tier_locked = effective_floor.lock(base, modifiers)
         except ValueError as e:
             print_and_exit(format_error(str(e), exit_code=EXIT_CLI_ERR), EXIT_CLI_ERR)
 
@@ -2281,6 +2402,12 @@ def _cmd_context_build(args):
             format_error(f"run not found: {work_id}", exit_code=EXIT_NOT_FOUND),
             EXIT_NOT_FOUND,
         )
+    # Some low-level callers intentionally pre-create only the run directory.
+    # Once run.md exists, however, it is authoritative and its embedded WorkId
+    # must match the requested path before this write command changes the run.
+    run_path = run_dir / "run.md"
+    if run_path.exists() or run_path.is_symlink():
+        _record, _manager, run_dir = _load_run(work_id, args.base_path)
     repo_path = _validate_repo_path(args.repo_path)
     pack = build_context_pack(repo_path)
     md_path, json_path = write_context_pack(pack, run_dir)

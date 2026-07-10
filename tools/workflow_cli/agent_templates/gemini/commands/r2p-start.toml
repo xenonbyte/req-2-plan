@@ -1,4 +1,2 @@
-name = "r2p-start"
 description = "Start a new requirement-to-PLAN workflow run. Tier estimation and the Project Context Pack are grounded in the current directory by default; pass --repo-path <dir> to ground them in a different repository instead."
-command = "{{R2P_BIN_DIR}}/r2p-start"
-version = "{{R2P_VERSION}}"
+prompt = "!{\"{{R2P_BIN_DIR}}/r2p-start\" {{args}}}"

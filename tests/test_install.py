@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import shutil
 import tempfile
+import re
 from pathlib import Path
 from unittest.mock import patch
 
@@ -1044,6 +1045,39 @@ class TestInstallService:
         svc.install("gemini")
         toml_files = list((ph_root / "gemini" / "commands").glob("r2p-*.toml"))
         assert len(toml_files) > 0, "*.toml command files should be installed for gemini"
+
+    def test_gemini_commands_use_prompt_schema_and_forward_args(self, tmp_path):
+        svc, _manifest_root, ph_root = make_service(tmp_path)
+        svc.install("gemini")
+
+        commands = sorted((ph_root / "gemini" / "commands").glob("r2p-*.toml"))
+        assert commands
+        for command in commands:
+            content = command.read_text(encoding="utf-8")
+            keys = {
+                match.group(1)
+                for line in content.splitlines()
+                if (match := re.match(r"^([A-Za-z][A-Za-z0-9_-]*)\s*=", line))
+            }
+            assert keys == {"description", "prompt"}, (command, keys)
+            assert "{{args}}" in content, command
+            assert "!{" in content, command
+
+    def test_isolated_wrapper_is_recognized_as_managed(self):
+        from tools.workflow_cli.install import _looks_like_managed_bin_script
+
+        wrapper = """#!/usr/bin/env bash
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT=/trusted/req-to-plan
+if command -v python3 >/dev/null 2>&1; then
+    exec python3 -I "$REPO_ROOT/tools/workflow_cli/__main__.py" tools.workflow_cli.agent_shortcuts start "$@"
+else
+    exec python -I "$REPO_ROOT/tools/workflow_cli/__main__.py" tools.workflow_cli.agent_shortcuts start "$@"
+fi
+"""
+
+        assert _looks_like_managed_bin_script(wrapper)
 
     # -----------------------------------------------------------------------
     # Return value shape
