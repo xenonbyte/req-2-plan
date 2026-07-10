@@ -1,4 +1,2 @@
-name = "r2p-gap-open"
 description = "Route an upstream gap back to an owner stage on an open run"
-command = "{{R2P_BIN_DIR}}/r2p-gap-open"
-version = "{{R2P_VERSION}}"
+prompt = "!{\"{{R2P_BIN_DIR}}/r2p-gap-open\" {{args}}}"

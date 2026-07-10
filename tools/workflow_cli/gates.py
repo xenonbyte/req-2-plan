@@ -572,6 +572,15 @@ def _find_plan_task_field(task_body: str, field: str):
     return None
 
 
+def _count_plan_task_fields(task_body: str, field: str) -> int:
+    field_re = re.compile(rf"^{re.escape(field)}:[ \t]*(.*)$")
+    return sum(
+        1
+        for line, _, _ in unfenced_markdown_lines(task_body)
+        if field_re.match(line)
+    )
+
+
 def _find_next_plan_task_field_start(task_body: str, after: int) -> int | None:
     for line, start, _ in unfenced_markdown_lines(task_body):
         if start >= after and PLAN_TASK_FIELD_RE.match(line):
@@ -687,9 +696,10 @@ def _python_executable() -> str:
 def _context_pack_remediation_command(run_dir: Path) -> str:
     import shlex
     package_root = Path(__file__).resolve().parents[2]
-    pythonpath = f"PYTHONPATH={shlex.quote(str(package_root))}${{PYTHONPATH:+:$PYTHONPATH}}"
+    launcher = package_root / "tools" / "workflow_cli" / "__main__.py"
     command = (
-        f"{pythonpath} {shlex.quote(_python_executable())} -m tools.workflow_cli "
+        f"{shlex.quote(_python_executable())} -I {shlex.quote(str(launcher))} "
+        "tools.workflow_cli "
         f"context-build --work-id {run_dir.name}"
     )
     if run_dir.parent.name == ".req-to-plan":
@@ -826,6 +836,12 @@ def _check_plan_task_fields(content: str) -> list[str]:
                     "SCOPE-OUT-* ID."
                 )
         for field in PLAN_TASK_FIELDS:
+            count = _count_plan_task_fields(body, field)
+            if count > 1:
+                issues.append(
+                    f"{label} field '{field}:' must appear exactly once; "
+                    f"found {count}."
+                )
             if not _plan_task_field_body(body, field).strip():
                 issues.append(f"{label} is missing a non-empty '{field}:' field.")
         raw_change_type = _task_change_type(body)
@@ -1201,21 +1217,28 @@ def _check_stage_schema(stage: Stage, tier: TierEstimate, content: str) -> list[
     headings = required_headings(stage, tier.base)
     native = _STAGE_NATIVE_HEADING_PATTERNS.get(stage)
     unfenced_content = unfenced_markdown_text(content)
-    present_headings = {
+    present_heading_counts = Counter(
         line.strip()
         for line, _, _ in unfenced_markdown_lines(content)
         if line.lstrip().startswith("#")
-    }
+    )
+    present_headings = set(present_heading_counts)
 
     if not headings and native is None:
         return issues
 
     # R2.1: required headings must be present
     for heading in headings:
-        if heading not in present_headings:
+        count = present_heading_counts[heading]
+        if count == 0:
             issues.append(
                 f"Missing required section {heading!r} for stage {stage.value!r} "
                 f"at tier '{tier.base.value}'."
+            )
+        elif count > 1:
+            issues.append(
+                f"Required section {heading!r} must appear exactly once; "
+                f"found {count}."
             )
 
     # R2.3a: each required heading's section must have a non-placeholder body

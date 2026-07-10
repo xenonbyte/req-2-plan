@@ -2008,6 +2008,24 @@ class TestScopeFreeze(unittest.TestCase):
         self.assertTrue(any("SCOPE-IN-001" in i and "duplicate" in i.lower() for i in r.issues))
         self.assertTrue(any("SCOPE-OUT-001" in i and "duplicate" in i.lower() for i in r.issues))
 
+    def test_duplicate_required_scope_section_fails_even_if_first_is_valid(self):
+        import tempfile
+        from pathlib import Path
+
+        content = self._brief(
+            "- SCOPE-IN-001 rate limit per IP",
+            "- SCOPE-OUT-001 admin UI",
+        )
+        content += "\n## In-Scope\n- entry without a stable ID\n"
+        with tempfile.TemporaryDirectory() as tmp:
+            r = self.check(Path(tmp), self.Stage.REQUIREMENT_BRIEF, self.tier, [], content)
+
+        self.assertFalse(r.passed)
+        self.assertTrue(
+            any("In-Scope" in issue and "exactly once" in issue for issue in r.issues),
+            r.issues,
+        )
+
     def test_each_scope_entry_must_have_matching_id(self):
         import tempfile
         from pathlib import Path
@@ -2103,6 +2121,30 @@ class TestPlanTaskFields(unittest.TestCase):
                 any(field in i for i in r.issues),
                 f"expected missing field issue for {field}; got {r.issues}",
             )
+
+    def test_duplicate_required_field_fails_before_second_value_can_escape_checks(self):
+        plan = (
+            "## Tasks\n\n"
+            "### PLAN-TASK-001 do it\n"
+            "Spec References: SPEC-AUTH-001\n"
+            "Change Type: non_code\n"
+            "TDD Applicable: no\n"
+            "Files: N/A\n"
+            "Files: ../../outside.py\n"
+            "Skeleton: document the operational step\n"
+            "Steps:\n"
+            "- [ ] do it\n"
+            "Verification: pytest\n"
+        )
+
+        r = self._gate(plan)
+
+        self.assertFalse(r.passed)
+        self.assertTrue(
+            any("PLAN-TASK-001" in issue and "Files" in issue and "exactly once" in issue
+                for issue in r.issues),
+            r.issues,
+        )
 
     def test_legacy_deferral_fields_fail(self):
         plan = (
@@ -2838,8 +2880,13 @@ class TestPlanContextPackGate(unittest.TestCase):
             (i for i in r.issues if "tools.workflow_cli context-build" in i),
             "",
         )
-        self.assertIn("PYTHONPATH=", issue)
-        self.assertIn(f"{shlex.quote(sys.executable)} -m tools.workflow_cli context-build", issue)
+        launcher = Path(__file__).parent.parent / "tools" / "workflow_cli" / "__main__.py"
+        self.assertNotIn("PYTHONPATH=", issue)
+        self.assertIn(
+            f"{shlex.quote(sys.executable)} -I {shlex.quote(str(launcher))} "
+            "tools.workflow_cli context-build",
+            issue,
+        )
         self.assertIn(f"--work-id {expected_work_id}", issue)
         self.assertIn("--repo-path <repo-dir>", issue)
 
@@ -2860,7 +2907,8 @@ class TestPlanContextPackGate(unittest.TestCase):
             (i for i in r.issues if "tools.workflow_cli context-build" in i),
             "",
         )
-        self.assertIn("PYTHONPATH=", issue)
+        self.assertNotIn("PYTHONPATH=", issue)
+        self.assertIn(" -I ", issue)
         self.assertIn("--work-id WF-20260606-login", issue)
         self.assertIn("--base-path", issue)
         self.assertRegex(issue, r"--base-path '.*target repo'")
@@ -2909,8 +2957,9 @@ class TestPlanContextPackGate(unittest.TestCase):
             (i for i in r.issues if "tools.workflow_cli context-build" in i),
             "",
         )
-        self.assertIn("'/tmp/python with spaces' -m tools.workflow_cli context-build", issue)
-        self.assertNotIn(" python3 -m tools.workflow_cli context-build", issue)
+        self.assertIn("'/tmp/python with spaces' -I ", issue)
+        self.assertIn("tools.workflow_cli context-build", issue)
+        self.assertNotIn(" -m tools.workflow_cli context-build", issue)
 
     def test_standard_plan_with_corrupt_pack_json_fails(self):
         import tempfile

@@ -31,6 +31,8 @@ from tools.workflow_cli.agent_shortcuts import (
 from tools.workflow_cli.cli import main as cli_main
 from tools.workflow_cli.state import RunStateManager
 
+REPO_ROOT = Path(__file__).parent.parent
+
 # Schema-valid DESIGN LIGHT content (required for gate-quality to pass at LIGHT tier).
 _DESIGN_LIGHT_CONTENT = (
     "# design v2\n\n## Design Summary\ncontent\n"
@@ -39,12 +41,51 @@ _DESIGN_LIGHT_CONTENT = (
 )
 
 
+def test_all_wrappers_use_isolated_trusted_bootstrap():
+    wrappers = [REPO_ROOT / "tools" / "r2p"] + sorted(
+        (REPO_ROOT / "tools").glob("r2p-*")
+    )
+    assert wrappers
+    for wrapper in wrappers:
+        content = wrapper.read_text(encoding="utf-8")
+        assert '-I "$REPO_ROOT/tools/workflow_cli/__main__.py"' in content, wrapper
+        assert "export PYTHONPATH=" not in content, wrapper
+        assert " -m tools.workflow_cli" not in content, wrapper
+
+
+def test_r2p_start_wrapper_does_not_import_workspace_module(tmp_path):
+    malicious = tmp_path / "tools" / "workflow_cli"
+    malicious.mkdir(parents=True)
+    (tmp_path / "tools" / "__init__.py").write_text("", encoding="utf-8")
+    (malicious / "__init__.py").write_text("", encoding="utf-8")
+    (malicious / "agent_shortcuts.py").write_text(
+        "from pathlib import Path\n"
+        "Path(__file__).parents[2].joinpath('workspace-module-ran').write_text('yes')\n",
+        encoding="utf-8",
+    )
+    env = os.environ.copy()
+    env.pop("PYTHONPATH", None)
+
+    completed = subprocess.run(
+        [str(REPO_ROOT / "tools" / "r2p-start"), "--help"],
+        cwd=tmp_path,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert not (tmp_path / "workspace-module-ran").exists()
+
+
 def _expected_workflow_cli_prefix(base: Path) -> str:
     from tools.workflow_cli import agent_shortcuts as A
 
     return (
-        f"env PYTHONPATH={shlex.quote(str(A._repo_root()))} "
-        f"{shlex.quote(sys.executable)} -m tools.workflow_cli --base-path {shlex.quote(str(base))}"
+        f"{shlex.quote(sys.executable)} -I "
+        f"{shlex.quote(str(A._repo_root() / 'tools' / 'workflow_cli' / '__main__.py'))} "
+        f"tools.workflow_cli --base-path {shlex.quote(str(base))}"
     )
 
 
@@ -312,6 +353,23 @@ class TestCmdSwitch:
             assert read_active_pointer(base) is None
             assert "invalid_work_id" in capsys.readouterr().out
 
+    def test_rejects_run_md_with_mismatched_work_id(self, capsys):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            requested = "WF-20260527-directory-id"
+            run_md = _make_run(base, requested)
+            run_md.write_text(
+                run_md.read_text(encoding="utf-8").replace(
+                    requested, "WF-20260527-embedded-id", 1
+                ),
+                encoding="utf-8",
+            )
+
+            _invoke(["switch", "--work-id", requested], base, expect_exit=6)
+
+            assert read_active_pointer(base) is None
+            assert "run_identity_mismatch" in capsys.readouterr().out
+
 
 # ---------------------------------------------------------------------------
 # TestCmdStart
@@ -340,6 +398,31 @@ class TestCmdStart:
                     _invoke(["start", "add rate limiting"], base)
             data = read_active_pointer(base)
             assert data["selected_work_id"] == "WF-20260527-add-rate-limiting"
+
+    def test_json_mode_emits_one_parseable_payload(self, capsys, monkeypatch):
+        monkeypatch.setenv("R2P_JSON", "1")
+        work_id = "WF-20260527-json-start"
+
+        def fake_run_cli(_args, _base):
+            print(json.dumps({"status": "ok", "work_id": work_id}))
+            return 0
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            with patch(
+                "tools.workflow_cli.agent_shortcuts.generate_work_id",
+                return_value=work_id,
+            ), patch(
+                "tools.workflow_cli.agent_shortcuts._run_cli",
+                side_effect=fake_run_cli,
+            ):
+                _invoke(["start", "json output"], base)
+
+            payload = json.loads(capsys.readouterr().out)
+            assert payload["work_id"] == work_id
+            assert payload["created"] == f".req-to-plan/{work_id}/run.md"
+            assert payload["selected_run"] == f".req-to-plan/{work_id}/run.md"
+            assert payload["next"] == "r2p-continue"
 
     def test_start_preflights_workspace_gitignore_before_creating_run(self, capsys):
         from tools.workflow_cli.output import EXIT_CONFLICT
@@ -526,6 +609,25 @@ class TestCmdContinue:
             out = capsys.readouterr().out
             assert "invalid_work_id" in out
             assert "tier_not_locked" not in out
+
+    def test_rejects_pointer_to_run_with_mismatched_embedded_id(self, capsys):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            requested = "WF-20260527-continue-id"
+            run_md = _make_run(base, requested)
+            run_md.write_text(
+                run_md.read_text(encoding="utf-8").replace(
+                    requested, "WF-20260527-different-id", 1
+                ),
+                encoding="utf-8",
+            )
+            write_active_pointer(base, requested)
+
+            _invoke(["continue"], base, expect_exit=6)
+
+            out = capsys.readouterr().out
+            assert "run_identity_mismatch" in out
+            assert not (run_md.parent / "inputs").exists()
 
     def test_rejects_symlinked_run_dir_before_writing_inputs(self, capsys):
         with tempfile.TemporaryDirectory() as tmp:
@@ -792,8 +894,10 @@ class TestContinueDriver:
             ["stage-ready", "--work-id", "WF-20260527-test", "--stage", "raw_requirement"],
         )
 
-        assert f"{shlex.quote(sys.executable)} -m tools.workflow_cli" in command
-        assert "python3 -m tools.workflow_cli" not in command
+        launcher = A._repo_root() / "tools" / "workflow_cli" / "__main__.py"
+        assert f"{shlex.quote(sys.executable)} -I {shlex.quote(str(launcher))}" in command
+        assert "tools.workflow_cli --base-path" in command
+        assert "PYTHONPATH=" not in command
 
     def test_workflow_cli_command_uses_patched_active_python_executable(self):
         from tools.workflow_cli import agent_shortcuts as A
@@ -804,8 +908,10 @@ class TestContinueDriver:
                 ["stage-ready", "--work-id", "WF-20260527-test", "--stage", "raw_requirement"],
             )
 
-        assert "python -m tools.workflow_cli" in command
-        assert "python3 -m tools.workflow_cli" not in command
+        launcher = A._repo_root() / "tools" / "workflow_cli" / "__main__.py"
+        assert f"python -I {shlex.quote(str(launcher))}" in command
+        assert "tools.workflow_cli --base-path" in command
+        assert "PYTHONPATH=" not in command
 
     def test_continue_stops_at_unready_artifact(self, capsys):
         import tempfile

@@ -80,7 +80,8 @@ def _expand_local(path_str: str, base_path: Path | None) -> LinkExpansionResult:
                 error=block_reason,
             )
         try:
-            preview = candidate.read_text(encoding="utf-8", errors="ignore")[:500]
+            with candidate.open(encoding="utf-8", errors="ignore") as stream:
+                preview = stream.read(500)
             return LinkExpansionResult(url=path_str, status=LinkStatus.LOCAL_FOUND,
                                        content_preview=preview)
         except (PermissionError, OSError) as e:

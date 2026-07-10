@@ -4,6 +4,7 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from tools.workflow_cli.link_expander import (
     LinkExpansionResult,
@@ -108,6 +109,39 @@ class TestExpandLinksLocalFiles(unittest.TestCase):
             results = expand_links("See ./big.md", base_path=Path(tmp))
             self.assertEqual(results[0].status, LinkStatus.LOCAL_FOUND)
             self.assertLessEqual(len(results[0].content_preview), 500)
+
+    def test_local_file_preview_reads_only_the_bounded_prefix(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = (Path(tmp) / "big.md").resolve()
+            path.write_text("x" * 10_000, encoding="utf-8")
+            real_open = Path.open
+            read_sizes = []
+
+            class TrackedReader:
+                def __init__(self, stream):
+                    self.stream = stream
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, traceback):
+                    self.stream.close()
+
+                def read(self, size=-1):
+                    read_sizes.append(size)
+                    return self.stream.read(size)
+
+            def tracked_open(self_path, *args, **kwargs):
+                stream = real_open(self_path, *args, **kwargs)
+                if self_path.resolve() == path:
+                    return TrackedReader(stream)
+                return stream
+
+            with patch.object(Path, "open", new=tracked_open):
+                results = expand_links("See ./big.md", base_path=Path(tmp))
+
+            self.assertEqual(results[0].status, LinkStatus.LOCAL_FOUND)
+            self.assertEqual(read_sizes, [500])
 
     def test_hidden_local_file_is_not_previewed(self):
         with tempfile.TemporaryDirectory() as tmp:

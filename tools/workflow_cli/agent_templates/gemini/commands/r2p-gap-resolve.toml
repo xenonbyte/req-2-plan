@@ -1,4 +1,2 @@
-name = "r2p-gap-resolve"
 description = "Resolve an open upstream-gap route after the owner stage passes gate-quality"
-command = "{{R2P_BIN_DIR}}/r2p-gap-resolve"
-version = "{{R2P_VERSION}}"
+prompt = "!{\"{{R2P_BIN_DIR}}/r2p-gap-resolve\" {{args}}}"

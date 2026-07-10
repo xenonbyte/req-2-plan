@@ -111,6 +111,25 @@ def _reject_symlinked_run_paths_or_exit(base_path: Path, work_id: str) -> Path:
     return run_dir
 
 
+def _load_matching_record_or_exit(manager, run_dir: Path, work_id: str):
+    """Load a run only when its path and embedded WorkId agree."""
+    try:
+        record = manager.load()
+    except FileNotFoundError:
+        print(f"blocked: source_run_not_found\nwork_id: {work_id}\n")
+        sys.exit(7)
+    embedded = str(record.work_id)
+    if run_dir.name != work_id or embedded != work_id:
+        print(
+            "blocked: run_identity_mismatch\n"
+            f"requested_work_id: {work_id}\n"
+            f"directory_work_id: {run_dir.name}\n"
+            f"record_work_id: {embedded}\n"
+        )
+        sys.exit(EXIT_CONFLICT)
+    return record
+
+
 # ---------------------------------------------------------------------------
 # Open run scanner
 # ---------------------------------------------------------------------------
@@ -126,6 +145,11 @@ def scan_open_runs(base_path: Path) -> list[str]:
             from tools.workflow_cli.state import RunStateManager
             mgr = RunStateManager(run_md.parent)
             record = mgr.load()
+            if str(record.work_id) != run_md.parent.name:
+                raise ValueError(
+                    "run identity mismatch: "
+                    f"directory={run_md.parent.name!r}, record={record.work_id!r}"
+                )
             if not is_terminal(record.status):
                 open_ids.append(run_md.parent.name)
         except Exception as e:
@@ -261,6 +285,10 @@ def _repo_root() -> Path:
     return Path(__file__).resolve().parents[2]
 
 
+def _isolated_launcher_path() -> Path:
+    return _repo_root() / "tools" / "workflow_cli" / "__main__.py"
+
+
 def _python_executable() -> str:
     if sys.executable:
         return sys.executable
@@ -270,10 +298,9 @@ def _python_executable() -> str:
 def _workflow_cli_command(base_path: Path, args_list: list[str]) -> str:
     return _shell_join(
         [
-            "env",
-            f"PYTHONPATH={_repo_root()}",
             _python_executable(),
-            "-m",
+            "-I",
+            _isolated_launcher_path(),
             "tools.workflow_cli",
             "--base-path",
             base_path,
@@ -530,14 +557,38 @@ def _cmd_start(ns: argparse.Namespace, base_path: Path) -> None:
     work_id = generate_work_id(requirement, base_path)
     run_args = _build_run_start_args(work_id, requirement, file_path, getattr(ns, "repo_path", None))
     _ensure_workspace_gitignore_or_exit(base_path, work_id)
-    exit_code = _run_cli(run_args, base_path)
+    json_mode = is_json_mode()
+    cli_output = ""
+    if json_mode:
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            exit_code = _run_cli(run_args, base_path)
+        cli_output = output.getvalue()
+    else:
+        exit_code = _run_cli(run_args, base_path)
     if exit_code != 0:
+        if json_mode and cli_output:
+            print(cli_output, end="" if cli_output.endswith("\n") else "\n")
         sys.exit(exit_code)
 
     write_active_pointer(base_path, work_id, reason="workflow_start")
+    run_path = f".req-to-plan/{work_id}/run.md"
+    if json_mode:
+        payload = _json_payload_from_cli_output(cli_output)
+        payload.setdefault("work_id", work_id)
+        payload.update(
+            {
+                "created": run_path,
+                "selected_work_id": work_id,
+                "selected_run": run_path,
+                "next": "r2p-continue",
+            }
+        )
+        print(json.dumps(payload, indent=2))
+        return
     print(
-        f"created: .req-to-plan/{work_id}/run.md\n"
-        f"selected_run: .req-to-plan/{work_id}/run.md\n"
+        f"created: {run_path}\n"
+        f"selected_run: {run_path}\n"
         f"next: r2p-continue\n"
     )
 
@@ -562,7 +613,7 @@ def _cmd_continue(ns: argparse.Namespace, base_path: Path) -> None:
     manager = RunStateManager(run_path.parent)
 
     while True:
-        record = manager.load()
+        record = _load_matching_record_or_exit(manager, run_dir, work_id)
         s = record.status
         stage = record.current_stage.value
 
@@ -643,7 +694,13 @@ def _cmd_continue(ns: argparse.Namespace, base_path: Path) -> None:
                       f"{ready_cmd}\n")
                 sys.exit(0)
             code = _run_cli(["gate-quality", "--work-id", work_id, "--stage", stage], base_path)
-            if code != 0 and manager.load().status == RunStatus.ACTIVE_STAGE_DRAFT:
+            if (
+                code != 0
+                and _load_matching_record_or_exit(
+                    manager, run_dir, work_id
+                ).status
+                == RunStatus.ACTIVE_STAGE_DRAFT
+            ):
                 # The gate did not change state (e.g. a precondition conflict); surface
                 # its output directly instead of looping on the same unchanged status.
                 sys.exit(code)
@@ -659,7 +716,7 @@ def _cmd_continue(ns: argparse.Namespace, base_path: Path) -> None:
             code = _run_cli(["review-checkpoint", "--work-id", work_id, "--stage", stage], base_path)
             if code != 0:
                 sys.exit(code)
-            record = manager.load()
+            record = _load_matching_record_or_exit(manager, run_dir, work_id)
             route = _open_owner_route(record)
             if route is not None:
                 _emit_gap_resolve_stop(base_path, work_id, stage, route.route_id)
@@ -697,7 +754,7 @@ def _cmd_continue(ns: argparse.Namespace, base_path: Path) -> None:
                       "next: repair upstream and rerun "
                       f"{retry_cmd}\n")
                 sys.exit(code)
-            record = manager.load()
+            record = _load_matching_record_or_exit(manager, run_dir, work_id)
             stage = record.current_stage.value
             aa = get_active_artifact(record, record.current_stage)
             if aa is not None and aa.status == "stale":
@@ -795,10 +852,14 @@ def _cmd_status(ns: argparse.Namespace, base_path: Path) -> None:
 
 def _cmd_switch(ns: argparse.Namespace, base_path: Path) -> None:
     work_id = _validate_work_id(ns.work_id)
-    run_path = base_path / ".req-to-plan" / work_id / "run.md"
+    run_dir = _reject_symlinked_run_paths_or_exit(base_path, work_id)
+    run_path = run_dir / "run.md"
     if not run_path.exists():
         print(f"blocked: source_run_not_found\nwork_id: {work_id}\n")
         sys.exit(7)
+
+    from tools.workflow_cli.state import RunStateManager
+    _load_matching_record_or_exit(RunStateManager(run_dir), run_dir, work_id)
 
     write_active_pointer(base_path, work_id, reason="manual_switch")
     print(f"selected_run: .req-to-plan/{work_id}/run.md\nnext: r2p-continue\n")
@@ -921,7 +982,9 @@ def _cmd_execute(ns: argparse.Namespace, base_path: Path) -> None:
         sys.exit(7)
 
     from tools.workflow_cli.state import RunStateManager
-    record = RunStateManager(run_dir).load()
+    record = _load_matching_record_or_exit(
+        RunStateManager(run_dir), run_dir, work_id
+    )
     plan = run_dir / "07-plan.md"
     ledger = run_dir / "execution" / "progress.md"
 
@@ -1046,13 +1109,16 @@ def _cmd_gap_resolve(ns: argparse.Namespace, base_path: Path) -> None:
 
 def _cmd_tier_lock(ns: argparse.Namespace, base_path: Path) -> None:
     work_id = _validate_work_id(ns.work_id)
-    run_path = base_path / ".req-to-plan" / work_id / "run.md"
+    run_dir = _reject_symlinked_run_paths_or_exit(base_path, work_id)
+    run_path = run_dir / "run.md"
     if not run_path.exists():
         print(f"blocked: source_run_not_found\nwork_id: {work_id}\n")
         sys.exit(7)
 
     from tools.workflow_cli.state import RunStateManager
-    record = RunStateManager(run_path.parent).load()
+    record = _load_matching_record_or_exit(
+        RunStateManager(run_dir), run_dir, work_id
+    )
     if record.status != RunStatus.ACTIVE_STAGE_DRAFT:
         print(
             "blocked: tier_lock_not_allowed\n"

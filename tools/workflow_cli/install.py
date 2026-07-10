@@ -1017,12 +1017,22 @@ def _render_bin_script(content: str, repo_root: Path) -> str:
 
 
 def _looks_like_managed_bin_script(content: str) -> bool:
-    return (
+    common = (
         content.startswith("#!/usr/bin/env bash")
         and 'SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"' in content
-        and 'export PYTHONPATH="$REPO_ROOT${PYTHONPATH:+:$PYTHONPATH}"' in content
+    )
+    legacy = (
+        'export PYTHONPATH="$REPO_ROOT${PYTHONPATH:+:$PYTHONPATH}"' in content
         and "-m tools.workflow_cli.agent_shortcuts" in content
     )
+    isolated = (
+        '-I "$REPO_ROOT/tools/workflow_cli/__main__.py"' in content
+        and (
+            "tools.workflow_cli.agent_shortcuts" in content
+            or "tools.workflow_cli.install_cli" in content
+        )
+    )
+    return common and (legacy or isolated)
 
 
 def _dump_manifest(manifest: dict[str, Any]) -> str:
