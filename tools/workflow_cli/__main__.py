@@ -15,37 +15,60 @@ _BOOTSTRAP_TARGETS = {
 }
 
 
+def _sanitized_sys_path(
+    entries: list[str],
+    repo_root: Path,
+    script_dir: Path,
+    cwd: Path | None,
+) -> list[str]:
+    """Put the source checkout first and drop cwd + the bootstrap script's dir.
+
+    Under ``-E`` (unlike ``-I``/``-P``) Python still prepends the script's own
+    directory to ``sys.path``. Left in place, modules under
+    ``tools/workflow_cli/`` (e.g. ``trace``) would shadow stdlib. Absolute
+    package imports only need ``repo_root``, so dropping both the script
+    directory and the current directory is safe and keeps the isolation ``-I``
+    used to provide via ``-P``.
+    """
+    excluded: set[Path] = {script_dir}
+    if cwd is not None:
+        excluded.add(cwd)
+    retained: list[str] = []
+    for entry in entries:
+        if not entry:
+            continue
+        try:
+            if Path(entry).resolve() in excluded:
+                continue
+        except (OSError, ValueError):
+            pass
+        if entry != str(repo_root):
+            retained.append(entry)
+    return [str(repo_root), *retained]
+
+
 def _run_isolated_bootstrap() -> None:
-    """Dispatch a trusted entrypoint when this file is executed with ``-I``.
+    """Dispatch a trusted entrypoint when this file is executed with ``-E``.
 
     The shell wrappers execute this file by absolute path, so Python does not
     need to resolve the ``tools`` package before we can put the source checkout
-    first on ``sys.path``.  Removing the current directory as a belt-and-braces
-    measure also keeps this safe if a caller accidentally omits ``-I``.
+    first on ``sys.path``.  Dropping the current directory and the script's own
+    directory as a belt-and-braces measure also keeps this safe if a caller
+    accidentally omits ``-E``.
     """
     if len(sys.argv) < 2 or sys.argv[1] not in _BOOTSTRAP_TARGETS:
         allowed = ", ".join(sorted(_BOOTSTRAP_TARGETS))
         raise SystemExit(f"bootstrap target required; allowed: {allowed}")
 
     target = sys.argv[1]
-    repo_root = Path(__file__).resolve().parents[2]
+    here = Path(__file__).resolve()
+    repo_root = here.parents[2]
     try:
         cwd = Path.cwd().resolve()
     except OSError:
         cwd = None
 
-    retained: list[str] = []
-    for entry in sys.path:
-        if not entry:
-            continue
-        try:
-            if cwd is not None and Path(entry).resolve() == cwd:
-                continue
-        except OSError:
-            pass
-        if entry != str(repo_root):
-            retained.append(entry)
-    sys.path[:] = [str(repo_root), *retained]
+    sys.path[:] = _sanitized_sys_path(sys.path, repo_root, here.parent, cwd)
 
     module_name, function_name = _BOOTSTRAP_TARGETS[target]
     sys.argv = [target, *sys.argv[2:]]

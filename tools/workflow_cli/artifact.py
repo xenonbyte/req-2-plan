@@ -9,7 +9,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from pathlib import Path
 
-from tools.workflow_cli.atomic import atomic_write_text
+from tools.workflow_cli.atomic import atomic_write_text, read_regular_text
 from tools.workflow_cli.models import Stage, STAGE_ARTIFACT_MAP
 
 
@@ -95,8 +95,9 @@ def write_artifact(
     run_dir.mkdir(parents=True, exist_ok=True)
     now = datetime.now(timezone.utc).isoformat()
     created_at = now
-    if path.exists():
-        fm, _ = _parse_frontmatter(path.read_text(encoding="utf-8"))
+    existing_text = read_regular_text(path, missing_ok=True)
+    if existing_text is not None:
+        fm, _ = _parse_frontmatter(existing_text)
         created_at = fm.get("r2p_created_at", now)
     full_text = _frontmatter(stage, version, status, created_at, now) + content
     # Atomic write: a crash mid-write must not leave a truncated artifact that
@@ -111,18 +112,22 @@ def read_artifact(run_dir: Path, stage: Stage) -> str:
     Raises FileNotFoundError when the artifact does not exist.
     """
     path = artifact_path(run_dir, stage)
-    if not path.exists():
-        raise FileNotFoundError(f"Artifact not found: {path}")
-    _, body = _parse_frontmatter(path.read_text(encoding="utf-8"))
+    try:
+        text = read_regular_text(path)
+    except FileNotFoundError as exc:
+        raise FileNotFoundError(f"Artifact not found: {path}") from exc
+    assert text is not None
+    _, body = _parse_frontmatter(text)
     return body
 
 
 def get_artifact_version(run_dir: Path, stage: Stage) -> int:
     """Return the current version number from frontmatter, or 0 if absent."""
     path = artifact_path(run_dir, stage)
-    if not path.exists():
+    text = read_regular_text(path, missing_ok=True)
+    if text is None:
         return 0
-    fm, _ = _parse_frontmatter(path.read_text(encoding="utf-8"))
+    fm, _ = _parse_frontmatter(text)
     try:
         return int(fm.get("r2p_version", 0))
     except (ValueError, TypeError):
@@ -132,9 +137,10 @@ def get_artifact_version(run_dir: Path, stage: Stage) -> int:
 def get_artifact_status(run_dir: Path, stage: Stage) -> str:
     """Return the current status string from frontmatter, or 'missing' if absent."""
     path = artifact_path(run_dir, stage)
-    if not path.exists():
+    text = read_regular_text(path, missing_ok=True)
+    if text is None:
         return "missing"
-    fm, _ = _parse_frontmatter(path.read_text(encoding="utf-8"))
+    fm, _ = _parse_frontmatter(text)
     return fm.get("r2p_status", "unknown")
 
 
@@ -144,9 +150,12 @@ def update_artifact_status(run_dir: Path, stage: Stage, new_status: str) -> None
     Raises FileNotFoundError when the artifact does not exist.
     """
     path = artifact_path(run_dir, stage)
-    if not path.exists():
-        raise FileNotFoundError(f"Artifact not found: {path}")
-    fm, body = _parse_frontmatter(path.read_text(encoding="utf-8"))
+    try:
+        text = read_regular_text(path)
+    except FileNotFoundError as exc:
+        raise FileNotFoundError(f"Artifact not found: {path}") from exc
+    assert text is not None
+    fm, body = _parse_frontmatter(text)
     write_artifact(
         run_dir,
         stage,
@@ -211,9 +220,12 @@ class ArtifactManager:
     def mark_stale(self, stage: Stage, reason: str, replaced_by: str) -> None:
         """Mark a stage artifact as stale, recording reason and replaced_by in frontmatter."""
         path = artifact_path(self.run_dir, stage)
-        if not path.exists():
-            raise FileNotFoundError(f"Artifact not found: {path}")
-        fm, body = _parse_frontmatter(path.read_text(encoding="utf-8"))
+        try:
+            text = read_regular_text(path)
+        except FileNotFoundError as exc:
+            raise FileNotFoundError(f"Artifact not found: {path}") from exc
+        assert text is not None
+        fm, body = _parse_frontmatter(text)
         now = datetime.now(timezone.utc).isoformat()
         created_at = fm.get("r2p_created_at", now)
         version = int(fm.get("r2p_version", 1))

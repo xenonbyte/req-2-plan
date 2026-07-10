@@ -3,7 +3,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 if command -v python3 >/dev/null 2>&1; then
-    exec python3 -I "$REPO_ROOT/tools/workflow_cli/__main__.py" tools.workflow_cli.install_cli "$@"
+    exec python3 -E "$REPO_ROOT/tools/workflow_cli/__main__.py" tools.workflow_cli.install_cli "$@"
 else
-    exec python -I "$REPO_ROOT/tools/workflow_cli/__main__.py" tools.workflow_cli.install_cli "$@"
+    exec python -E "$REPO_ROOT/tools/workflow_cli/__main__.py" tools.workflow_cli.install_cli "$@"
 fi

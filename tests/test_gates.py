@@ -289,6 +289,70 @@ class TestQualityGate(unittest.TestCase):
         self.assertTrue(result.passed)
         self.assertEqual(result.exit_code, 0)
 
+    def test_commented_closure_tag_does_not_close_upstream_id(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            run_dir = Path(tmpdir)
+            tier = self._locked_tier()
+            content = (
+                "# Design\n\n"
+                "## Design Summary\ncontent\n\n"
+                "## Current Code Evidence\ncontent\n\n"
+                "## Requirements Coverage\n"
+                "REQ-ACC-001 requires a real closure.\n"
+                "<!-- REQ-ACC-001 [ADDRESSED]: hidden only. -->\n\n"
+                "## Options Considered\ncontent\n\n"
+                "## Chosen Design\ncontent\n\n"
+                "### DES-ARCH-001 Selected architecture\ncontent\n\n"
+                "## Decision Requests\nnone\n\n"
+                "## Rollback\ncontent\n\n"
+                "## Observability\ncontent\n\n"
+                "## SPEC Handoff\ncontent\n"
+            )
+            result = self.check_quality_gate(
+                run_dir, self.Stage.DESIGN, tier, [], content
+            )
+        self.assertFalse(result.passed)
+        self.assertTrue(
+            any(
+                "REQ-ACC-001" in issue and "closure status tag" in issue
+                for issue in result.issues
+            ),
+            result.issues,
+        )
+
+    def test_commented_readonly_heading_cannot_hide_visible_unclosed_reference(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            run_dir = Path(tmpdir)
+            tier = self._locked_tier()
+            content = (
+                "# Design\n\n"
+                "## Design Summary\ncontent\n\n"
+                "## Current Code Evidence\ncontent\n\n"
+                "## Requirements Coverage\n"
+                "<!--\n"
+                "## Upstream Summary (read-only)\n"
+                "-->\n"
+                "REQ-ACC-001 requires a real closure.\n\n"
+                "## Options Considered\ncontent\n\n"
+                "## Chosen Design\ncontent\n\n"
+                "### DES-ARCH-001 Selected architecture\ncontent\n\n"
+                "## Decision Requests\nnone\n\n"
+                "## Rollback\ncontent\n\n"
+                "## Observability\ncontent\n\n"
+                "## SPEC Handoff\ncontent\n"
+            )
+            result = self.check_quality_gate(
+                run_dir, self.Stage.DESIGN, tier, [], content
+            )
+        self.assertFalse(result.passed)
+        self.assertTrue(
+            any(
+                "REQ-ACC-001" in issue and "closure status tag" in issue
+                for issue in result.issues
+            ),
+            result.issues,
+        )
+
     def test_quality_gate_passes_with_deferred_closure(self):
         """Quality gate passes when RISK-SEC-002 has [DEFERRED] closure tag."""
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1204,6 +1268,29 @@ class TestSpecExternalDocsGate(unittest.TestCase):
             self.assertFalse(r.passed)
             self.assertEqual(r.exit_code, 3)
 
+    def test_commented_inventory_row_does_not_satisfy_external_docs_gate(self):
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as tmp:
+            body = (
+                "# SPEC\n\n## External Documentation Checked\n\n"
+                "<!--\n"
+                "| dependency | version | check date | conclusion |\n"
+                "| --- | --- | --- | --- |\n"
+                "| pytest | 8.x | 2026-05-31 | Context7 checked |\n"
+                "-->\n"
+            )
+            r = self.check(Path(tmp), self.Stage.SPEC, self.tier, [], body)
+        self.assertFalse(r.passed)
+        self.assertTrue(
+            any(
+                "SPEC is missing a non-empty '## External Documentation Checked'"
+                in issue
+                for issue in r.issues
+            ),
+            r.issues,
+        )
+
     def test_spec_with_dependency_inventory_row_passes(self):
         import tempfile
         from pathlib import Path
@@ -1324,6 +1411,103 @@ class TestTraceClosureInPlanGate(unittest.TestCase):
             result = check_quality_gate(run_dir, Stage.PLAN, tier, [], plan)
         self.assertFalse(result.passed)
         self.assertTrue(any("SPEC-AUTH-001" in i for i in result.issues))
+
+    def test_plan_gate_ignores_commented_spec_reference(self):
+        import tempfile
+        from pathlib import Path
+        from tools.workflow_cli.gates import check_quality_gate
+        from tools.workflow_cli.models import Stage, TierBase, TierEstimate, STAGE_ARTIFACT_MAP
+        tier = TierEstimate(base=TierBase.STANDARD, modifiers=frozenset())
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            (run_dir / STAGE_ARTIFACT_MAP[Stage.SPEC]).write_text(
+                "## SPEC-AUTH-001 login\nbehavior\n", encoding="utf-8")
+            plan = (
+                "## Tasks\n\n### PLAN-TASK-001 do thing\n"
+                "Spec References: <!-- SPEC-AUTH-001 -->\n"
+            )
+            (run_dir / STAGE_ARTIFACT_MAP[Stage.PLAN]).write_text(
+                plan, encoding="utf-8")
+            result = check_quality_gate(run_dir, Stage.PLAN, tier, [], plan)
+        self.assertFalse(result.passed)
+        self.assertTrue(any("SPEC-AUTH-001" in issue for issue in result.issues))
+
+    def test_spec_validation_preserves_fence_before_visible_definition(self):
+        import tempfile
+        from pathlib import Path
+        from tools.workflow_cli.gates import _check_spec_refs_valid
+        from tools.workflow_cli.models import Stage, STAGE_ARTIFACT_MAP
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            (run_dir / STAGE_ARTIFACT_MAP[Stage.SPEC]).write_text(
+                "```html\n<!-- code comment\n```\n-->\n"
+                "## SPEC-AUTH-001 visible contract\n",
+                encoding="utf-8",
+            )
+            plan = (
+                "## Tasks\n### PLAN-TASK-001 do thing\n"
+                "Spec References: SPEC-AUTH-001\n"
+            )
+
+            issues = _check_spec_refs_valid(run_dir, plan)
+
+        self.assertEqual(issues, [])
+
+    def test_spec_validation_ignores_fenced_only_reference(self):
+        import tempfile
+        from pathlib import Path
+        from tools.workflow_cli.gates import _check_spec_refs_valid
+        from tools.workflow_cli.models import Stage, STAGE_ARTIFACT_MAP
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            (run_dir / STAGE_ARTIFACT_MAP[Stage.SPEC]).write_text(
+                "## SPEC-AUTH-001 visible contract\n",
+                encoding="utf-8",
+            )
+            plan = (
+                "## Tasks\n### PLAN-TASK-001 do thing\n"
+                "Spec References:\n"
+                "```text\n"
+                "SPEC-AUTH-001\n"
+                "```\n"
+            )
+
+            issues = _check_spec_refs_valid(run_dir, plan)
+
+        self.assertTrue(
+            any("must reference at least one SPEC-* ID" in issue for issue in issues),
+            issues,
+        )
+
+    def test_spec_validation_requires_complete_reference_tokens(self):
+        import tempfile
+        from pathlib import Path
+        from tools.workflow_cli.gates import _check_spec_refs_valid
+        from tools.workflow_cli.models import Stage, STAGE_ARTIFACT_MAP
+        cases = (
+            ("XSPEC-AUTH-001", "must reference at least one SPEC-* ID"),
+            ("SPEC-AUTH-001-extra", "must reference at least one SPEC-* ID"),
+            ("SPEC-AUTH-0010", "SPEC-AUTH-0010 which is not defined"),
+        )
+        for reference, expected_issue in cases:
+            with self.subTest(reference=reference):
+                with tempfile.TemporaryDirectory() as tmp:
+                    run_dir = Path(tmp)
+                    (run_dir / STAGE_ARTIFACT_MAP[Stage.SPEC]).write_text(
+                        "## SPEC-AUTH-001 visible contract\n",
+                        encoding="utf-8",
+                    )
+                    plan = (
+                        "## Tasks\n### PLAN-TASK-001 do thing\n"
+                        f"Spec References: {reference}\n"
+                    )
+
+                    issues = _check_spec_refs_valid(run_dir, plan)
+
+                self.assertTrue(
+                    any(expected_issue in issue for issue in issues),
+                    issues,
+                )
 
     def test_plan_gate_accepts_structured_spec_reference_without_legacy_closure_tag(self):
         import tempfile
@@ -2083,6 +2267,33 @@ class TestScopeFreeze(unittest.TestCase):
         self.assertFalse(r.passed)
         self.assertTrue(any("assumption" in i.lower() or "open question" in i.lower() for i in r.issues))
 
+    def test_commented_elicitation_bullet_does_not_satisfy_brief_gate(self):
+        import tempfile
+        from pathlib import Path
+        from tools.workflow_cli.stage_schema import required_headings
+        from tools.workflow_cli.models import TierBase
+        parts = ["# Requirement Brief"]
+        for heading in required_headings(
+            self.Stage.REQUIREMENT_BRIEF, TierBase.STANDARD
+        ):
+            if heading == "## In-Scope":
+                parts.append(f"{heading}\n- SCOPE-IN-001 x\n")
+            elif heading == "## Out-of-Scope":
+                parts.append(f"{heading}\n- SCOPE-OUT-001 y\n")
+            elif heading == "## Assumptions":
+                parts.append(f"{heading}\n<!--\n- hidden assumption\n-->\n")
+            elif heading == "## Open Questions":
+                parts.append(f"{heading}\n")
+            else:
+                parts.append(f"{heading}\n- content\n")
+        content = "\n".join(parts)
+        with tempfile.TemporaryDirectory() as tmp:
+            r = self.check(
+                Path(tmp), self.Stage.REQUIREMENT_BRIEF, self.tier, [], content
+            )
+        self.assertFalse(r.passed)
+        self.assertTrue(any("R8 elicitation" in issue for issue in r.issues), r.issues)
+
 
 class TestPlanTaskFields(unittest.TestCase):
     def setUp(self):
@@ -2121,6 +2332,58 @@ class TestPlanTaskFields(unittest.TestCase):
                 any(field in i for i in r.issues),
                 f"expected missing field issue for {field}; got {r.issues}",
             )
+
+    def test_commented_required_fields_do_not_satisfy_plan_task(self):
+        plan = (
+            "## Tasks\n\n### PLAN-TASK-001 do it\n"
+            "Spec References: SPEC-AUTH-001\n"
+            "<!--\n"
+            "Change Type: non_code\n"
+            "TDD Applicable: no\n"
+            "Files: N/A\n"
+            "Skeleton: hidden skeleton\n"
+            "Steps:\n- [ ] hidden step\n"
+            "Verification: pytest\n"
+            "-->\n"
+        )
+
+        result = self._gate(plan)
+
+        self.assertFalse(result.passed)
+        for field in (
+            "Change Type",
+            "TDD Applicable",
+            "Files",
+            "Skeleton",
+            "Steps",
+            "Verification",
+        ):
+            self.assertTrue(
+                any(field in issue and "missing" in issue for issue in result.issues),
+                f"expected commented {field} to remain missing; got {result.issues}",
+            )
+
+    def test_commented_plan_task_heading_does_not_create_task(self):
+        plan = (
+            "## Tasks\n\n<!--\n"
+            "### PLAN-TASK-001 hidden task\n"
+            "Spec References: SPEC-AUTH-001\n"
+            "Change Type: non_code\n"
+            "TDD Applicable: no\n"
+            "Files: N/A\n"
+            "Skeleton: hidden skeleton\n"
+            "Steps:\n- [ ] hidden step\n"
+            "Verification: pytest\n"
+            "-->\n"
+        )
+
+        result = self._gate(plan)
+
+        self.assertFalse(result.passed)
+        self.assertTrue(
+            any("missing '### PLAN-TASK-*'" in issue for issue in result.issues),
+            result.issues,
+        )
 
     def test_duplicate_required_field_fails_before_second_value_can_escape_checks(self):
         plan = (
@@ -2883,7 +3146,7 @@ class TestPlanContextPackGate(unittest.TestCase):
         launcher = Path(__file__).parent.parent / "tools" / "workflow_cli" / "__main__.py"
         self.assertNotIn("PYTHONPATH=", issue)
         self.assertIn(
-            f"{shlex.quote(sys.executable)} -I {shlex.quote(str(launcher))} "
+            f"{shlex.quote(sys.executable)} -E {shlex.quote(str(launcher))} "
             "tools.workflow_cli context-build",
             issue,
         )
@@ -2908,7 +3171,7 @@ class TestPlanContextPackGate(unittest.TestCase):
             "",
         )
         self.assertNotIn("PYTHONPATH=", issue)
-        self.assertIn(" -I ", issue)
+        self.assertIn(" -E ", issue)
         self.assertIn("--work-id WF-20260606-login", issue)
         self.assertIn("--base-path", issue)
         self.assertRegex(issue, r"--base-path '.*target repo'")
@@ -2957,7 +3220,7 @@ class TestPlanContextPackGate(unittest.TestCase):
             (i for i in r.issues if "tools.workflow_cli context-build" in i),
             "",
         )
-        self.assertIn("'/tmp/python with spaces' -I ", issue)
+        self.assertIn("'/tmp/python with spaces' -E ", issue)
         self.assertIn("tools.workflow_cli context-build", issue)
         self.assertNotIn(" -m tools.workflow_cli context-build", issue)
 
@@ -3309,7 +3572,7 @@ class TestPlanTaskVerificationPlaceholder(unittest.TestCase):
             )
         )
 
-    def test_quality_gate_reports_verification_placeholder_issue(self):
+    def test_quality_gate_treats_commented_verification_as_missing(self):
         import tempfile
         from pathlib import Path
         from tools.workflow_cli.gates import check_quality_gate
@@ -3321,7 +3584,7 @@ class TestPlanTaskVerificationPlaceholder(unittest.TestCase):
             )
         self.assertTrue(
             any(
-                "Verification contains an unresolved placeholder" in issue
+                "missing a non-empty 'Verification:' field" in issue
                 for issue in result.issues
             )
         )
@@ -3357,6 +3620,49 @@ class TestAmbiguityMarkers(unittest.TestCase):
         self.assertFalse(
             self._design_placeholder_issue("We may add caching later if profiling shows need.")
         )
+
+
+class TestExecutionCommentSemantics(unittest.TestCase):
+    def _run_dir(self, tmp: str, plan: str, ledger: str) -> Path:
+        from tools.workflow_cli.artifact import write_artifact
+        from tools.workflow_cli.models import Stage
+
+        run_dir = Path(tmp)
+        write_artifact(run_dir, Stage.PLAN, plan, version=1, status="approved")
+        execution = run_dir / "execution"
+        execution.mkdir()
+        (execution / "progress.md").write_text(ledger, encoding="utf-8")
+        return run_dir
+
+    def test_commented_checked_task_does_not_complete_plan(self):
+        from tools.workflow_cli.gates import check_execution_complete
+
+        plan = "## Tasks\n### PLAN-TASK-001 real task\n"
+        ledger = (
+            "# Execution Progress\n\n"
+            "<!--\n- [x] PLAN-TASK-001 hidden completion\n-->\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            result = check_execution_complete(self._run_dir(tmp, plan, ledger))
+
+        self.assertFalse(result.passed)
+        self.assertTrue(
+            any("PLAN-TASK-001" in issue for issue in result.issues),
+            result.issues,
+        )
+
+    def test_commented_plan_task_is_not_required_by_completion_gate(self):
+        from tools.workflow_cli.gates import check_execution_complete
+
+        plan = (
+            "## Tasks\n### PLAN-TASK-001 real task\n"
+            "<!--\n### PLAN-TASK-999 hidden task\n-->\n"
+        )
+        ledger = "# Execution Progress\n\n- [x] PLAN-TASK-001 real task\n"
+        with tempfile.TemporaryDirectory() as tmp:
+            result = check_execution_complete(self._run_dir(tmp, plan, ledger))
+
+        self.assertTrue(result.passed, result.issues)
 
 
 class TestCheckFinalReviewRecorded(unittest.TestCase):
@@ -3464,6 +3770,21 @@ class TestCheckFinalReviewRecorded(unittest.TestCase):
             "```\n"
             "Verdict: Approved\n"
             "```\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = self._make_run_dir(tmp)
+            self._write_marker(run_dir, content)
+            result = self.check(run_dir)
+        self.assertFalse(result.passed)
+        self.assertEqual(result.exit_code, self.EXIT_GATE_FAIL)
+        self.assertIn("not a correctness guarantee", result.issues[0])
+
+    def test_verdict_inside_html_comment_ignored(self):
+        content = (
+            "# Review\n\n"
+            "<!--\n"
+            "Verdict: Approved\n"
+            "-->\n"
         )
         with tempfile.TemporaryDirectory() as tmp:
             run_dir = self._make_run_dir(tmp)

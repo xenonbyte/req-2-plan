@@ -38,6 +38,24 @@ def test_strip_readonly_sections_prefers_explicit_end_marker_for_seeded_payload(
     assert "PLAN-TASK-001" in stripped
 
 
+def test_strip_readonly_sections_ignores_heading_inside_html_comment():
+    content = (
+        "# Plan\n\n"
+        "<!--\n"
+        "## Upstream Summary (read-only)\n"
+        "-->\n"
+        "VISIBLE-CONTENT\n\n"
+        "## Tasks\n"
+        "### PLAN-TASK-001 real task\n"
+    )
+
+    stripped = strip_readonly_sections(content)
+
+    assert "VISIBLE-CONTENT" in stripped
+    assert "## Tasks" in stripped
+    assert "PLAN-TASK-001" in stripped
+
+
 def test_plan_task_anchors_extracts_id_and_title():
     from tools.workflow_cli.markdown import plan_task_anchors
     content = (
@@ -68,3 +86,24 @@ def test_plan_task_anchors_ignores_code_fences():
 def test_plan_task_anchors_empty_when_no_tasks():
     from tools.workflow_cli.markdown import plan_task_anchors
     assert plan_task_anchors("# Plan\n\nno tasks here\n") == []
+
+
+def test_strip_html_comments_outside_fences_removes_multiline_comment():
+    from tools.workflow_cli.markdown import strip_html_comments_outside_fences
+
+    content = "before\n<!--\nhidden\n-->\nafter\n"
+
+    stripped = strip_html_comments_outside_fences(content)
+
+    assert "hidden" not in stripped
+    assert len(stripped) == len(content)
+    assert stripped.splitlines()[0] == "before"
+    assert stripped.splitlines()[-1] == "after"
+
+
+def test_strip_html_comments_outside_fences_preserves_fenced_code():
+    from tools.workflow_cli.markdown import strip_html_comments_outside_fences
+
+    fenced = "```html\n<!-- required code comment -->\n```\n"
+
+    assert strip_html_comments_outside_fences(fenced) == fenced

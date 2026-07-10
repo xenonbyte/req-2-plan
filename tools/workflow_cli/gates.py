@@ -14,6 +14,7 @@ from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from tools.workflow_cli.artifact import read_artifact
 from tools.workflow_cli.models import (
     BundleAuthorization,
     CheckpointRecord,
@@ -28,12 +29,14 @@ from tools.workflow_cli.markdown import (
     heading_level,
     plan_task_anchors,
     PLAN_TASK_ANCHOR_RE as _PLAN_TASK_RE,
-    strip_readonly_sections,
+    strip_html_comments_outside_fences,
+    strip_nonsemantic_markdown,
     unfenced_markdown_lines,
     unfenced_markdown_text,
 )
 from tools.workflow_cli.output import EXIT_CONFLICT, EXIT_GATE_FAIL
 from tools.workflow_cli.stage_schema import PLAN_TASK_FIELD_RE, PLAN_TASK_FIELDS
+from tools.workflow_cli.trace import SPEC_ID_RE
 
 # ---------------------------------------------------------------------------
 # GateResult
@@ -264,6 +267,11 @@ _HANDOFF_PHASE_PROSE_RE = re.compile(
 _HTML_COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
 _STRUCTURED_DEFERRED_STATUS_RE = re.compile(r"(?i)^\s*Status:\s*deferred\b")
 
+
+def _semantic_unfenced_text(content: str) -> str:
+    """Markdown prose with fenced examples and HTML comments removed."""
+    return _HTML_COMMENT_RE.sub("", unfenced_markdown_text(content))
+
 _LEGACY_PLAN_DEFERRAL_FIELD_RE = re.compile(
     r"^[ \t]{0,3}(Out-of-Task|Future Task Ownership):"
 )
@@ -427,7 +435,7 @@ _CLOSURE_TAGS = frozenset(["[ADDRESSED]", "[DEFERRED]", "[N/A]", "[OUT-OF-SCOPE]
 def _find_defined_ids(content: str) -> set[str]:
     """Return IDs that are defined in headings (i.e. the current artifact is defining them)."""
     heading_pattern = re.compile(r"^#{1,6}\s+.*\b([A-Z]+-[A-Z]+-\d+)\b", re.MULTILINE)
-    return set(heading_pattern.findall(unfenced_markdown_text(content)))
+    return set(heading_pattern.findall(_semantic_unfenced_text(content)))
 
 
 def _find_ids_without_closure(content: str) -> list[str]:
@@ -436,7 +444,7 @@ def _find_ids_without_closure(content: str) -> list[str]:
     IDs defined in headings of the current artifact are excluded — they are
     being *defined* here, not referencing upstream artifacts that need closure.
     """
-    search_content = unfenced_markdown_text(content)
+    search_content = _semantic_unfenced_text(content)
     all_refs = set(_UPSTREAM_ID_PATTERN.findall(search_content))
     defined_here = _find_defined_ids(content)
     # Only check IDs that are referenced but NOT defined in this artifact
@@ -463,7 +471,7 @@ def _find_ids_without_closure(content: str) -> list[str]:
 def _find_duplicate_ids(content: str) -> list[str]:
     """Return IDs that appear more than once in heading (definition) context."""
     heading_pattern = re.compile(r"^#{1,6}\s+.*\b([A-Z]+-[A-Z]+-\d+)\b", re.MULTILINE)
-    heading_ids = heading_pattern.findall(unfenced_markdown_text(content))
+    heading_ids = heading_pattern.findall(_semantic_unfenced_text(content))
 
     from collections import Counter
     counts = Counter(heading_ids)
@@ -698,7 +706,7 @@ def _context_pack_remediation_command(run_dir: Path) -> str:
     package_root = Path(__file__).resolve().parents[2]
     launcher = package_root / "tools" / "workflow_cli" / "__main__.py"
     command = (
-        f"{shlex.quote(_python_executable())} -I {shlex.quote(str(launcher))} "
+        f"{shlex.quote(_python_executable())} -E {shlex.quote(str(launcher))} "
         "tools.workflow_cli "
         f"context-build --work-id {run_dir.name}"
     )
@@ -769,20 +777,24 @@ def _check_plan_file_refs(run_dir: Path, content: str) -> list[str]:
 
 
 def _check_spec_refs_valid(run_dir: Path, content: str) -> list[str]:
-    spec_path = run_dir / STAGE_ARTIFACT_MAP[Stage.SPEC]
-    spec_content = (
-        strip_readonly_sections(spec_path.read_text(encoding="utf-8"))
-        if spec_path.exists()
-        else ""
-    )
+    try:
+        spec_content = read_artifact(run_dir, Stage.SPEC)
+    except FileNotFoundError:
+        spec_content = ""
+    spec_content = strip_nonsemantic_markdown(spec_content)
     defined_specs: set[str] = set()
     for line, _, _ in unfenced_markdown_lines(spec_content):
         if line.lstrip().startswith("#"):
-            defined_specs.update(re.findall(r"\bSPEC-[A-Z]+-\d+\b", line))
+            defined_specs.update(match.group(0) for match in SPEC_ID_RE.finditer(line))
     issues: list[str] = []
     for body in _iter_plan_task_bodies(content):
-        refs_body = _plan_task_field_body(body, "Spec References")
-        refs = re.findall(r"SPEC-[A-Z]+-\d+", refs_body)
+        refs_body = strip_nonsemantic_markdown(
+            _plan_task_field_body(body, "Spec References")
+        )
+        refs = [
+            match.group(0)
+            for match in SPEC_ID_RE.finditer(unfenced_markdown_text(refs_body))
+        ]
         if refs_body.strip() and not refs:
             issues.append(
                 f"{_plan_task_label(body)} must reference at least one SPEC-* ID "
@@ -1169,7 +1181,7 @@ def _check_scope_freeze(stage: Stage, content: str) -> list[str]:
     if stage != Stage.REQUIREMENT_BRIEF:
         return []
     issues: list[str] = []
-    scope_content = _HTML_COMMENT_RE.sub("", content)
+    scope_content = strip_html_comments_outside_fences(content)
     in_scope_ids = _section_entry_ids(scope_content, "## In-Scope", "SCOPE-IN")
     out_scope_ids = _section_entry_ids(scope_content, "## Out-of-Scope", "SCOPE-OUT")
     for entry in _section_entries_missing_id(scope_content, "## In-Scope", "SCOPE-IN"):
@@ -1216,10 +1228,11 @@ def _check_stage_schema(stage: Stage, tier: TierEstimate, content: str) -> list[
     issues: list[str] = []
     headings = required_headings(stage, tier.base)
     native = _STAGE_NATIVE_HEADING_PATTERNS.get(stage)
-    unfenced_content = unfenced_markdown_text(content)
+    semantic_content = strip_html_comments_outside_fences(content)
+    unfenced_content = unfenced_markdown_text(semantic_content)
     present_heading_counts = Counter(
         line.strip()
-        for line, _, _ in unfenced_markdown_lines(content)
+        for line, _, _ in unfenced_markdown_lines(semantic_content)
         if line.lstrip().startswith("#")
     )
     present_headings = set(present_heading_counts)
@@ -1245,7 +1258,7 @@ def _check_stage_schema(stage: Stage, tier: TierEstimate, content: str) -> list[
     for heading in headings:
         if heading not in present_headings:
             continue  # already reported by the required-heading presence check
-        body = _section_body(content, heading)
+        body = _section_body(semantic_content, heading)
         if not _has_meaningful_body(body):
             issues.append(
                 f"Required section {heading!r} must contain non-placeholder body content."
@@ -1298,7 +1311,7 @@ def _check_unanchored_deferral(
     closures (RISK 'Status: deferred', '[DEFERRED]') do not match the phrase set."""
     if stage not in _DEFERRAL_SCANNED_STAGES:
         return []
-    decommented = _HTML_COMMENT_RE.sub("", content)
+    decommented = strip_html_comments_outside_fences(content)
     issues: list[str] = []
     in_handoff_section = False
     handoff_level = 0
@@ -1403,7 +1416,7 @@ def check_quality_gate(
         )
 
     issues: list[str] = []
-    gate_content = strip_readonly_sections(artifact_content)
+    gate_content = strip_nonsemantic_markdown(artifact_content)
 
     # Check 2: content must be non-empty
     if not gate_content or not gate_content.strip():
@@ -1625,7 +1638,8 @@ def _fail_gate(msg: str) -> GateResult:
 def _current_verdict(text: str) -> str | None:
     """Return the last unfenced 'Verdict:' value (stripped, lowercased), or None."""
     value = None
-    for line, _, _ in unfenced_markdown_lines(text):
+    semantic_text = strip_html_comments_outside_fences(text)
+    for line, _, _ in unfenced_markdown_lines(semantic_text):
         s = line.strip()
         if s[:8].lower() == "verdict:":
             value = s[8:].strip().lower()  # last one wins
@@ -1727,7 +1741,7 @@ def _plan_task_ids(run_dir: Path) -> list[str]:
     """Task IDs declared in the frozen PLAN artifact."""
     from tools.workflow_cli.artifact import read_artifact
     plan_text = read_artifact(run_dir, Stage.PLAN)
-    return [tid for tid, _ in plan_task_anchors(strip_readonly_sections(plan_text))]
+    return [tid for tid, _ in plan_task_anchors(strip_nonsemantic_markdown(plan_text))]
 
 
 def check_execution_complete(run_dir: Path) -> GateResult:
@@ -1776,7 +1790,8 @@ def check_execution_complete(run_dir: Path) -> GateResult:
             exit_code=EXIT_GATE_FAIL,
         )
     assert ledger_text is not None
-    lines = [line for line, _, _ in unfenced_markdown_lines(ledger_text)]
+    semantic_ledger = strip_html_comments_outside_fences(ledger_text)
+    lines = [line for line, _, _ in unfenced_markdown_lines(semantic_ledger)]
     issues: list[str] = []
     for line in lines:
         if _LEDGER_UNCHECKED_RE.match(line):

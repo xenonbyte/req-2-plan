@@ -1662,6 +1662,37 @@ class TestStageUpdate:
             assert "r2p_version: 2" in text
 
 
+@pytest.mark.parametrize("command", ["stage-produce", "stage-update"])
+@pytest.mark.parametrize(
+    "status", [RunStatus.CLOSED_AT_PLAN_CHECKPOINT, RunStatus.EXECUTING]
+)
+def test_artifact_mutation_commands_reject_closed_stage(command, status):
+    with tempfile.TemporaryDirectory() as tmp:
+        work_id = "WF-20260527-closed-artifact"
+        invoke(
+            ["run-start", "--work-id", work_id, "--requirement", "Add rate limiting"],
+            base_path=tmp,
+        )
+        record = load_record(tmp, work_id)
+        record.status = status
+        record.current_stage = Stage.CLOSED
+        save_record(tmp, record)
+
+        invoke(
+            [
+                command,
+                "--work-id",
+                work_id,
+                "--stage",
+                "closed",
+                "--content",
+                "must not be written",
+            ],
+            base_path=tmp,
+            expect_exit=6,
+        )
+
+
 # ---------------------------------------------------------------------------
 # stage-ready
 # ---------------------------------------------------------------------------
@@ -1685,6 +1716,51 @@ class TestStageReady:
             artifact = Path(tmp) / ".req-to-plan" / "WF-20260527-test" / "00-raw-requirement.md"
             text = artifact.read_text()
             assert "r2p_status: ready" in text
+
+    def test_rejects_symlinked_artifact_without_copying_external_body(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            base = root / "workspace"
+            base.mkdir()
+            work_id = "WF-20260527-ready-symlink"
+            invoke(
+                ["run-start", "--work-id", work_id, "--requirement", "foo"],
+                base_path=base,
+            )
+            invoke(
+                [
+                    "stage-produce",
+                    "--work-id", work_id,
+                    "--stage", "raw_requirement",
+                    "--content", "workspace body",
+                ],
+                base_path=base,
+            )
+            external = root / "external-secret.md"
+            external_text = (
+                "---\nr2p_version: 1\nr2p_status: draft\n---\n"
+                "external secret body\n"
+            )
+            external.write_text(external_text, encoding="utf-8")
+            artifact = (
+                base
+                / ".req-to-plan"
+                / work_id
+                / STAGE_ARTIFACT_MAP[Stage.RAW_REQUIREMENT]
+            )
+            artifact.unlink()
+            artifact.symlink_to(external)
+
+            invoke(
+                ["stage-ready", "--work-id", work_id, "--stage", "raw_requirement"],
+                base_path=base,
+                expect_exit=6,
+            )
+
+            assert artifact.is_symlink()
+            assert external.read_text(encoding="utf-8") == external_text
+            record = load_record(base, work_id)
+            assert record.active_artifacts[0].status == "draft"
 
     def test_stage_ready_from_quality_gate_failed_returns_to_draft(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -3077,6 +3153,41 @@ def test_gap_open_routes_back_and_invalidates_downstream(capsys):
         assert "r2p_status: stale" in (Path(tmp) / ".req-to-plan" / work_id / STAGE_ARTIFACT_MAP[Stage.PLAN]).read_text(encoding="utf-8")
 
 
+def test_gap_open_rejects_symlinked_artifact_without_copying_external_body():
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        base = root / "workspace"
+        base.mkdir()
+        work_id, run_dir = _seed_plan_approved_run(base)
+        external = root / "external-secret.md"
+        external_text = (
+            "---\nr2p_version: 1\nr2p_status: approved\n---\n"
+            "external secret body\n"
+        )
+        external.write_text(external_text, encoding="utf-8")
+        spec_path = run_dir / STAGE_ARTIFACT_MAP[Stage.SPEC]
+        spec_path.unlink()
+        spec_path.symlink_to(external)
+
+        invoke(
+            [
+                "gap-open",
+                "--work-id", work_id,
+                "--owner-stage", "design",
+                "--required-action", "repair unsafe snapshot",
+            ],
+            base_path=base,
+            expect_exit=6,
+        )
+
+        assert spec_path.is_symlink()
+        assert external.read_text(encoding="utf-8") == external_text
+        record = load_record(base, work_id)
+        assert record.status == RunStatus.CHECKPOINT_APPROVED
+        assert not record.open_routes
+        assert all(artifact.status == "approved" for artifact in record.active_artifacts)
+
+
 def test_gap_open_invalidates_reopened_copied_artifacts():
     with tempfile.TemporaryDirectory() as tmp:
         source_work_id, _ = _seed_plan_approved_run(tmp)
@@ -4249,6 +4360,34 @@ class TestRunExecuteStart:
             assert "- [ ] PLAN-TASK-001 real task" in ledger
             assert "PLAN-TASK-999" not in ledger
 
+    def test_execute_start_ignores_commented_plan_task_headings(self):
+        plan = (
+            "# Plan\n\n## Tasks\n"
+            "### PLAN-TASK-001: real task\nFiles:\n- a.py\n"
+            "<!--\n"
+            "### PLAN-TASK-999: phantom task\nFiles:\n- ghost.py\n"
+            "-->\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            run_dir = self._closed_run_with_plan(
+                base,
+                "WF-20260101-exec",
+                plan,
+            )
+            with pytest.raises(SystemExit) as exc:
+                main([
+                    "--base-path", str(base),
+                    "run-execute-start", "--work-id", "WF-20260101-exec",
+                ])
+
+            assert exc.value.code == 0
+            ledger = (run_dir / "execution" / "progress.md").read_text(
+                encoding="utf-8"
+            )
+            assert "PLAN-TASK-001" in ledger
+            assert "PLAN-TASK-999" not in ledger
+
     def test_execute_start_ledger_failure_leaves_status_closed(self):
         from tools.workflow_cli.state import RunStateManager
         plan = "# Plan\n\n## Tasks\n### PLAN-TASK-001: first task\nFiles:\n- a.py\n"
@@ -5202,6 +5341,39 @@ class TestPlanTaskBrief:
             body = (run_dir / "logs" / "task-1-brief.md").read_text(encoding="utf-8")
             assert "PLAN-TASK-001" in body
             assert "read-only" not in body
+            assert "PLAN-TASK-099" not in body
+
+    def test_plan_task_brief_excludes_commented_task(self):
+        plan = (
+            "# Plan\n\n"
+            "### PLAN-TASK-001: real task\nBody 1.\n\n"
+            "<!--\n"
+            "### PLAN-TASK-099: phantom commented task\n"
+            "Should not be selectable.\n"
+            "-->\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            wid = "WF-20260626-commented"
+            run_dir = self._executing_run_with_plan(base, wid, plan)
+
+            with pytest.raises(SystemExit) as exc:
+                main([
+                    "--base-path", str(base),
+                    "plan-task-brief", "--work-id", wid, "--task", "99",
+                ])
+
+            assert exc.value.code == 7
+            assert not (run_dir / "logs" / "task-99-brief.md").exists()
+            with pytest.raises(SystemExit) as real_exc:
+                main([
+                    "--base-path", str(base),
+                    "plan-task-brief", "--work-id", wid, "--task", "1",
+                ])
+            assert real_exc.value.code == 0
+            body = (run_dir / "logs" / "task-1-brief.md").read_text(
+                encoding="utf-8"
+            )
             assert "PLAN-TASK-099" not in body
 
 
