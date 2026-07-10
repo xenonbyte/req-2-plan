@@ -1007,6 +1007,103 @@ class TestInstallService:
         assert result[0]["status"] == "invalid"
         assert result[0]["issues"]
 
+    @pytest.mark.parametrize(
+        ("field", "value", "expected_issue"),
+        [
+            ("backups", "corrupt", "backups_not_a_list"),
+            ("installed_paths", [123], "installed_paths[0]_not_a_string"),
+            ("backups", ["corrupt"], "backups[0]_not_a_mapping"),
+            (
+                "backups",
+                [{"target": 123, "backup": []}],
+                "backups[0].target_not_a_string",
+            ),
+        ],
+    )
+    def test_status_reports_invalid_on_nested_manifest_shape(
+        self, tmp_path, field, value, expected_issue
+    ):
+        svc, manifest_root, _ = make_service(tmp_path)
+        svc.install("claude")
+        manifest_path = manifest_root / "install" / "claude.yaml"
+        data = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+        data[field] = value
+        manifest_path.write_text(
+            yaml.safe_dump(data, default_flow_style=False, sort_keys=True),
+            encoding="utf-8",
+        )
+
+        result = svc.status()
+
+        assert result[0]["status"] == "invalid"
+        assert any(expected_issue in issue for issue in result[0]["issues"])
+
+    @pytest.mark.parametrize(
+        ("updates", "removed_field", "expected_issue"),
+        [
+            ({}, "installed_at", "missing_installed_at"),
+            ({"installed_at": ""}, None, "installed_at_empty"),
+            ({"schema_version": "1"}, None, "schema_version_not_an_integer"),
+            ({"r2p_version": 123}, None, "r2p_version_not_a_string"),
+        ],
+    )
+    def test_status_reports_invalid_on_manifest_scalar_shape(
+        self, tmp_path, updates, removed_field, expected_issue
+    ):
+        svc, manifest_root, _ = make_service(tmp_path)
+        svc.install("claude")
+        manifest_path = manifest_root / "install" / "claude.yaml"
+        data = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+        data.update(updates)
+        if removed_field is not None:
+            data.pop(removed_field)
+        from tools.workflow_cli.install import _dump_manifest
+
+        manifest_path.write_text(
+            _dump_manifest(data),
+            encoding="utf-8",
+        )
+
+        result = svc.status()
+
+        assert result[0]["status"] == "invalid"
+        assert any(expected_issue in issue for issue in result[0]["issues"])
+
+    def _rewrite_schema_version(self, manifest_path: Path, new_version: int) -> None:
+        from tools.workflow_cli.install import _dump_manifest
+
+        data = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+        data["schema_version"] = new_version
+        manifest_path.write_text(_dump_manifest(data), encoding="utf-8")
+
+    def test_status_reports_schema_mismatch_as_drift_not_invalid(self, tmp_path):
+        svc, manifest_root, _ = make_service(tmp_path)
+        svc.install("claude")
+        manifest_path = manifest_root / "install" / "claude.yaml"
+        self._rewrite_schema_version(manifest_path, SCHEMA_VERSION + 1)
+
+        result = svc.status()
+
+        # A structurally valid manifest whose schema_version differs is drift,
+        # not invalid — otherwise it would be un-uninstallable.
+        assert result[0]["status"] == "drift"
+        assert any("unsupported_schema_version" in issue for issue in result[0]["issues"])
+
+    def test_uninstall_succeeds_on_schema_version_mismatch(self, tmp_path):
+        svc, manifest_root, ph_root = make_service(tmp_path)
+        svc.install("claude")
+        skill_dest = ph_root / "claude" / "skills" / "r2p" / "SKILL.md"
+        assert skill_dest.exists()
+        manifest_path = manifest_root / "install" / "claude.yaml"
+        self._rewrite_schema_version(manifest_path, SCHEMA_VERSION + 1)
+
+        # A future schema bump must not strand a prior install: uninstall must
+        # still validate the manifest and remove managed files.
+        svc.uninstall("claude")
+
+        assert not skill_dest.exists()
+        assert not manifest_path.exists()
+
     def test_status_reports_invalid_on_unparseable_manifest(self, tmp_path):
         svc, manifest_root, _ = make_service(tmp_path)
         svc.install("claude")
@@ -1063,17 +1160,18 @@ class TestInstallService:
             assert "{{args}}" in content, command
             assert "!{" in content, command
 
-    def test_isolated_wrapper_is_recognized_as_managed(self):
+    @pytest.mark.parametrize("flag", ["-E", "-I"])
+    def test_trusted_and_legacy_isolated_wrappers_are_recognized_as_managed(self, flag):
         from tools.workflow_cli.install import _looks_like_managed_bin_script
 
-        wrapper = """#!/usr/bin/env bash
+        wrapper = f"""#!/usr/bin/env bash
 set -euo pipefail
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${{BASH_SOURCE[0]}}")" && pwd)"
 REPO_ROOT=/trusted/req-to-plan
 if command -v python3 >/dev/null 2>&1; then
-    exec python3 -I "$REPO_ROOT/tools/workflow_cli/__main__.py" tools.workflow_cli.agent_shortcuts start "$@"
+    exec python3 {flag} "$REPO_ROOT/tools/workflow_cli/__main__.py" tools.workflow_cli.agent_shortcuts start "$@"
 else
-    exec python -I "$REPO_ROOT/tools/workflow_cli/__main__.py" tools.workflow_cli.agent_shortcuts start "$@"
+    exec python {flag} "$REPO_ROOT/tools/workflow_cli/__main__.py" tools.workflow_cli.agent_shortcuts start "$@"
 fi
 """
 

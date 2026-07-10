@@ -59,9 +59,88 @@ def unfenced_markdown_text(content: str) -> str:
     return "".join(line for line, _, _ in unfenced_markdown_lines(content))
 
 
+def _mask_html_comments_outside_fences(
+    content: str,
+    *,
+    preserve_readonly_end_marker: bool = False,
+) -> str:
+    """Blank comment characters while preserving offsets, newlines, and fences."""
+    pieces: list[str] = []
+    fence_char = ""
+    fence_len = 0
+    in_comment = False
+
+    def masked(text: str) -> str:
+        return "".join(char if char in "\r\n" else " " for char in text)
+
+    for line in content.splitlines(keepends=True):
+        marker = _FENCE_MARKER_RE.match(line)
+        if not in_comment and fence_char:
+            pieces.append(line)
+            if (
+                marker
+                and marker.group(1)[0] == fence_char
+                and len(marker.group(1)) >= fence_len
+                and not line[marker.end():].strip()
+            ):
+                fence_char = ""
+                fence_len = 0
+            continue
+
+        if (
+            not in_comment
+            and preserve_readonly_end_marker
+            and _READONLY_SECTION_END_RE.match(line)
+        ):
+            pieces.append(line)
+            continue
+
+        if not in_comment and marker:
+            fence_char = marker.group(1)[0]
+            fence_len = len(marker.group(1))
+            pieces.append(line)
+            continue
+
+        cursor = 0
+        while cursor < len(line):
+            if in_comment:
+                end = line.find("-->", cursor)
+                if end < 0:
+                    pieces.append(masked(line[cursor:]))
+                    cursor = len(line)
+                    continue
+                pieces.append(masked(line[cursor:end + 3]))
+                cursor = end + 3
+                in_comment = False
+                continue
+
+            start = line.find("<!--", cursor)
+            if start < 0:
+                pieces.append(line[cursor:])
+                break
+            pieces.append(line[cursor:start])
+            cursor = start
+            in_comment = True
+
+    return "".join(pieces)
+
+
+def strip_html_comments_outside_fences(content: str) -> str:
+    """Remove prose comments while preserving offsets and fenced code verbatim.
+
+    Comment bytes are replaced by spaces and their newlines are retained, so
+    removal cannot concatenate separate Markdown fields, headings, or trace IDs.
+    """
+    return _mask_html_comments_outside_fences(content)
+
+
 def strip_readonly_sections(content: str) -> str:
     """Remove seeded read-only Markdown sections before structural validation."""
-    lines = list(unfenced_markdown_lines(content))
+    scan_content = _mask_html_comments_outside_fences(
+        content,
+        preserve_readonly_end_marker=True,
+    )
+    lines = list(unfenced_markdown_lines(scan_content))
     headings = [
         (start, level)
         for line, start, _ in lines
@@ -120,6 +199,11 @@ def strip_readonly_sections(content: str) -> str:
         cursor = end
     pieces.append(content[cursor:])
     return "".join(pieces)
+
+
+def strip_nonsemantic_markdown(content: str) -> str:
+    """Remove seeded read-only sections and prose HTML comments consistently."""
+    return strip_html_comments_outside_fences(strip_readonly_sections(content))
 
 
 def heading_level(line: str) -> int | None:

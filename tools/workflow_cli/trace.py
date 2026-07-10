@@ -9,15 +9,28 @@ from pathlib import Path
 from tools.workflow_cli.markdown import (
     heading_bounded_bodies,
     heading_level,
-    strip_readonly_sections,
+    strip_html_comments_outside_fences,
+    strip_nonsemantic_markdown,
     unfenced_markdown_lines,
     unfenced_markdown_text,
 )
+from tools.workflow_cli.artifact import read_artifact
 from tools.workflow_cli.models import STAGE_ARTIFACT_MAP, Stage
 from tools.workflow_cli.stage_schema import PLAN_TASK_FIELD_RE
 
 # REQ-AUTH-001 / RISK-SEC-001 / DES-AUTH-001 / SPEC-AUTH-001 / SCOPE-IN-001 / SCOPE-OUT-001 / PLAN-TASK-001
-_ID_RE = re.compile(r"(?:REQ|RISK|DES|SPEC)-[A-Z]+-\d+|SCOPE-(?:IN|OUT)-\d+|PLAN-TASK-\d+")
+_TRACE_TOKEN_CHARS = r"A-Za-z0-9_-"
+SPEC_ID_RE = re.compile(
+    rf"(?<![{_TRACE_TOKEN_CHARS}])SPEC-[A-Z]+-\d+(?![{_TRACE_TOKEN_CHARS}])"
+)
+_ID_RE = re.compile(
+    rf"(?<![{_TRACE_TOKEN_CHARS}])"
+    rf"(?:(?:REQ|RISK|DES|SPEC)-[A-Z]+-\d+|SCOPE-(?:IN|OUT)-\d+|PLAN-TASK-\d+)"
+    rf"(?![{_TRACE_TOKEN_CHARS}])"
+)
+_SCOPE_IN_ID_RE = re.compile(
+    r"(?<![A-Za-z0-9_-])SCOPE-IN-\d+(?![A-Za-z0-9_-])"
+)
 _PLAN_TASK_HEADING_RE = re.compile(r"^###\s+PLAN-TASK-\d+\b")
 _HTML_COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
 _NATIVE_HEADING_ID_PREFIXES: dict[Stage, tuple[str, ...]] = {
@@ -47,7 +60,7 @@ def _scope_ids_in_brief_section(
     ids: set[str] = set()
     capture = False
     capture_level = 0
-    decommented = _HTML_COMMENT_RE.sub("", content)
+    decommented = strip_html_comments_outside_fences(content)
     for line, _, _ in unfenced_markdown_lines(decommented):
         stripped = line.strip()
         level = heading_level(line)
@@ -106,8 +119,11 @@ def _native_heading_ids(stage: Stage, content: str) -> set[str]:
 
 
 def _artifact_text(run_dir: Path, stage: Stage) -> str:
-    path = run_dir / STAGE_ARTIFACT_MAP[stage]
-    return strip_readonly_sections(path.read_text(encoding="utf-8")) if path.exists() else ""
+    try:
+        content = read_artifact(run_dir, stage)
+    except FileNotFoundError:
+        return ""
+    return strip_nonsemantic_markdown(content)
 
 
 def _plan_task_bodies(plan_content: str):
@@ -146,8 +162,13 @@ def plan_consumed_spec_ids(run_dir: Path) -> set[str]:
     plan = _artifact_text(run_dir, Stage.PLAN)
     consumed: set[str] = set()
     for body in _plan_task_bodies(plan):
-        consumed.update(m.group(0) for m in _ID_RE.finditer(_plan_task_field_value(body, "Spec References"))
-                        if m.group(0).startswith("SPEC-"))
+        refs = unfenced_markdown_text(
+            _plan_task_field_value(body, "Spec References")
+        )
+        consumed.update(
+            match.group(0)
+            for match in SPEC_ID_RE.finditer(refs)
+        )
     return consumed
 
 
@@ -189,15 +210,30 @@ def scope_in_not_closed(run_dir: Path) -> list[str]:
     'explicitly not implemented here' must not close the scope item)."""
     model = build_trace(run_dir)
     plan_text = _artifact_text(run_dir, Stage.PLAN)
-    plan_task_text = "\n".join(unfenced_markdown_text(body) for body in _plan_task_bodies(plan_text))
+    plan_task_text = "\n".join(
+        _HTML_COMMENT_RE.sub("", unfenced_markdown_text(body))
+        for body in _plan_task_bodies(plan_text)
+    )
+    plan_scope_ids = {
+        match.group(0)
+        for match in _SCOPE_IN_ID_RE.finditer(plan_task_text)
+    }
     spec_blocks = _spec_blocks(_artifact_text(run_dir, Stage.SPEC))
     consumed_specs = plan_consumed_spec_ids(run_dir)
+    consumed_spec_scope_ids: set[str] = set()
+    for spec_id in consumed_specs:
+        block = _HTML_COMMENT_RE.sub(
+            "", _strip_nested_non_goals(spec_blocks.get(spec_id, ""))
+        )
+        consumed_spec_scope_ids.update(
+            match.group(0)
+            for match in _SCOPE_IN_ID_RE.finditer(block)
+        )
     issues: list[str] = []
     for id_ in sorted(i for i in model.defined if i.startswith("SCOPE-IN-")):
-        if id_ in plan_task_text:
+        if id_ in plan_scope_ids:
             continue
-        if any(id_ in _strip_nested_non_goals(spec_blocks.get(spec_id, ""))
-               for spec_id in consumed_specs):
+        if id_ in consumed_spec_scope_ids:
             continue
         issues.append(id_)
     return issues

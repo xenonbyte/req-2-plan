@@ -144,6 +144,40 @@ class TestBuildContextPack(unittest.TestCase):
                 os.chdir(cwd)
         self.assertEqual(pack.repo_root, str(repo.resolve()))
 
+    def test_symlinked_dependency_configs_are_not_read_or_recorded(self):
+        from tools.workflow_cli.context_pack import build_context_pack
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            repo = root / "repo"
+            outside = root / "outside"
+            repo.mkdir()
+            outside.mkdir()
+            (outside / "requirements.txt").write_text(
+                "LOCAL-SECRET-REQUIREMENT\n", encoding="utf-8"
+            )
+            (outside / "package.json").write_text(
+                json.dumps({"dependencies": {"LOCAL-SECRET-NPM": "1"}}),
+                encoding="utf-8",
+            )
+            (outside / "pyproject.toml").write_text(
+                '[project]\ndependencies = ["LOCAL-SECRET-PYPROJECT"]\n',
+                encoding="utf-8",
+            )
+            for name in ("requirements.txt", "package.json", "pyproject.toml"):
+                (repo / name).symlink_to(outside / name)
+
+            pack = build_context_pack(repo)
+
+        serialized = json.dumps(pack.dependencies)
+        self.assertNotIn("LOCAL-SECRET", serialized)
+        self.assertNotIn("npm", pack.package_managers)
+        self.assertNotIn("pip", pack.package_managers)
+        self.assertTrue(
+            {"requirements.txt", "package.json", "pyproject.toml"}.isdisjoint(
+                pack.config_files
+            )
+        )
+
 
 class TestPyprojectContextPack(unittest.TestCase):
     """PEP 621 [project] tables only; poetry-style private tables are out of scope."""

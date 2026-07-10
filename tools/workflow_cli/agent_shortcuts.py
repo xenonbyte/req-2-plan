@@ -17,7 +17,11 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-from tools.workflow_cli.atomic import atomic_write_text
+from tools.workflow_cli.atomic import (
+    UnsafeRegularFileError,
+    atomic_write_text,
+    read_regular_text,
+)
 from tools.workflow_cli.models import RunStatus, WorkId
 from tools.workflow_cli.output import EXIT_CONFLICT, EXIT_REVIEW_REQ, is_json_mode
 from tools.workflow_cli.workspace import ensure_workspace_gitignore
@@ -299,7 +303,7 @@ def _workflow_cli_command(base_path: Path, args_list: list[str]) -> str:
     return _shell_join(
         [
             _python_executable(),
-            "-I",
+            "-E",
             _isolated_launcher_path(),
             "tools.workflow_cli",
             "--base-path",
@@ -307,6 +311,35 @@ def _workflow_cli_command(base_path: Path, args_list: list[str]) -> str:
             *args_list,
         ]
     )
+
+
+def _unsafe_seed_source_or_exit(path: Path, work_id: str, reason: Exception) -> None:
+    print(
+        "blocked: unsafe_seed_source\n"
+        f"work_id: {work_id}\n"
+        f"path: {path}\n"
+        f"reason: {reason}\n"
+    )
+    sys.exit(EXIT_CONFLICT)
+
+
+def _read_seed_file_or_exit(path: Path, work_id: str) -> str:
+    try:
+        text = read_regular_text(path, missing_ok=True)
+    except (UnsafeRegularFileError, OSError, UnicodeError) as exc:
+        _unsafe_seed_source_or_exit(path, work_id, exc)
+    return text or ""
+
+
+def _read_seed_artifact_or_exit(run_dir: Path, stage, work_id: str) -> str:
+    from tools.workflow_cli.artifact import artifact_path, read_artifact
+
+    try:
+        return read_artifact(run_dir, stage)
+    except FileNotFoundError:
+        return ""
+    except (UnsafeRegularFileError, OSError, UnicodeError) as exc:
+        _unsafe_seed_source_or_exit(artifact_path(run_dir, stage), work_id, exc)
 
 
 def _tier_lock_command(base_path: Path, work_id: str, record) -> str:
@@ -607,7 +640,6 @@ def _cmd_continue(ns: argparse.Namespace, base_path: Path) -> None:
         print(f"blocked: source_run_not_found\nwork_id: {work_id}\n")
         sys.exit(7)
 
-    from tools.workflow_cli.artifact import read_artifact
     from tools.workflow_cli.state import RunStateManager, get_active_artifact
     from tools.workflow_cli.models import RunStatus, Stage
     manager = RunStateManager(run_path.parent)
@@ -644,19 +676,19 @@ def _cmd_continue(ns: argparse.Namespace, base_path: Path) -> None:
                       f"next: {_tier_lock_command(base_path, work_id, record)}\n")
                 sys.exit(0)
             aa = get_active_artifact(record, record.current_stage)
-            try:
-                body = read_artifact(run_path.parent, record.current_stage).strip()
-            except FileNotFoundError:
-                body = ""
+            body = _read_seed_artifact_or_exit(
+                run_path.parent, record.current_stage, work_id
+            ).strip()
             open_owner_route = _open_owner_route(record)
             if aa is None or not body:
                 prev = _prev_stage(record.current_stage)
-                try:
-                    upstream = read_artifact(run_path.parent, prev) if prev else ""
-                except FileNotFoundError:
-                    upstream = ""
+                upstream = (
+                    _read_seed_artifact_or_exit(run_path.parent, prev, work_id)
+                    if prev
+                    else ""
+                )
                 pack_md = run_path.parent / "02-project-context.md"
-                context_summary = pack_md.read_text(encoding="utf-8") if pack_md.exists() else ""
+                context_summary = _read_seed_file_or_exit(pack_md, work_id)
                 seed = _seed_for_stage(record.current_stage, record.tier_locked, upstream, context_summary)
                 content_file = _prepare_input_file(run_path.parent, stage, "content", seed)
                 content_cmd = _stage_content_command(
@@ -758,10 +790,9 @@ def _cmd_continue(ns: argparse.Namespace, base_path: Path) -> None:
             stage = record.current_stage.value
             aa = get_active_artifact(record, record.current_stage)
             if aa is not None and aa.status == "stale":
-                try:
-                    body = read_artifact(run_path.parent, record.current_stage).strip()
-                except FileNotFoundError:
-                    body = ""
+                body = _read_seed_artifact_or_exit(
+                    run_path.parent, record.current_stage, work_id
+                ).strip()
                 content_file = _prepare_input_file(run_path.parent, stage, "repair", body)
                 update_cmd = _stage_content_command(
                     base_path,
@@ -775,12 +806,13 @@ def _cmd_continue(ns: argparse.Namespace, base_path: Path) -> None:
                       f"next: {update_cmd}\n")
                 sys.exit(0)
             prev = _prev_stage(record.current_stage)
-            try:
-                upstream = read_artifact(run_path.parent, prev) if prev else ""
-            except FileNotFoundError:
-                upstream = ""
+            upstream = (
+                _read_seed_artifact_or_exit(run_path.parent, prev, work_id)
+                if prev
+                else ""
+            )
             pack_md = run_path.parent / "02-project-context.md"
-            context_summary = pack_md.read_text(encoding="utf-8") if pack_md.exists() else ""
+            context_summary = _read_seed_file_or_exit(pack_md, work_id)
             seed = _seed_for_stage(record.current_stage, record.tier_locked, upstream, context_summary)
             content_file = _prepare_input_file(run_path.parent, stage, "content", seed)
             produce_cmd = _stage_content_command(
@@ -806,10 +838,9 @@ def _cmd_continue(ns: argparse.Namespace, base_path: Path) -> None:
             sys.exit(0)
 
         if s in (RunStatus.QUALITY_GATE_FAILED, RunStatus.CHECKPOINT_CHANGES_REQUESTED):
-            try:
-                seed = read_artifact(run_path.parent, record.current_stage)
-            except FileNotFoundError:
-                seed = ""
+            seed = _read_seed_artifact_or_exit(
+                run_path.parent, record.current_stage, work_id
+            )
             content_file = _prepare_input_file(run_path.parent, stage, "repair", seed)
             update_cmd = _stage_content_command(
                 base_path,
@@ -831,13 +862,59 @@ def _cmd_continue(ns: argparse.Namespace, base_path: Path) -> None:
 def _cmd_status(ns: argparse.Namespace, base_path: Path) -> None:
     if ns.all:
         r2p_dir = base_path / ".req-to-plan"
-        if not r2p_dir.exists():
+        run_paths = sorted(r2p_dir.glob("*/run.md")) if r2p_dir.exists() else []
+        if is_json_mode():
+            runs: list[dict[str, object]] = []
+            exit_code = 0
+            for run_md in run_paths:
+                work_id = run_md.parent.name
+                output = io.StringIO()
+                try:
+                    with contextlib.redirect_stdout(output):
+                        run_exit_code = _run_cli(
+                            ["status-run", "--work-id", work_id], base_path
+                        )
+                except (OSError, UnicodeError, ValueError):
+                    runs.append(
+                        {
+                            "work_id": work_id,
+                            "status": "invalid",
+                            "error": "invalid_run_state",
+                            "exit_code": EXIT_CONFLICT,
+                        }
+                    )
+                    if exit_code == 0:
+                        exit_code = EXIT_CONFLICT
+                    continue
+                payload = _json_payload_from_cli_output(output.getvalue())
+                if not payload:
+                    payload = {"work_id": work_id, "exit_code": run_exit_code}
+                elif run_exit_code != 0:
+                    payload.setdefault("exit_code", run_exit_code)
+                runs.append(payload)
+                if exit_code == 0 and run_exit_code != 0:
+                    exit_code = run_exit_code
+            print(json.dumps({"runs": runs}, indent=2))
+            sys.exit(exit_code)
+        if not run_paths:
             print("no_runs: true\n")
             sys.exit(0)
-        for run_md in sorted(r2p_dir.glob("*/run.md")):
+        exit_code = 0
+        for run_md in run_paths:
             work_id = run_md.parent.name
-            _run_cli(["status-run", "--work-id", work_id], base_path)
-        sys.exit(0)
+            try:
+                _run_cli(["status-run", "--work-id", work_id], base_path)
+            except (OSError, UnicodeError, ValueError):
+                # Mirror the JSON aggregate: one malformed run.md must not
+                # abort the listing of the remaining runs.
+                print(
+                    f"work_id: {work_id}\n"
+                    "status: invalid\n"
+                    "error: invalid_run_state\n"
+                )
+                if exit_code == 0:
+                    exit_code = EXIT_CONFLICT
+        sys.exit(exit_code)
 
     pointer = read_active_pointer(base_path)
     work_id = pointer.get("selected_work_id") if pointer else None

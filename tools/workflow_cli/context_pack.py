@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
@@ -11,7 +12,11 @@ try:
 except ImportError:  # pragma: no cover - older interpreters: pyproject parsing degrades to a no-op
     tomllib = None
 
-from tools.workflow_cli.atomic import atomic_write_text
+from tools.workflow_cli.atomic import (
+    UnsafeRegularFileError,
+    atomic_write_text,
+    read_regular_text,
+)
 from tools.workflow_cli.repo_baseline import SKIP_DIRS, scan_repo_baseline
 
 _CONFIG_NAMES = {
@@ -45,17 +50,28 @@ def _append_npm_dependencies(pack: ProjectContextPack, dependencies: object, *, 
         pack.dependencies.append(dep)
 
 
+def _read_optional_config(path: Path) -> str | None:
+    """Return a regular config file's text without following a symlink."""
+    try:
+        return read_regular_text(path, missing_ok=True)
+    except (UnsafeRegularFileError, OSError, UnicodeError):
+        return None
+
+
 def _append_pyproject_facts(pack: ProjectContextPack, repo_path: Path) -> None:
     """Collect PEP 621 [project] dependencies and a pytest signal from pyproject.toml.
 
     Poetry/PDM private tables are out of scope; without tomllib (Python < 3.11)
     this is a no-op, matching the pack's best-effort scan semantics."""
     pyproject = repo_path / "pyproject.toml"
-    if tomllib is None or not pyproject.exists():
+    if tomllib is None:
+        return
+    text = _read_optional_config(pyproject)
+    if text is None:
         return
     try:
-        data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
-    except (tomllib.TOMLDecodeError, OSError, UnicodeDecodeError):
+        data = tomllib.loads(text)
+    except tomllib.TOMLDecodeError:
         return
     project = data.get("project")
     project = project if isinstance(project, dict) else {}
@@ -86,9 +102,10 @@ def build_context_pack(repo_path: Path) -> ProjectContextPack:
     pack = ProjectContextPack(repo_root=str(repo_path), languages=dict(baseline.language_breakdown))
 
     pkg = repo_path / "package.json"
-    if pkg.exists():
+    pkg_text = _read_optional_config(pkg)
+    if pkg_text is not None:
         try:
-            raw_data = json.loads(pkg.read_text(encoding="utf-8"))
+            raw_data = json.loads(pkg_text)
             pack.package_managers.append("npm")
             data = raw_data if isinstance(raw_data, dict) else {}
             scripts = data.get("scripts")
@@ -100,9 +117,10 @@ def build_context_pack(repo_path: Path) -> ProjectContextPack:
             pass
 
     req = repo_path / "requirements.txt"
-    if req.exists():
+    req_text = _read_optional_config(req)
+    if req_text is not None:
         pack.package_managers.append("pip")
-        for line in req.read_text(encoding="utf-8").splitlines():
+        for line in req_text.splitlines():
             line = line.strip()
             if line and not line.startswith(("#", "-")):
                 pack.dependencies.append({"name": line, "version": "", "ecosystem": "pip"})
@@ -115,6 +133,14 @@ def build_context_pack(repo_path: Path) -> ProjectContextPack:
         dirs[:] = [d for d in dirs if d not in SKIP_DIRS and not d.startswith(".")]
         rel_root = Path(root).relative_to(repo_path)
         for fname in files:
+            if fname not in _CONFIG_NAMES and fname not in _ENTRYPOINT_HINTS:
+                continue
+            try:
+                is_regular = stat.S_ISREG((Path(root) / fname).lstat().st_mode)
+            except OSError:
+                is_regular = False
+            if not is_regular:
+                continue
             rel = str(rel_root / fname) if str(rel_root) != "." else fname
             if fname in _CONFIG_NAMES:
                 pack.config_files.append(rel)

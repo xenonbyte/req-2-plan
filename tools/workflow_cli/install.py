@@ -384,6 +384,16 @@ class InstallService:
             for path_str in data.get("installed_paths", []):
                 if not Path(path_str).exists():
                     issues.append(f"missing_file: {path_str}")
+            schema_version = data.get("schema_version")
+            if (
+                isinstance(schema_version, int)
+                and not isinstance(schema_version, bool)
+                and schema_version != SCHEMA_VERSION
+            ):
+                issues.append(
+                    f"unsupported_schema_version: manifest={schema_version!r} "
+                    f"expected={SCHEMA_VERSION!r}"
+                )
             if data.get("r2p_version") != R2P_VERSION:
                 issues.append(
                     f"version_mismatch: manifest={data.get('r2p_version')!r} "
@@ -1025,14 +1035,17 @@ def _looks_like_managed_bin_script(content: str) -> bool:
         'export PYTHONPATH="$REPO_ROOT${PYTHONPATH:+:$PYTHONPATH}"' in content
         and "-m tools.workflow_cli.agent_shortcuts" in content
     )
-    isolated = (
-        '-I "$REPO_ROOT/tools/workflow_cli/__main__.py"' in content
+    trusted_bootstrap = (
+        any(
+            f'{flag} "$REPO_ROOT/tools/workflow_cli/__main__.py"' in content
+            for flag in ("-E", "-I")
+        )
         and (
             "tools.workflow_cli.agent_shortcuts" in content
             or "tools.workflow_cli.install_cli" in content
         )
     )
-    return common and (legacy or isolated)
+    return common and (legacy or trusted_bootstrap)
 
 
 def _dump_manifest(manifest: dict[str, Any]) -> str:
@@ -1061,16 +1074,49 @@ def _manifest_shape_issues(data: Any, platform: str) -> list[str]:
     if not isinstance(data, dict):
         return ["manifest_not_a_mapping"]
     issues: list[str] = []
-    if data.get("schema_version") is None:
+    schema_version = data.get("schema_version")
+    if schema_version is None:
         issues.append("missing_schema_version")
+    elif isinstance(schema_version, bool) or not isinstance(schema_version, int):
+        issues.append("schema_version_not_an_integer")
+    # A structurally valid manifest whose schema_version simply differs from the
+    # current one is *drift*, not a shape defect: it must not block uninstall or
+    # obsolete-wrapper cleanup (which would strand managed files). status()
+    # surfaces the mismatch separately as a non-fatal issue.
     if data.get("platform") != platform:
         issues.append(
             f"platform_mismatch: manifest={data.get('platform')!r} expected={platform!r}"
         )
-    if not isinstance(data.get("installed_paths"), list):
+    installed_at = data.get("installed_at")
+    if installed_at is None:
+        issues.append("missing_installed_at")
+    elif not isinstance(installed_at, str):
+        issues.append("installed_at_not_a_string")
+    elif not installed_at.strip():
+        issues.append("installed_at_empty")
+    installed_paths = data.get("installed_paths")
+    if not isinstance(installed_paths, list):
         issues.append("installed_paths_not_a_list")
-    if data.get("r2p_version") is None:
+    else:
+        for index, path in enumerate(installed_paths):
+            if not isinstance(path, str):
+                issues.append(f"installed_paths[{index}]_not_a_string")
+    backups = data.get("backups")
+    if not isinstance(backups, list):
+        issues.append("backups_not_a_list")
+    else:
+        for index, backup in enumerate(backups):
+            if not isinstance(backup, dict):
+                issues.append(f"backups[{index}]_not_a_mapping")
+                continue
+            for field in ("target", "backup"):
+                if not isinstance(backup.get(field), str):
+                    issues.append(f"backups[{index}].{field}_not_a_string")
+    r2p_version = data.get("r2p_version")
+    if r2p_version is None:
         issues.append("missing_r2p_version")
+    elif not isinstance(r2p_version, str):
+        issues.append("r2p_version_not_a_string")
     return issues
 
 

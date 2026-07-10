@@ -69,12 +69,16 @@ from tools.workflow_cli.output import (
 )
 from tools.workflow_cli.tier import estimate_tier, scan_keywords
 from tools.workflow_cli.workspace import ensure_workspace_gitignore, commit_requirement_dir
-from tools.workflow_cli.atomic import atomic_write_text
+from tools.workflow_cli.atomic import (
+    UnsafeRegularFileError,
+    atomic_write_text,
+    read_regular_text,
+)
 from tools.workflow_cli.markdown import (
     PLAN_TASK_ANCHOR_RE,
     heading_bounded_bodies,
     plan_task_anchors,
-    strip_readonly_sections,
+    strip_nonsemantic_markdown,
 )
 
 
@@ -254,6 +258,19 @@ def _parse_stage(raw: str) -> Stage:
             format_error(f"Unknown stage {raw!r}. Valid: {valid}", exit_code=EXIT_CLI_ERR),
             EXIT_CLI_ERR,
         )
+
+
+def _parse_artifact_stage(raw: str) -> Stage:
+    stage = _parse_stage(raw)
+    if stage not in STAGE_ORDER:
+        print_and_exit(
+            format_error(
+                f"Stage {stage.value!r} does not produce an artifact",
+                exit_code=EXIT_CONFLICT,
+            ),
+            EXIT_CONFLICT,
+        )
+    return stage
 
 
 def _parse_reopen_stage(raw: str) -> Stage:
@@ -902,7 +919,7 @@ def _cmd_run_execute_start(args):
         )
     # Seed the structural progress ledger (IDs + checkboxes = structure, not
     # semantics; the agent appends progress). CLI never generates artifact text.
-    anchors = plan_task_anchors(strip_readonly_sections(plan_text))
+    anchors = plan_task_anchors(strip_nonsemantic_markdown(plan_text))
     if not anchors:
         print_and_exit(
             format_error(
@@ -1039,7 +1056,8 @@ def _cmd_gap_open(args):
         )
 
     run_md_path = run_dir / "run.md"
-    run_md_before = run_md_path.read_text(encoding="utf-8")
+    run_md_before = read_regular_text(run_md_path)
+    assert run_md_before is not None
     affected = []
     for d in STAGE_ORDER[STAGE_ORDER.index(owner): STAGE_ORDER.index(cur) + 1]:
         aa = get_active_artifact(record, d)
@@ -1062,13 +1080,15 @@ def _cmd_gap_open(args):
                 ),
                 EXIT_NOT_FOUND,
             )
+        artifact_before = read_regular_text(artifact_path)
+        assert artifact_before is not None
         affected.append(
             (
                 d,
                 version,
                 artifact_file,
                 artifact_path,
-                artifact_path.read_text(encoding="utf-8"),
+                artifact_before,
             )
         )
 
@@ -1569,7 +1589,7 @@ def _resolve_content(args) -> str:
 
 def _cmd_stage_produce(args):
     record, mgr, run_dir = _load_run(args.work_id, args.base_path)
-    stage = _parse_stage(args.stage)
+    stage = _parse_artifact_stage(args.stage)
     repair_state = record.status in (
         RunStatus.CHECKPOINT_CHANGES_REQUESTED,
         RunStatus.QUALITY_GATE_FAILED,
@@ -1650,7 +1670,7 @@ def _cmd_stage_produce(args):
 
 def _cmd_stage_update(args):
     record, mgr, run_dir = _load_run(args.work_id, args.base_path)
-    stage = _parse_stage(args.stage)
+    stage = _parse_artifact_stage(args.stage)
 
     if record.status in (RunStatus.NEXT_STAGE, RunStatus.ENTRY_GATE_FAILED):
         next_step = "gate-entry first to enter the stage draft"
@@ -1835,7 +1855,7 @@ def _cmd_plan_task_brief(args):
             format_error("PLAN artifact not found", exit_code=EXIT_NOT_FOUND),
             EXIT_NOT_FOUND,
         )
-    stripped = strip_readonly_sections(plan_text)
+    stripped = strip_nonsemantic_markdown(plan_text)
     anchors = plan_task_anchors(stripped)
     bodies = list(heading_bounded_bodies(stripped, PLAN_TASK_ANCHOR_RE.match))
     target_idx = None
@@ -2456,7 +2476,13 @@ def main(args=None):
     _register_context_commands(subparsers)
 
     parsed = parser.parse_args(args)
-    parsed.func(parsed)
+    try:
+        parsed.func(parsed)
+    except UnsafeRegularFileError as exc:
+        print_and_exit(
+            format_error(str(exc), exit_code=EXIT_CONFLICT),
+            EXIT_CONFLICT,
+        )
 
 
 if __name__ == "__main__":

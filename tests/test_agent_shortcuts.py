@@ -41,14 +41,16 @@ _DESIGN_LIGHT_CONTENT = (
 )
 
 
-def test_all_wrappers_use_isolated_trusted_bootstrap():
+def test_all_wrappers_use_trusted_bootstrap_without_disabling_user_site():
     wrappers = [REPO_ROOT / "tools" / "r2p"] + sorted(
         (REPO_ROOT / "tools").glob("r2p-*")
     )
     assert wrappers
     for wrapper in wrappers:
         content = wrapper.read_text(encoding="utf-8")
-        assert '-I "$REPO_ROOT/tools/workflow_cli/__main__.py"' in content, wrapper
+        assert '-E "$REPO_ROOT/tools/workflow_cli/__main__.py"' in content, wrapper
+        assert " -I " not in content, wrapper
+        assert " -s " not in content, wrapper
         assert "export PYTHONPATH=" not in content, wrapper
         assert " -m tools.workflow_cli" not in content, wrapper
 
@@ -79,11 +81,82 @@ def test_r2p_start_wrapper_does_not_import_workspace_module(tmp_path):
     assert not (tmp_path / "workspace-module-ran").exists()
 
 
+def test_r2p_start_wrapper_can_import_dependency_from_user_site():
+    base_python = (
+        Path(sys.base_prefix)
+        / "bin"
+        / f"python{sys.version_info.major}.{sys.version_info.minor}"
+    )
+    if not base_python.exists():
+        base_python = Path(getattr(sys, "_base_executable", sys.executable))
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        home = root / "home"
+        workspace = root / "workspace"
+        bin_dir = root / "bin"
+        home.mkdir()
+        workspace.mkdir()
+        bin_dir.mkdir()
+        env = os.environ.copy()
+        env["HOME"] = str(home)
+        env.pop("PYTHONPATH", None)
+        env.pop("PYTHONNOUSERSITE", None)
+        probe = subprocess.run(
+            [
+                str(base_python),
+                "-E",
+                "-c",
+                "import site; print(site.ENABLE_USER_SITE); print(site.USER_SITE)",
+            ],
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        assert probe.returncode == 0, probe.stderr
+        enabled, user_site_raw = probe.stdout.strip().splitlines()
+        if enabled != "True":
+            pytest.skip("base interpreter disables user site-packages")
+        user_site = Path(user_site_raw)
+        try:
+            user_site.relative_to(root)
+        except ValueError:
+            pytest.skip("base interpreter does not derive user site from isolated HOME")
+        user_site.mkdir(parents=True)
+        marker = root / "user-yaml-imported"
+        (user_site / "yaml.py").write_text(
+            "from pathlib import Path\n"
+            f"Path({str(marker)!r}).write_text('loaded', encoding='utf-8')\n"
+            "def safe_load(stream):\n"
+            "    return {}\n",
+            encoding="utf-8",
+        )
+        (bin_dir / "python3").symlink_to(base_python)
+        env["PATH"] = f"{bin_dir}{os.pathsep}{env.get('PATH', '')}"
+
+        completed = subprocess.run(
+            [
+                str(REPO_ROOT / "tools" / "r2p-start"),
+                "--repo-path",
+                str(workspace),
+                "User-site dependency smoke test",
+            ],
+            cwd=workspace,
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        assert completed.returncode == 0, completed.stderr
+        assert marker.read_text(encoding="utf-8") == "loaded"
+
+
 def _expected_workflow_cli_prefix(base: Path) -> str:
     from tools.workflow_cli import agent_shortcuts as A
 
     return (
-        f"{shlex.quote(sys.executable)} -I "
+        f"{shlex.quote(sys.executable)} -E "
         f"{shlex.quote(str(A._repo_root() / 'tools' / 'workflow_cli' / '__main__.py'))} "
         f"tools.workflow_cli --base-path {shlex.quote(str(base))}"
     )
@@ -723,6 +796,79 @@ class TestCmdTierLock:
 
 
 class TestCmdStatus:
+    def test_all_json_aggregates_multiple_runs_into_one_value(self, capsys, monkeypatch):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            _make_run(base, "WF-20260527-status-one")
+            _make_run(base, "WF-20260527-status-two")
+            monkeypatch.setenv("R2P_JSON", "1")
+
+            _invoke(["status", "--all"], base, expect_exit=0)
+
+            payload = json.loads(capsys.readouterr().out)
+            assert [run["work_id"] for run in payload["runs"]] == [
+                "WF-20260527-status-one",
+                "WF-20260527-status-two",
+            ]
+
+    def test_all_json_represents_no_runs_as_an_empty_collection(self, capsys, monkeypatch):
+        with tempfile.TemporaryDirectory() as tmp:
+            monkeypatch.setenv("R2P_JSON", "1")
+
+            _invoke(["status", "--all"], Path(tmp), expect_exit=0)
+
+            assert json.loads(capsys.readouterr().out) == {"runs": []}
+
+    def test_all_json_reports_malformed_run_without_breaking_aggregate(
+        self, capsys, monkeypatch
+    ):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            healthy_id = "WF-20260527-status-healthy"
+            malformed_id = "WF-20260527-status-malformed"
+            _make_run(base, healthy_id)
+            malformed_dir = base / ".req-to-plan" / malformed_id
+            malformed_dir.mkdir(parents=True)
+            (malformed_dir / "run.md").write_text(
+                "not a workflow run\n",
+                encoding="utf-8",
+            )
+            monkeypatch.setenv("R2P_JSON", "1")
+
+            _invoke(["status", "--all"], base, expect_exit=6)
+
+            payload = json.loads(capsys.readouterr().out)
+            runs = {run["work_id"]: run for run in payload["runs"]}
+            assert healthy_id in runs
+            assert runs[malformed_id] == {
+                "work_id": malformed_id,
+                "status": "invalid",
+                "error": "invalid_run_state",
+                "exit_code": 6,
+            }
+
+    def test_all_text_reports_malformed_run_without_breaking_aggregate(self, capsys):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            healthy_id = "WF-20260527-status-healthy"
+            malformed_id = "WF-20260527-status-malformed"
+            _make_run(base, healthy_id)
+            malformed_dir = base / ".req-to-plan" / malformed_id
+            malformed_dir.mkdir(parents=True)
+            (malformed_dir / "run.md").write_text(
+                "not a workflow run\n",
+                encoding="utf-8",
+            )
+
+            _invoke(["status", "--all"], base, expect_exit=6)
+
+            out = capsys.readouterr().out
+            assert healthy_id in out
+            assert (
+                f"work_id: {malformed_id}\nstatus: invalid\nerror: invalid_run_state"
+                in out
+            )
+
     def test_prints_no_selected_run_when_no_pointer(self, capsys):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
@@ -895,7 +1041,7 @@ class TestContinueDriver:
         )
 
         launcher = A._repo_root() / "tools" / "workflow_cli" / "__main__.py"
-        assert f"{shlex.quote(sys.executable)} -I {shlex.quote(str(launcher))}" in command
+        assert f"{shlex.quote(sys.executable)} -E {shlex.quote(str(launcher))}" in command
         assert "tools.workflow_cli --base-path" in command
         assert "PYTHONPATH=" not in command
 
@@ -909,7 +1055,7 @@ class TestContinueDriver:
             )
 
         launcher = A._repo_root() / "tools" / "workflow_cli" / "__main__.py"
-        assert f"python -I {shlex.quote(str(launcher))}" in command
+        assert f"python -E {shlex.quote(str(launcher))}" in command
         assert "tools.workflow_cli --base-path" in command
         assert "PYTHONPATH=" not in command
 
@@ -1395,6 +1541,42 @@ class TestContinueDriver:
             assert "## In-Scope" in content
             assert "## Upstream Summary (read-only)" in content
             assert "## Project Context (read-only)\nrepo summary" in content
+
+    @pytest.mark.parametrize("seed_source", ["02-project-context.md", "00-raw-requirement.md"])
+    def test_continue_rejects_symlinked_seed_source_without_copying_target(
+        self, capsys, seed_source
+    ):
+        from tools.workflow_cli import agent_shortcuts as A
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            base = root / "workspace"
+            base.mkdir()
+            secret = root / "outside-secret.txt"
+            secret.write_text("PRIVATE-CONTENT\n", encoding="utf-8")
+            with pytest.raises(SystemExit):
+                A.main(["start", "Add rate limiting"], base_path=base)
+            capsys.readouterr()
+            work_id = A.read_active_pointer(base)["selected_work_id"]
+            run_dir = base / ".req-to-plan" / work_id
+            manager = RunStateManager(run_dir)
+            record = manager.load()
+            record.status = RunStatus.ACTIVE_STAGE_DRAFT
+            record.current_stage = Stage.REQUIREMENT_BRIEF
+            record.tier_locked = TierEstimate(TierBase.LIGHT)
+            manager.save(record)
+            source = run_dir / seed_source
+            source.unlink()
+            source.symlink_to(secret)
+
+            with pytest.raises(SystemExit) as exc:
+                A.main(["continue"], base_path=base)
+
+            out = capsys.readouterr().out
+            assert exc.value.code == 6
+            assert "unsafe_seed_source" in out
+            assert not (run_dir / "inputs" / "requirement_brief-content.md").exists()
+            assert secret.read_text(encoding="utf-8") == "PRIVATE-CONTENT\n"
 
     def test_continue_entry_gate_failed_prints_executable_retry(self, capsys):
         import tempfile

@@ -33,6 +33,65 @@ class TestTrace(unittest.TestCase):
             )
             self.assertEqual(spec_ids_not_consumed(run_dir), [])
 
+    def test_commented_spec_reference_does_not_consume_spec(self):
+        from tools.workflow_cli.trace import spec_ids_not_consumed
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = self._run_dir(
+                tmp,
+                "## SPEC-AUTH-001 login\nbehavior\n",
+                (
+                    "### PLAN-TASK-001\n"
+                    "Spec References: <!-- SPEC-AUTH-001 -->\n"
+                ),
+            )
+            self.assertEqual(spec_ids_not_consumed(run_dir), ["SPEC-AUTH-001"])
+
+    def test_fenced_spec_reference_does_not_consume_spec(self):
+        from tools.workflow_cli.trace import spec_ids_not_consumed
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = self._run_dir(
+                tmp,
+                "## SPEC-AUTH-001 login\nbehavior\n",
+                (
+                    "### PLAN-TASK-001\n"
+                    "Spec References:\n"
+                    "```text\n"
+                    "SPEC-AUTH-001\n"
+                    "```\n"
+                ),
+            )
+            self.assertEqual(spec_ids_not_consumed(run_dir), ["SPEC-AUTH-001"])
+
+    def test_prefixed_spec_reference_does_not_consume_spec(self):
+        from tools.workflow_cli.trace import spec_ids_not_consumed
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = self._run_dir(
+                tmp,
+                "## SPEC-AUTH-001 login\nbehavior\n",
+                "### PLAN-TASK-001\nSpec References: XSPEC-AUTH-001\n",
+            )
+            self.assertEqual(spec_ids_not_consumed(run_dir), ["SPEC-AUTH-001"])
+
+    def test_suffixed_spec_reference_does_not_consume_spec(self):
+        from tools.workflow_cli.trace import spec_ids_not_consumed
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = self._run_dir(
+                tmp,
+                "## SPEC-AUTH-001 login\nbehavior\n",
+                "### PLAN-TASK-001\nSpec References: SPEC-AUTH-001-extra\n",
+            )
+            self.assertEqual(spec_ids_not_consumed(run_dir), ["SPEC-AUTH-001"])
+
+    def test_spec_reference_prefix_collision_does_not_consume_shorter_id(self):
+        from tools.workflow_cli.trace import spec_ids_not_consumed
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = self._run_dir(
+                tmp,
+                "## SPEC-AUTH-1 first\n\n## SPEC-AUTH-10 tenth\n",
+                "### PLAN-TASK-001\nSpec References: SPEC-AUTH-10\n",
+            )
+            self.assertEqual(spec_ids_not_consumed(run_dir), ["SPEC-AUTH-1"])
+
     def test_spec_not_referenced_by_plan_is_a_gap(self):
         from tools.workflow_cli.trace import spec_ids_not_consumed
         with tempfile.TemporaryDirectory() as tmp:
@@ -137,6 +196,107 @@ class TestTrace(unittest.TestCase):
             (run_dir / STAGE_ARTIFACT_MAP[Stage.PLAN]).write_text(
                 "## Tasks\n### PLAN-TASK-001\nSpec References: SPEC-RATE-001\n", encoding="utf-8")
             self.assertFalse(any("SCOPE-IN-001" in i for i in check_trace_closure(run_dir)))
+
+    def test_scope_in_prefix_collision_does_not_close_shorter_id(self):
+        from tools.workflow_cli.trace import scope_in_not_closed
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            (run_dir / STAGE_ARTIFACT_MAP[Stage.REQUIREMENT_BRIEF]).write_text(
+                "## In-Scope\n- SCOPE-IN-1 first\n- SCOPE-IN-10 tenth\n",
+                encoding="utf-8",
+            )
+            (run_dir / STAGE_ARTIFACT_MAP[Stage.PLAN]).write_text(
+                "## Tasks\n### PLAN-TASK-1\nScope: SCOPE-IN-10\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(scope_in_not_closed(run_dir), ["SCOPE-IN-1"])
+
+    def test_prefixed_scope_in_text_does_not_close_id(self):
+        from tools.workflow_cli.trace import scope_in_not_closed
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            (run_dir / STAGE_ARTIFACT_MAP[Stage.REQUIREMENT_BRIEF]).write_text(
+                "## In-Scope\n- SCOPE-IN-1 first\n",
+                encoding="utf-8",
+            )
+            (run_dir / STAGE_ARTIFACT_MAP[Stage.PLAN]).write_text(
+                "## Tasks\n### PLAN-TASK-1\nScope: XSCOPE-IN-1\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(scope_in_not_closed(run_dir), ["SCOPE-IN-1"])
+
+    def test_suffixed_scope_in_text_in_consumed_spec_does_not_close_id(self):
+        from tools.workflow_cli.trace import scope_in_not_closed
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            (run_dir / STAGE_ARTIFACT_MAP[Stage.REQUIREMENT_BRIEF]).write_text(
+                "## In-Scope\n- SCOPE-IN-1 first\n",
+                encoding="utf-8",
+            )
+            (run_dir / STAGE_ARTIFACT_MAP[Stage.SPEC]).write_text(
+                "## SPEC-AUTH-1\nimplements SCOPE-IN-1X\n",
+                encoding="utf-8",
+            )
+            (run_dir / STAGE_ARTIFACT_MAP[Stage.PLAN]).write_text(
+                "## Tasks\n### PLAN-TASK-1\nSpec References: SPEC-AUTH-1\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(scope_in_not_closed(run_dir), ["SCOPE-IN-1"])
+
+    def test_scope_in_html_comment_in_plan_task_does_not_close_id(self):
+        from tools.workflow_cli.trace import scope_in_not_closed
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            (run_dir / STAGE_ARTIFACT_MAP[Stage.REQUIREMENT_BRIEF]).write_text(
+                "## In-Scope\n- SCOPE-IN-1 first\n",
+                encoding="utf-8",
+            )
+            (run_dir / STAGE_ARTIFACT_MAP[Stage.PLAN]).write_text(
+                "## Tasks\n### PLAN-TASK-1\n<!-- SCOPE-IN-1 -->\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(scope_in_not_closed(run_dir), ["SCOPE-IN-1"])
+
+    def test_scope_in_html_comment_in_consumed_spec_does_not_close_id(self):
+        from tools.workflow_cli.trace import scope_in_not_closed
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            (run_dir / STAGE_ARTIFACT_MAP[Stage.REQUIREMENT_BRIEF]).write_text(
+                "## In-Scope\n- SCOPE-IN-1 first\n",
+                encoding="utf-8",
+            )
+            (run_dir / STAGE_ARTIFACT_MAP[Stage.SPEC]).write_text(
+                "## SPEC-AUTH-1\n<!-- SCOPE-IN-1 -->\n",
+                encoding="utf-8",
+            )
+            (run_dir / STAGE_ARTIFACT_MAP[Stage.PLAN]).write_text(
+                "## Tasks\n### PLAN-TASK-1\nSpec References: SPEC-AUTH-1\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(scope_in_not_closed(run_dir), ["SCOPE-IN-1"])
+
+    def test_fenced_html_comment_cannot_hide_visible_scope_out_reference(self):
+        from tools.workflow_cli.trace import scope_out_violations
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            (run_dir / STAGE_ARTIFACT_MAP[Stage.PLAN]).write_text(
+                "## Tasks\n### PLAN-TASK-1\n"
+                "```html\n<!-- code comment\n```\n-->\n"
+                "Scope: SCOPE-OUT-1\n",
+                encoding="utf-8",
+            )
+
+            self.assertEqual(scope_out_violations(run_dir), ["SCOPE-OUT-1"])
+
+    def test_commented_risk_status_does_not_close_risk(self):
+        from tools.workflow_cli.trace import risk_ids_not_closed
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            (run_dir / STAGE_ARTIFACT_MAP[Stage.RISK_DISCOVERY]).write_text(
+                "## RISK-SEC-1\n<!--\nStatus: mitigated\n-->\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(risk_ids_not_closed(run_dir), ["RISK-SEC-1"])
 
     def test_scope_in_carried_into_consumed_spec_closes_when_spec_id_is_later_in_heading(self):
         from tools.workflow_cli.trace import check_trace_closure
