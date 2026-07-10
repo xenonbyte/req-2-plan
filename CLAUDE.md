@@ -88,7 +88,7 @@ doubt, read the module, not this file.
 | `context_pack.py` | Project Context Pack: deps, test commands, entrypoints, config, source dirs |
 | `link_expander.py` | Local relative-link expansion for requirement intake |
 | `stage_schema.py` / `stage_templates.py` | Required headings per stage/tier + structural seed templates; `stage_templates.py` also seeds PLAN's optional, removable **non-gate** sections (`## Execution Readiness`, `## Risk Handling`) — absent from `STAGE_SCHEMA`/`PLAN_TASK_FIELDS`, so deleting them still passes the quality gate. There is no per-task "defer" field: a decomposition stage may not push requirement content to a later run (see R20) |
-| `markdown.py` / `atomic.py` | Fence-aware Markdown helpers; atomic text writes |
+| `markdown.py` / `atomic.py` | Fence-aware Markdown helpers (incl. offset-preserving `strip_nonsemantic_markdown` / `strip_html_comments_outside_fences`); atomic text writes + symlink-safe `read_regular_text` |
 | `workspace.py` | Neutral `.req-to-plan/` workspace helpers (imports neither `cli.py` nor `agent_shortcuts.py`): owns the workspace `.gitignore` and the path-limited git-commit primitive used by run-close (add) and run-archive (remove) |
 | `trace.py` | Derived trace model and closure checks |
 | `gates.py` | Entry/quality gates, execution completion gate, forced-review checks |
@@ -130,7 +130,27 @@ archived -> none
   manifest write routes through `InstallService._write_manifest_atomic`
   (unique-temp + `O_EXCL` + `O_NOFOLLOW` + atomic replace, symlink-rejecting) —
   never a bare `write_text`; obsolete-wrapper cleanup tolerates its `ValueError`
-  best-effort rather than aborting the install.
+  best-effort rather than aborting the install. `_manifest_shape_issues` checks
+  **structural trust** (field presence/types) only: a structurally valid
+  manifest whose `schema_version` merely differs from the current
+  `SCHEMA_VERSION` is *drift* (surfaced by `status` alone), **not** a shape
+  defect — flagging it there would make uninstall/obsolete-wrapper cleanup
+  refuse and strand a prior install on the next schema bump.
+- **Trusted-input reads are symlink-safe**: reads of trusted on-disk text
+  (artifacts, `02-project-context.md` + scanned dependency configs, continue
+  seeds, `run.md`, gap-open snapshots) route through `atomic.read_regular_text`
+  (lstat → `O_NOFOLLOW` → fstat dev/ino identity; offset-preserving) — never a
+  bare `path.read_text()`. A non-regular / symlinked / raced source raises
+  `UnsafeRegularFileError`, surfaced as exit `6` (`cli.main` catch-all; shortcuts
+  print `blocked: unsafe_seed_source`). Pairs with the manifest-write
+  symlink-rejection above.
+- **Wrapper bootstrap isolation**: the `tools/r2p-*` wrappers and generated
+  commands exec `python -E …/tools/workflow_cli/__main__.py <target>` — **`-E`,
+  not `-I`**, so a user-site `pyyaml` still imports (isolate against `PYTHONPATH`
+  injection, not against user site). `__main__._sanitized_sys_path` then drops
+  the cwd **and the script's own dir** from `sys.path` before prepending the repo
+  root, so `tools/workflow_cli/` modules (notably `trace`) cannot shadow their
+  stdlib namesakes. Do not revert to `-I` or drop the sys.path surgery.
 - **JSON mode**: set `R2P_JSON=1` for machine-readable output.
 - **Version**: `tools/workflow_cli/version.py` (`R2P_VERSION`) is the single
   source — never hardcode the version in docs.
@@ -144,6 +164,14 @@ archived -> none
   check at the same trust level as the PLAN-TASK checkbox gate — it verifies that
   `execution/final-review.md` exists and records `Verdict: Approved`; it never runs
   code, runs tests, or asserts the recorded verdict is true.
+- **Non-semantic Markdown is stripped uniformly**: gate/trace checks preprocess
+  artifact text with `strip_nonsemantic_markdown` — seeded read-only sections
+  removed **and** HTML comments masked to spaces (offset-preserving, so removal
+  can't concatenate adjacent IDs/fields; fence-aware, so fenced examples stay
+  verbatim). So commented-out headings, PLAN-TASK fields, trace IDs, and fenced
+  snippets neither satisfy nor trip a gate. Trace-ID matching (`SPEC_ID_RE`,
+  `_SCOPE_IN_ID_RE`, `_ID_RE`) is token-boundary-aware: `SPEC-…-1` is not closed
+  by `SPEC-…-10`.
 - **Cross-stage trace closure**: enforced at the PLAN quality gate (every `SPEC-*`
   consumed by a PLAN-TASK, every `SCOPE-IN-*` carried into PLAN, every `RISK-*`
   closed). Intermediate stages enforce only "cited upstream ID ⇒ closure tag".
