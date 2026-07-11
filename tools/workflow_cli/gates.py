@@ -35,8 +35,13 @@ from tools.workflow_cli.markdown import (
     unfenced_markdown_text,
 )
 from tools.workflow_cli.output import EXIT_CONFLICT, EXIT_GATE_FAIL
-from tools.workflow_cli.stage_schema import PLAN_TASK_FIELD_RE, PLAN_TASK_FIELDS
-from tools.workflow_cli.trace import SPEC_ID_RE
+from tools.workflow_cli.stage_schema import PLAN_TASK_FIELDS
+from tools.workflow_cli.trace import (
+    SPEC_ID_RE,
+    find_next_plan_task_field_start,
+    find_plan_task_field,
+    plan_task_field_re,
+)
 
 # ---------------------------------------------------------------------------
 # GateResult
@@ -562,39 +567,23 @@ def _plan_task_starts(content: str) -> list[int]:
 
 
 def _plan_task_field_body(task_body: str, field: str) -> str:
-    found = _find_plan_task_field(task_body, field)
+    found = find_plan_task_field(task_body, field)
     if found is None:
         return ""
     match, line_start = found
     body_start = line_start + match.end()
-    next_start = _find_next_plan_task_field_start(task_body, body_start)
+    next_start = find_next_plan_task_field_start(task_body, body_start)
     end = next_start if next_start is not None else len(task_body)
     return f"{match.group(1)}\n{task_body[body_start:end]}"
 
 
-def _find_plan_task_field(task_body: str, field: str):
-    field_re = re.compile(rf"^{re.escape(field)}:[ \t]*(.*)$")
-    for line, start, _ in unfenced_markdown_lines(task_body):
-        match = field_re.match(line)
-        if match:
-            return match, start
-    return None
-
-
 def _count_plan_task_fields(task_body: str, field: str) -> int:
-    field_re = re.compile(rf"^{re.escape(field)}:[ \t]*(.*)$")
+    field_re = plan_task_field_re(field)
     return sum(
         1
         for line, _, _ in unfenced_markdown_lines(task_body)
         if field_re.match(line)
     )
-
-
-def _find_next_plan_task_field_start(task_body: str, after: int) -> int | None:
-    for line, start, _ in unfenced_markdown_lines(task_body):
-        if start >= after and PLAN_TASK_FIELD_RE.match(line):
-            return start
-    return None
 
 
 def _iter_plan_task_bodies(content: str):

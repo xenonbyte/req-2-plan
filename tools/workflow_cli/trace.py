@@ -130,8 +130,12 @@ def _plan_task_bodies(plan_content: str):
     return heading_bounded_bodies(plan_content, _PLAN_TASK_HEADING_RE.match)
 
 
-def _find_plan_task_field(body: str, field: str):
-    field_re = re.compile(rf"^{re.escape(field)}:\s*(.*)$")
+def plan_task_field_re(field: str) -> re.Pattern:
+    return re.compile(rf"^{re.escape(field)}:[ \t]*(.*)$")
+
+
+def find_plan_task_field(body: str, field: str):
+    field_re = plan_task_field_re(field)
     for line, start, _ in unfenced_markdown_lines(body):
         m = field_re.match(line)
         if m:
@@ -139,7 +143,7 @@ def _find_plan_task_field(body: str, field: str):
     return None
 
 
-def _find_next_plan_task_field_start(body: str, after: int) -> int | None:
+def find_next_plan_task_field_start(body: str, after: int) -> int | None:
     for line, start, _ in unfenced_markdown_lines(body):
         if start >= after and PLAN_TASK_FIELD_RE.match(line):
             return start
@@ -147,12 +151,12 @@ def _find_next_plan_task_field_start(body: str, after: int) -> int | None:
 
 
 def _plan_task_field_value(body: str, field: str) -> str:
-    found = _find_plan_task_field(body, field)
+    found = find_plan_task_field(body, field)
     if found is None:
         return ""
     match, line_start = found
     body_start = line_start + match.end()
-    next_start = _find_next_plan_task_field_start(body, body_start)
+    next_start = find_next_plan_task_field_start(body, body_start)
     end = next_start if next_start is not None else len(body)
     return f"{match.group(1)}\n{body[body_start:end]}".strip()
 
