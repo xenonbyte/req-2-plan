@@ -1208,26 +1208,6 @@ def _backup_path(backup_dir: Path, dest: Path) -> Path:
     return candidate
 
 
-def _safe_copy(
-    src: Path,
-    dest: Path,
-    backups: list[dict[str, str]],
-    installed_paths: list[str],
-    written: list[Path],
-    backup_dir: Path,
-) -> None:
-    """Copy src to dest, backing up dest to backup_dir if it already exists."""
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    if dest.exists():
-        backup_dir.mkdir(parents=True, exist_ok=True)
-        backup = _backup_path(backup_dir, dest)
-        shutil.copy2(str(dest), str(backup))
-        backups.append({"target": str(dest), "backup": str(backup)})
-    shutil.copy2(str(src), str(dest))
-    installed_paths.append(str(dest))
-    written.append(dest)
-
-
 def _safe_write(
     dest: Path,
     content: str,

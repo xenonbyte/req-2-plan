@@ -234,6 +234,18 @@ def _reject_symlinked_run_paths(work_id, base_path: Path | None) -> Path:
     return run_dir
 
 
+def _require_disk_version_matches(run_dir: Path, stage: Stage, aa) -> None:
+    disk_version = get_artifact_version(run_dir, stage)
+    if disk_version != aa.version:
+        print_and_exit(
+            format_error(
+                f"Active artifact version v{aa.version} does not match on-disk v{disk_version}",
+                exit_code=EXIT_CONFLICT,
+            ),
+            EXIT_CONFLICT,
+        )
+
+
 def _validate_repo_path(raw: str) -> Path:
     """Return a repo path only when it is an existing directory."""
     repo_path = Path(raw)
@@ -514,15 +526,7 @@ def _cmd_run_close(args):
             format_error("PLAN active artifact must be approved before run-close", exit_code=EXIT_CONFLICT),
             EXIT_CONFLICT,
         )
-    disk_version = get_artifact_version(run_dir, Stage.PLAN)
-    if disk_version != aa.version:
-        print_and_exit(
-            format_error(
-                f"Active artifact version v{aa.version} does not match on-disk v{disk_version}",
-                exit_code=EXIT_CONFLICT,
-            ),
-            EXIT_CONFLICT,
-        )
+    _require_disk_version_matches(run_dir, Stage.PLAN, aa)
     has_matching_plan_checkpoint = any(
         cp.stage == Stage.PLAN
         and cp.artifact == aa.artifact
@@ -1422,15 +1426,7 @@ def _cmd_gate_quality(args):
             ),
             EXIT_CONFLICT,
         )
-    version = get_artifact_version(run_dir, stage)
-    if version != aa.version:
-        print_and_exit(
-            format_error(
-                f"Active artifact version v{aa.version} does not match on-disk v{version}",
-                exit_code=EXIT_CONFLICT,
-            ),
-            EXIT_CONFLICT,
-        )
+    _require_disk_version_matches(run_dir, stage, aa)
 
     # Read artifact content
     try:
@@ -2064,15 +2060,7 @@ def _cmd_review_checkpoint(args):
             ),
             EXIT_CONFLICT,
         )
-    version = get_artifact_version(run_dir, stage)
-    if version != aa.version:
-        print_and_exit(
-            format_error(
-                f"Active artifact version v{aa.version} does not match on-disk v{version}",
-                exit_code=EXIT_CONFLICT,
-            ),
-            EXIT_CONFLICT,
-        )
+    _require_disk_version_matches(run_dir, stage, aa)
     reviews_dir = run_dir / "reviews"
     _reject_symlink_or_exit(reviews_dir, "unsafe_reviews_dir_symlink")
     reviews_dir.mkdir(parents=True, exist_ok=True)
@@ -2164,15 +2152,7 @@ def _cmd_checkpoint_decide(args):
             ),
             EXIT_CONFLICT,
         )
-    version = get_artifact_version(run_dir, stage)
-    if version != aa.version:
-        print_and_exit(
-            format_error(
-                f"Active artifact version v{aa.version} does not match on-disk v{version}",
-                exit_code=EXIT_CONFLICT,
-            ),
-            EXIT_CONFLICT,
-        )
+    _require_disk_version_matches(run_dir, stage, aa)
 
     reviews_dir = run_dir / "reviews"
     _reject_symlink_or_exit(reviews_dir, "unsafe_reviews_dir_symlink")
@@ -2320,15 +2300,7 @@ def _cmd_stage_advance(args):
             ),
             EXIT_CONFLICT,
         )
-    version = get_artifact_version(run_dir, stage)
-    if version != aa.version:
-        print_and_exit(
-            format_error(
-                f"Active artifact version v{aa.version} does not match on-disk v{version}",
-                exit_code=EXIT_CONFLICT,
-            ),
-            EXIT_CONFLICT,
-        )
+    _require_disk_version_matches(run_dir, stage, aa)
     if not any(
         cp.stage == stage and cp.artifact == aa.artifact and cp.version == aa.version
         for cp in record.approved_checkpoints

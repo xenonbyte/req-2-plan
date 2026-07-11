@@ -1037,22 +1037,7 @@ def _cmd_execute(ns: argparse.Namespace, base_path: Path) -> None:
             print("no_selected_run: true\nnext: r2p-execute --work-id <id>\n")
             sys.exit(1)
     work_id = _validate_work_id(work_id)
-    r2p_dir = base_path / ".req-to-plan"
-    run_dir = r2p_dir / work_id
-    if r2p_dir.is_symlink():
-        print(
-            "blocked: unsafe_workspace_dir_symlink\n"
-            f"work_id: {work_id}\n"
-            f"path: {r2p_dir}\n"
-        )
-        sys.exit(EXIT_CONFLICT)
-    if run_dir.is_symlink():
-        print(
-            "blocked: unsafe_run_dir_symlink\n"
-            f"work_id: {work_id}\n"
-            f"path: {run_dir}\n"
-        )
-        sys.exit(EXIT_CONFLICT)
+    run_dir = _reject_symlinked_run_paths_or_exit(base_path, work_id)
     run_path = run_dir / "run.md"
     if not run_path.exists():
         print(f"blocked: source_run_not_found\nwork_id: {work_id}\n")
