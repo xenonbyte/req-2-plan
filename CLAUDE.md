@@ -142,7 +142,9 @@ archived -> none
   (lstat → `O_NOFOLLOW` → fstat dev/ino identity; offset-preserving) — never a
   bare `path.read_text()`. A non-regular / symlinked / raced source raises
   `UnsafeRegularFileError`, surfaced as exit `6` (`cli.main` catch-all; shortcuts
-  print `blocked: unsafe_seed_source`). Pairs with the manifest-write
+  print `blocked: unsafe_seed_source` for seed/artifact reads, and
+  `blocked: unsafe_run_record` for a symlinked `run.md` loaded via
+  `_load_matching_record_or_exit`). Pairs with the manifest-write
   symlink-rejection above.
 - **Wrapper bootstrap isolation**: the `tools/r2p-*` wrappers and generated
   commands exec `python -E …/tools/workflow_cli/__main__.py <target>` — **`-E`,
@@ -170,8 +172,11 @@ archived -> none
   can't concatenate adjacent IDs/fields; fence-aware, so fenced examples stay
   verbatim). So commented-out headings, PLAN-TASK fields, trace IDs, and fenced
   snippets neither satisfy nor trip a gate. Trace-ID matching (`SPEC_ID_RE`,
-  `_SCOPE_IN_ID_RE`, `_ID_RE`) is token-boundary-aware: `SPEC-…-1` is not closed
-  by `SPEC-…-10`.
+  `_SCOPE_IN_ID_RE`, `_ID_RE`, and the closure-vicinity search in
+  `gates._find_ids_without_closure`) is token-boundary-aware: `SPEC-…-1` is not
+  closed by `SPEC-…-10`, and a line bearing only a suffixed/typo'd variant
+  (`SPEC-…-1-X` + tag) no longer self-closes the base ref (fail-closed on typo'd
+  IDs).
 - **Cross-stage trace closure**: enforced at the PLAN quality gate (every `SPEC-*`
   consumed by a PLAN-TASK, every `SCOPE-IN-*` carried into PLAN, every `RISK-*`
   closed). Intermediate stages enforce only "cited upstream ID ⇒ closure tag".
