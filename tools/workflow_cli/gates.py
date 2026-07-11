@@ -457,7 +457,8 @@ def _find_ids_without_closure(content: str) -> list[str]:
         for tag in _CLOSURE_TAGS:
             # Allow flexible spacing between ID and tag on the same general vicinity
             pattern = re.compile(
-                re.escape(ref_id) + r"[^\n]*" + re.escape(tag),
+                r"(?<![A-Za-z0-9_-])" + re.escape(ref_id) + r"(?![A-Za-z0-9_-])"
+                + r"[^\n]*" + re.escape(tag),
                 re.IGNORECASE,
             )
             if pattern.search(search_content):

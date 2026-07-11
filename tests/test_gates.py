@@ -353,6 +353,73 @@ class TestQualityGate(unittest.TestCase):
             result.issues,
         )
 
+    def test_closure_prefix_collision_reports_shorter_id_unclosed(self):
+        """A shorter ID that is a strict prefix of a closed longer ID must
+        still be reported unclosed; pre-fix the closure search silently
+        treated the shorter, unclosed ID as closed by matching inside the
+        longer one's closure line."""
+        from tools.workflow_cli.gates import _find_ids_without_closure
+
+        content_body = (
+            "Addresses REQ-AUTH-1 pending closure.\n\n"
+            "Elsewhere REQ-AUTH-10 [ADDRESSED] closes automatically.\n"
+        )
+        unclosed = _find_ids_without_closure(content_body)
+        self.assertIn("REQ-AUTH-1", unclosed)
+        self.assertNotIn("REQ-AUTH-10", unclosed)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            run_dir = Path(tmpdir)
+            tier = self._locked_tier()
+            content = (
+                "# Design\n\n"
+                "## Design Summary\ncontent\n\n"
+                "## Current Code Evidence\ncontent\n\n"
+                "## Requirements Coverage\n"
+                + content_body + "\n"
+                "## Options Considered\ncontent\n\n"
+                "## Chosen Design\ncontent\n\n"
+                "### DES-ARCH-001 Selected architecture\ncontent\n\n"
+                "## Decision Requests\nnone\n\n"
+                "## Rollback\ncontent\n\n"
+                "## Observability\ncontent\n\n"
+                "## SPEC Handoff\ncontent\n"
+            )
+            result = self.check_quality_gate(
+                run_dir, self.Stage.DESIGN, tier, [], content
+            )
+        self.assertFalse(result.passed)
+        self.assertEqual(result.exit_code, 3)
+        self.assertTrue(
+            any(
+                "'REQ-AUTH-1'" in issue and "closure status tag" in issue
+                for issue in result.issues
+            ),
+            result.issues,
+        )
+
+    def test_closure_prefix_related_ids_each_closed(self):
+        """Two prefix-related IDs, each with its own closure tag on its own
+        line, are both recognized as closed and nothing is reported."""
+        from tools.workflow_cli.gates import _find_ids_without_closure
+
+        content_body = (
+            "REQ-AUTH-1 [ADDRESSED]: short id closed here.\n\n"
+            "REQ-AUTH-10 [ADDRESSED]: long id closed separately.\n"
+        )
+        unclosed = _find_ids_without_closure(content_body)
+        self.assertEqual(unclosed, [])
+
+    def test_closure_malformed_suffix_reports_base_ref_unclosed(self):
+        """A line carrying only a suffixed malformed variant of an ID
+        (base ID + '-SUFFIX' + tag) must not self-close the base ref: the
+        base ref is reported unclosed (fails-closed on typo'd IDs)."""
+        from tools.workflow_cli.gates import _find_ids_without_closure
+
+        content_body = "REQ-AUTH-1-FOO [ADDRESSED]\n"
+        unclosed = _find_ids_without_closure(content_body)
+        self.assertIn("REQ-AUTH-1", unclosed)
+
     def test_quality_gate_passes_with_deferred_closure(self):
         """Quality gate passes when RISK-SEC-002 has [DEFERRED] closure tag."""
         with tempfile.TemporaryDirectory() as tmpdir:
