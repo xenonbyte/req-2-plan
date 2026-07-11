@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from tools.workflow_cli.atomic import atomic_write_text
+from tools.workflow_cli.atomic import atomic_write_text, read_regular_text
 from tools.workflow_cli.models import (
     ActiveArtifact,
     BundleAuthorization,
@@ -612,7 +612,7 @@ class RunStateManager:
     def load(self) -> RunRecord:
         if not self.run_path.exists():
             raise FileNotFoundError(f"run.md not found at {self.run_path}")
-        text = self.run_path.read_text(encoding="utf-8")
+        text = read_regular_text(self.run_path)
         match = re.search(r"# Workflow Run: (WF-\S+)", text)
         if not match:
             raise ValueError("Cannot parse work_id from run.md")

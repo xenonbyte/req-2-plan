@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
 
 from tools.workflow_cli.agent_shortcuts import read_active_pointer, write_active_pointer
 from tools.workflow_cli.artifact import ArtifactManager, write_artifact
+from tools.workflow_cli.atomic import UnsafeRegularFileError, read_regular_text
 from tools.workflow_cli.models import Stage, WorkId
 from tools.workflow_cli.state import RunStateManager, create_run_record
 
@@ -78,3 +80,30 @@ def test_mark_stale_does_not_follow_planted_tmp_symlink(tmp_path: Path) -> None:
     assert outside.read_text(encoding="utf-8") == "keep me"
     assert not artifact.is_symlink()
     assert "r2p_status: stale" in artifact.read_text(encoding="utf-8")
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="mkfifo unavailable on this platform")
+def test_read_regular_text_rejects_fifo(tmp_path: Path) -> None:
+    fifo_path = tmp_path / "fifo.md"
+    os.mkfifo(fifo_path)  # a FIFO with no writer must not hang the read
+
+    with pytest.raises(UnsafeRegularFileError):
+        read_regular_text(fifo_path)
+
+
+def test_read_regular_text_missing_ok_semantics(tmp_path: Path) -> None:
+    missing = tmp_path / "does-not-exist.md"
+
+    assert read_regular_text(missing, missing_ok=True) is None
+    with pytest.raises(FileNotFoundError):
+        read_regular_text(missing, missing_ok=False)
+
+
+def test_read_regular_text_rejects_symlink(tmp_path: Path) -> None:
+    target = tmp_path / "target.md"
+    target.write_text("hello", encoding="utf-8")
+    link = tmp_path / "link.md"
+    _symlink_or_skip(link, target)
+
+    with pytest.raises(UnsafeRegularFileError):
+        read_regular_text(link)

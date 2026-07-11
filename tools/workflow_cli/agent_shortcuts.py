@@ -122,6 +122,9 @@ def _load_matching_record_or_exit(manager, run_dir: Path, work_id: str):
     except FileNotFoundError:
         print(f"blocked: source_run_not_found\nwork_id: {work_id}\n")
         sys.exit(7)
+    except UnsafeRegularFileError as exc:
+        print(f"blocked: unsafe_run_record\nwork_id: {work_id}\nreason: {exc}\n")
+        sys.exit(EXIT_CONFLICT)
     embedded = str(record.work_id)
     if run_dir.name != work_id or embedded != work_id:
         print(

@@ -2262,6 +2262,35 @@ class TestExecuteShortcutAndRouting(unittest.TestCase):
             self.assertIsNone(ash.read_active_pointer(base))
             self.assertTrue(run_link.is_symlink())
 
+    def test_execute_blocks_symlinked_run_record(self):
+        import tempfile, argparse
+        from pathlib import Path
+        from tools.workflow_cli import agent_shortcuts as ash
+        from tools.workflow_cli.models import RunStatus
+        from tools.workflow_cli.output import EXIT_CONFLICT
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            work_id = "WF-20260101-exec"
+            run_dir = self._run(base, work_id, RunStatus.CLOSED_AT_PLAN_CHECKPOINT)
+            run_md = run_dir / "run.md"
+            content = run_md.read_text(encoding="utf-8")
+            run_md.unlink()
+            outside = base / "outside-run.md"
+            outside.write_text(content, encoding="utf-8")
+            run_md.symlink_to(outside)
+
+            out, code = self._capture(
+                ash._cmd_execute,
+                argparse.Namespace(work_id=work_id),
+                base,
+            )
+
+            self.assertEqual(code, EXIT_CONFLICT)
+            self.assertIn("blocked: unsafe_run_record", out)
+            self.assertIn(f"work_id: {work_id}", out)
+            self.assertTrue(run_md.is_symlink())
+
     def test_execute_json_mode_resume_emits_single_payload(self):
         import tempfile, argparse
         from pathlib import Path
