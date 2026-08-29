@@ -544,8 +544,9 @@ class TestExecuteTemplateContent(unittest.TestCase):
         self.assertIn("current branch", text)
         self.assertIn("zero-history", text)
         self.assertIn("fail closed", text)
-        self.assertIn("strict default", text)
-        self.assertIn("fast", text)
+        self.assertIn("Strict is the only current execution profile", text)
+        self.assertNotIn("fast is opt-in", text)
+        self.assertNotIn("preflight/eligibility handshake", text)
         self.assertIn("r2p-context-view", text)
 
 
