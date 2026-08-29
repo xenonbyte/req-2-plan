@@ -44,7 +44,6 @@ KNOWN_OBSOLETE_PLATFORM_TARGETS = {
     "gemini": (("commands", "r2p-adapt.toml"),),
 }
 
-
 @dataclass
 class _FileSnapshot:
     path: Path
@@ -824,6 +823,15 @@ class InstallService:
             content = backup_path.read_text(encoding="utf-8")
         except UnicodeDecodeError:
             return False
+        if target.name == "r2p-context-view":
+            source = self.repo_root / "tools" / target.name
+            try:
+                expected = _render_bin_script(
+                    source.read_text(encoding="utf-8"), self.repo_root
+                )
+            except (OSError, UnicodeDecodeError):
+                return False
+            return content == expected
         return _looks_like_managed_bin_script(content)
 
     def _strip_path_from_manifest(self, manifest_path: Path, path_str: str) -> None:
@@ -1043,7 +1051,6 @@ def _looks_like_managed_bin_script(content: str) -> bool:
         and (
             "tools.workflow_cli.agent_shortcuts" in content
             or "tools.workflow_cli.install_cli" in content
-            or 'tools.workflow_cli context-view "$@"' in content
         )
     )
     return common and (legacy or trusted_bootstrap)

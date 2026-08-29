@@ -912,6 +912,28 @@ class TestInstallService:
         assert not wrapper.exists(), "managed context-view wrapper must not be restored"
         assert not (manifest_root / "bin").exists()
 
+    def test_uninstall_restores_user_context_view_comment_script_byte_identically(self, tmp_path):
+        svc, manifest_root, _ = make_service(tmp_path)
+        wrapper = manifest_root / "bin" / "r2p-context-view"
+        wrapper.parent.mkdir(parents=True)
+        user_script = (
+            b'#!/usr/bin/env bash\n'
+            b'set -euo pipefail\n'
+            b'SCRIPT_DIR="$(cd "$(dirname "$' b'{BASH_SOURCE[0]}")" && pwd)"\n'
+            b'REPO_ROOT=/user/owned/script\n'
+            b'# exec python3 -E "$REPO_ROOT/tools/workflow_cli/__main__.py" '
+            b'tools.workflow_cli context-view "$@"\n'
+            b"printf 'user-owned wrapper\\n'\n"
+        )
+        wrapper.write_bytes(user_script)
+
+        svc.install("claude")
+        svc.install("codex")
+        svc.uninstall("claude")
+        svc.uninstall("codex")
+
+        assert wrapper.read_bytes() == user_script
+
     def test_uninstall_preserves_shared_bin_scripts_when_other_platforms_installed(self, tmp_path):
         svc, manifest_root, _ = make_service(tmp_path)
         svc.install("claude")
@@ -1179,7 +1201,6 @@ class TestInstallService:
         [
             ("-E", "tools.workflow_cli.agent_shortcuts start"),
             ("-I", "tools.workflow_cli.agent_shortcuts start"),
-            ("-E", "tools.workflow_cli context-view"),
         ],
     )
     def test_trusted_and_legacy_isolated_wrappers_are_recognized_as_managed(
