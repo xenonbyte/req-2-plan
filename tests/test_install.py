@@ -1690,6 +1690,22 @@ class TestInstallOpencode:
         ):
             assert token in content
 
+    def test_continue_command_derives_phase_two_plan_author_protocol_from_claude(self, tmp_path):
+        svc, _, ph_root = make_service(tmp_path)
+        svc.install("opencode")
+        content = (ph_root / "opencode" / "commands" / "r2p-continue.md").read_text(encoding="utf-8")
+        for token in (
+            "phase-level cohesive slice",
+            "operation-homogeneous task group",
+            "intermediate contract",
+            "Prerequisite: none",
+            "Prerequisite: PLAN-TASK-NNN",
+            "execution-prerequisite-check --work-id <id> --task <N> --require-version 1",
+            "strict-compatible",
+            "Dependencies:",
+        ):
+            assert token in content
+
     def test_install_renders_placeholders(self, tmp_path):
         svc, manifest_root, ph_root = make_service(tmp_path)
         svc.install("opencode")

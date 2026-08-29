@@ -72,6 +72,32 @@ class TestAgentTemplateCheckpointGuidance(unittest.TestCase):
             + ", ".join(missing),
         )
 
+    def test_plan_author_surfaces_carry_v1_cohesive_slice_protocol(self):
+        """SPEC-GRANULARITY-004 / SPEC-PARITY-008 stay synchronized."""
+        surfaces = [
+            "tools/workflow_cli/agent_templates/claude/SKILL.md",
+            "tools/workflow_cli/agent_templates/claude/commands/r2p-continue.md",
+            "tools/workflow_cli/agent_templates/codex/skills/r2p-continue/SKILL.md",
+            "tools/workflow_cli/agent_templates/gemini/commands/r2p-continue.toml",
+        ]
+        required_terms = (
+            "phase-level cohesive slice",
+            "operation-homogeneous task group",
+            "intermediate contract",
+            "Prerequisite: none",
+            "Prerequisite: PLAN-TASK-NNN",
+            "execution-prerequisite-check --work-id <id> --task <N> --require-version 1",
+            "strict-compatible",
+            "Dependencies:",
+        )
+        missing = []
+        for rel in surfaces:
+            text = (REPO_ROOT / rel).read_text(encoding="utf-8")
+            for term in required_terms:
+                if term not in text:
+                    missing.append(f"{rel}:{term}")
+        self.assertEqual(missing, [], f"missing Phase 2 PLAN-author protocol: {missing}")
+
 
 def _get_role_section(text, heading_prefix):
     """Return text from the line starting with heading_prefix to the next ### or ## heading."""

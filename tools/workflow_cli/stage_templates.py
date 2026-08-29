@@ -17,8 +17,17 @@ _TRACE_SKELETON = (
 )
 
 _PLAN_GRANULARITY_NOTE = (
-    "<!-- Granularity: one PLAN-TASK = one implementer subagent, one task-reviewer; "
-    "split a task spanning too many files/behaviors, merge only one indivisible behavior. -->\n"
+    "<!-- Granularity / PLAN formation: one PLAN-TASK = one implementer subagent and one task-reviewer; form a phase-level cohesive slice around one observable behavior or contract result. "
+    "If it needs both create and modify paths, R19 requires an operation-homogeneous task group: every task's "
+    "Files list contains only one operation and every task delivers an executable intermediate contract with direct tests. "
+    "Do not split by file/class alone, create a wrapper before its target, or merge unrelated behavior into a mega-task; "
+    "the group's final integration/adoption task runs Phase acceptance. -->\n"
+    "<!-- Steps contract: the first semantic line is exactly `Prerequisite: none` or `Prerequisite: PLAN-TASK-NNN`. "
+    "Declare only direct predecessors inside this task group; cross-Phase order remains PLAN order and prior Phase acceptance. "
+    "Each generated v1 PLAN Verification first runs `execution-prerequisite-check --work-id <id> --task <N> --require-version 1`; "
+    "it requires strict-compatible state and fails closed on fast-only state. -->\n"
+    "<!-- Rollback: derive declared dependents only from this group's prerequisite lines. Roll back one task only after its group's "
+    "declared dependents; roll back a whole group in reverse topological order without touching another Phase. Do not add a dependency field. -->\n"
 )  # PLN-5, seeded under "## Tasks" (an HTML comment carries no gate-scanned placeholder token)
 
 _HEADING_BODY = {

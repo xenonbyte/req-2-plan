@@ -136,6 +136,25 @@ class TestStageTemplates(unittest.TestCase):
         # granularity comes after ## Tasks but before or near the PLAN-TASK block
         self.assertGreater(granularity_pos, tasks_pos)
 
+    def test_plan_template_requires_phase_level_operation_homogeneous_groups(self):
+        """SPEC-GRANULARITY-004: seed the compatible PLAN formation contract."""
+        from tools.workflow_cli.stage_templates import template_for
+
+        text = template_for(Stage.PLAN, TierBase.STANDARD)
+        for token in (
+            "phase-level cohesive slice",
+            "operation-homogeneous task group",
+            "executable intermediate contract",
+            "Prerequisite: none",
+            "Prerequisite: PLAN-TASK-NNN",
+            "execution-prerequisite-check --work-id <id> --task <N> --require-version 1",
+            "group's declared dependents",
+            "reverse topological order",
+            "other Phase",
+        ):
+            self.assertIn(token, text)
+        self.assertNotIn("Dependencies:", text)
+
     # --- non-PLAN stage byte-identical invariant ---
 
     def test_non_plan_templates_lack_optional_plan_sections(self):
