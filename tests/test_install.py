@@ -1616,6 +1616,18 @@ class TestInstallOpencode:
         opencode_names = {p.name for p in (ph_root / "opencode" / "commands").glob("r2p-*.md")}
         assert opencode_names == _claude_command_names()
 
+    def test_execute_command_derives_phase_zero_protocol_from_claude(self, tmp_path):
+        svc, _, ph_root = make_service(tmp_path)
+        svc.install("opencode")
+        content = (ph_root / "opencode" / "commands" / "r2p-execute.md").read_text(encoding="utf-8")
+        for token in (
+            "brand-new zero-history subagent invocation",
+            "targeted or directly affected tests",
+            "execution/metrics.md",
+            "verification_records",
+        ):
+            assert token in content
+
     def test_install_renders_placeholders(self, tmp_path):
         svc, manifest_root, ph_root = make_service(tmp_path)
         svc.install("opencode")

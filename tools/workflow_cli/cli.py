@@ -7,6 +7,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import shutil
@@ -79,6 +80,15 @@ from tools.workflow_cli.markdown import (
     heading_bounded_bodies,
     plan_task_anchors,
     strip_nonsemantic_markdown,
+)
+from tools.workflow_cli.execution_metrics import (
+    MetricsFormatError,
+    PrerequisiteError,
+    RepresentativeSamplesError,
+    bootstrap_self_hosted_metrics,
+    check_prerequisite_v1,
+    start_execution_transaction,
+    validate_representative_samples,
 )
 
 
@@ -904,53 +914,97 @@ def _cmd_run_archive(args):
 
 
 def _cmd_run_execute_start(args):
-    record, mgr, run_dir = _load_run(args.work_id, args.base_path)
-    if record.status != RunStatus.CLOSED_AT_PLAN_CHECKPOINT:
-        print_and_exit(
-            format_error(
-                f"Cannot start execution in status {record.status.value!r}; "
-                "must be closed_at_plan_checkpoint (plan_not_ready)",
-                exit_code=EXIT_CONFLICT,
-            ),
-            EXIT_CONFLICT,
-        )
+    work_id = _validate_work_id(args.work_id)
     try:
-        plan_text = read_artifact(run_dir, Stage.PLAN)
-    except FileNotFoundError:
-        print_and_exit(
-            format_error("PLAN artifact not found; cannot start execution", exit_code=EXIT_NOT_FOUND),
-            EXIT_NOT_FOUND,
+        record = start_execution_transaction(
+            (args.base_path or Path.cwd()).resolve(), work_id, args.profile
         )
-    # Seed the structural progress ledger (IDs + checkboxes = structure, not
-    # semantics; the agent appends progress). CLI never generates artifact text.
-    anchors = plan_task_anchors(strip_nonsemantic_markdown(plan_text))
-    if not anchors:
+    except (MetricsFormatError, PrerequisiteError) as exc:
         print_and_exit(
-            format_error(
-                "PLAN contains no PLAN-TASK anchors; repair PLAN with "
-                "### PLAN-TASK-NNN headings before execution",
-                exit_code=EXIT_CONFLICT,
-            ),
+            format_error(str(exc), exit_code=EXIT_CONFLICT),
             EXIT_CONFLICT,
         )
-    lines = ["# Execution Progress", "", f"work_id: {record.work_id}", ""]
-    lines += [f"- [ ] {tid} {title}".rstrip() for tid, title in anchors]
-    exec_dir = run_dir / "execution"
-    _reject_symlink_or_exit(exec_dir, "unsafe_execution_dir_symlink")
-    exec_dir.mkdir(parents=True, exist_ok=True)
-    atomic_write_text(exec_dir / "progress.md", "\n".join(lines) + "\n")
-    record = update_run_status(record, RunStatus.EXECUTING)
-    update_resume_context(record, last_operation="execute_start", next_operation="implement_tasks")
-    mgr.save(record)
+    exec_dir = (args.base_path or Path.cwd()) / ".req-to-plan" / str(work_id) / "execution"
     print_and_exit(
         format_success(
             {
                 "work_id": str(record.work_id),
                 "status": record.status.value,
+                "profile": args.profile,
                 "ledger": str(exec_dir / "progress.md"),
-                "task_count": len(anchors),
             },
             message=f"Execution started: {record.work_id}",
+        ),
+        EXIT_OK,
+    )
+
+
+def _cmd_execution_prerequisite_check(args):
+    if args.require_version != 1:
+        print_and_exit(
+            format_error(
+                "requested prerequisite semantics version is unsupported",
+                exit_code=EXIT_CONFLICT,
+            ),
+            EXIT_CONFLICT,
+        )
+    try:
+        result = check_prerequisite_v1(
+            args.base_path or Path.cwd(), _validate_work_id(args.work_id), args.task
+        )
+    except (MetricsFormatError, PrerequisiteError) as exc:
+        print_and_exit(format_error(str(exc), exit_code=EXIT_CONFLICT), EXIT_CONFLICT)
+    print_and_exit(
+        format_success(
+            result,
+            message="prerequisite_satisfied",
+        ),
+        EXIT_OK,
+    )
+
+
+def _cmd_execution_metrics_bootstrap(args):
+    if args.profile != "strict" or args.self_hosted_gap_through_task != 2:
+        print_and_exit(
+            format_error("self-hosted bootstrap arguments are not canonical", exit_code=EXIT_CONFLICT),
+            EXIT_CONFLICT,
+        )
+    try:
+        parsed = bootstrap_self_hosted_metrics(
+            args.base_path or Path.cwd(), _validate_work_id(args.work_id), args.self_hosted_gap_through_task
+        )
+    except (MetricsFormatError, PrerequisiteError) as exc:
+        print_and_exit(format_error(str(exc), exit_code=EXIT_CONFLICT), EXIT_CONFLICT)
+    print_and_exit(
+        format_success(
+            {
+                "work_id": args.work_id,
+                "profile": parsed.header["profile"],
+                "task_count": parsed.header["task_count"],
+                "invocation_count": len(parsed.invocations),
+            },
+            message="metrics_bootstrapped",
+        ),
+        EXIT_OK,
+    )
+
+
+def _cmd_execution_samples_validate(args):
+    try:
+        result = validate_representative_samples(tuple(args.sample_dir))
+    except RepresentativeSamplesError as exc:
+        if is_json_mode():
+            print_and_exit(json.dumps(exc.result, ensure_ascii=False, sort_keys=True), EXIT_GATE_FAIL)
+        details = [item["message"] for item in exc.result["details"]]
+        print_and_exit(format_error(exc.result["message"], details=details, exit_code=EXIT_GATE_FAIL), EXIT_GATE_FAIL)
+    except MetricsFormatError as exc:
+        print_and_exit(format_error(str(exc), exit_code=EXIT_CONFLICT), EXIT_CONFLICT)
+    if is_json_mode():
+        print_and_exit(json.dumps(result, ensure_ascii=False, sort_keys=True), EXIT_OK)
+    print_and_exit(
+        format_success(
+            {"sample_count": len(result["samples"]), "aggregate": result["aggregate"]},
+            message=result["message"],
         ),
         EXIT_OK,
     )
@@ -1945,7 +1999,33 @@ def _register_run_commands(subparsers):
     # run-execute-start
     p = subparsers.add_parser("run-execute-start", help="Begin executing a closed run's PLAN in place")
     p.add_argument("--work-id", required=True)
+    p.add_argument("--profile", choices=["strict"], default="strict")
     p.set_defaults(func=_cmd_run_execute_start)
+
+    p = subparsers.add_parser(
+        "execution-prerequisite-check",
+        help="Read-only strict prerequisite check for an execution task",
+    )
+    p.add_argument("--work-id", required=True)
+    p.add_argument("--task", required=True, type=_positive_int)
+    p.add_argument("--require-version", required=True, type=_positive_int)
+    p.set_defaults(func=_cmd_execution_prerequisite_check)
+
+    p = subparsers.add_parser(
+        "execution-metrics-bootstrap",
+        help="Crash-idempotently bootstrap metrics for the self-hosted Phase 0 run",
+    )
+    p.add_argument("--work-id", required=True)
+    p.add_argument("--profile", required=True, choices=["strict"])
+    p.add_argument("--self-hosted-gap-through-task", required=True, type=_positive_int)
+    p.set_defaults(func=_cmd_execution_metrics_bootstrap)
+
+    p = subparsers.add_parser(
+        "execution-samples-validate",
+        help="Read-only validator for three archived strict metrics samples",
+    )
+    p.add_argument("--sample-dir", action="append", type=Path, default=[])
+    p.set_defaults(func=_cmd_execution_samples_validate)
 
     # plan-task-brief
     p = subparsers.add_parser(

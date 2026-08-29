@@ -17,6 +17,14 @@ Run `{{R2P_BIN_DIR}}/r2p-execute` and read its stop output. On a `closed_at_plan
 - If the run status is already `executing` (resume after interruption): proceed directly to the plan path.
 - Any other status → `plan_not_ready`. Stop and tell the user.
 
+`execution/progress.md` remains the only execution-state ledger. When a normal
+start succeeds it also creates controller-owned `execution/metrics.md`; that
+metrics ledger is non-authoritative and never replaces progress, completion, or
+archive gates. The controller records one ordered role block after every
+implementer, reviewer, fixer, re-reviewer, and final-role call. Record only
+measured values: unavailable model, timing, or Token values stay `unavailable`;
+do not estimate Token counts from bytes or elapsed time.
+
 ## In-Place Execution (no branch)
 
 Work directly on the **current branch** — do NOT create a new branch, worktree, or protection boundary.
@@ -106,6 +114,26 @@ The controller derives `run_dir = parent(plan)` from the execute output and hand
 
 For each PLAN-TASK (in order):
 
+### Role dispatch and verification cadence
+
+Every role call is a brand-new zero-history subagent invocation. Codex dispatch
+must set `fork_turns="none"`; if that isolation cannot be guaranteed, fail
+explicitly before dispatch. Never continue or reawaken a previous implementer,
+reviewer, fixer, re-reviewer, or final-review session. The handoff is
+self-contained: work ID/run dir, role, task brief or final input paths,
+Git/BASE boundary, verification contract, report path, and inline return
+contract — never ACS bodies, prior role prose, or controller summaries.
+
+Implementers, task reviewers, fixers, and task re-reviewers default to the
+current task's targeted or directly affected tests. Escalate that task-level
+role to the full suite only when the PLAN explicitly requires it, the task is
+shared/core/high-risk (including security or migration), targeted verification
+fails, changed files exceed the brief without a safe explanation, coverage is
+unclear, or the reviewer cannot establish sufficient confidence. Each escalation
+records `scope=full_suite` and a concrete reason in `Verification Records` and
+the controller's metrics block. Final reviewers and final re-reviewers always
+run a fresh full suite.
+
 ### 1. Run `r2p-task-brief` and obtain the task-brief path
 
 Run `{{R2P_BIN_DIR}}/r2p-task-brief --work-id <work-id> --task <N>` (where `<N>` is the task's integer, e.g. `2` for `PLAN-TASK-002`) for the current task. This installed wrapper delegates to the internal `plan-task-brief` CLI command. The command returns a `brief_path` pointing to a scoped brief file that contains the task's `Files`, `Skeleton`, `Steps`, `Spec References`, and `Verification` criteria. Pass the `brief_path` as the handoff pointer to both the implementer and the reviewer — not pasted task text from `07-plan.md`. The controller uses the returned `brief_path` without eager-reading the full task body into its own context; the implementer and reviewer read the task-brief on demand.
@@ -122,7 +150,7 @@ Provide the subagent with:
 - Global Constraints from the PLAN (`## Global Constraints`), copied verbatim when present — the brief carries only the task body, so the implementer does not otherwise see plan-level constraints
 - TDD instructions: follow `Skeleton`/`Steps`; prove `Verification` with evidence
 - A report file path (`execution/task-N-report.md`)
-  The implementer's `execution/task-N-report.md` must contain a `Verification Evidence` section (the command run and its fresh result) and a `Changed Files` section (the files the task actually changed). It must NOT contain a self-attested "Context Read" checklist. These sections are review aids; the `Changed Files` section also feeds the §5 reviewer comparison.
+  The implementer's `execution/task-N-report.md` must contain a `Verification Evidence` section (the command run and its fresh result) and a `Changed Files` section (the files the task actually changed). It must NOT contain a self-attested "Context Read" checklist. These sections are review aids; the `Changed Files` section also feeds the §5 reviewer comparison. Include ordered `Verification Records` with command, scope, reason, elapsed_seconds, and status. Return the same compact `verification_records` plus `verification_total_seconds` inline so the controller can record measured evidence.
 
 The implementer return contract is minimal and inline:
 - `status`: DONE / DONE_WITH_CONCERNS / NEEDS_CONTEXT / BLOCKED
@@ -130,6 +158,7 @@ The implementer return contract is minimal and inline:
 - `commit_range`: `<base7>..<head7>` for committed task work, or `none` if no commit was created
 - `test_summary`: one-line test summary, or `not run: <reason>`
 - `concerns`: `none` or a concise list of decision-relevant concerns, missing context, or blockers
+- `verification_records` and `verification_total_seconds`: measured verification evidence
 
 The controller uses these fields to decide whether to continue without opening the full report. The controller does not ask the implementer to restate the task.
 
@@ -175,6 +204,7 @@ Surface in `concerns` every ⚠️ "cannot verify from diff" item and every unfi
 The review report records:
 - **Spec compliance**: checked against the task brief's `Spec References` and `Verification`
 - **Code quality**: clean, tested, maintainable
+- **Verification Records**: ordered command, scope, reason, elapsed_seconds, and status evidence
 - **⚠️ DEFER items**: explicit `cannot verify from diff` warnings for requirements satisfied by unchanged code, by sibling task work, or by evidence outside the task diff
 
 ### 6. Fix loop
@@ -201,6 +231,7 @@ After all tasks complete, dispatch a final whole-branch review subagent on the *
 - Include the diff file path (`.req-to-plan/<work-id>/logs/final-diff.md`) in the reviewer dispatch; do not ask the reviewer to infer the changed range
 - Provide a final review report path (`execution/final-review-report.md`) and require detailed findings there
 - **re-run the full verification suite** on the final HEAD and attach the fresh output (per-task greens do not catch cross-task regressions)
+- Write the final review's ordered `Verification Records` and compact inline `verification_records` / `verification_total_seconds`; the controller records that final-role metrics block just as it does every other role.
 - Walk the PLAN task-by-task as a line-by-line requirements checklist; report any gap
 - Dispatch ONE fix subagent carrying the complete findings list by passing `execution/final-review-report.md`, not pasted findings (not one fixer per finding)
 - This whole-branch review is the merge gate

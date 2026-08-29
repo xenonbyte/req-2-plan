@@ -267,6 +267,30 @@ continues from the first unchecked task, and never re-runs completed work or
 restarts from scratch. If it cannot reconstruct where the interrupted task began,
 it stops and asks you rather than guessing.
 
+**Execution metrics (Phase 0).**
+
+Normal `run-execute-start` creates `execution/metrics.md` alongside progress.
+The controller owns this append-only observation ledger; it never participates
+in run state, completion, resume, final-review, or archive gates. It records a
+block for every role call with elapsed time, report bytes, verification records,
+status, concerns, fix wave, and any model or Token value the platform actually
+exposes. A missing model, timing, or Token value is written as `unavailable` —
+bytes and elapsed time must never be presented as an estimated Token count.
+
+Context bytes name the delivered payload kind: Phase 0 direct ACS uses
+`declared_payload_bytes` (the raw UTF-8 bytes of the required sources), while a
+future semantic view uses `semantic_payload_bytes`. These are auditable byte
+measurements, not a claim about model-consumed context or Token usage.
+
+The internal commands are intended for the controller and safe test tooling:
+`execution-prerequisite-check --work-id <id> --task <N> --require-version 1`,
+`execution-samples-validate` with exactly three absolute `--sample-dir` values,
+and the narrowly scoped self-host exception
+`execution-metrics-bootstrap --work-id WF-20260829-r2p-execute-token-phase-r2p --profile strict --self-hosted-gap-through-task 002`.
+Run that bootstrap only after Task 002 has a clean review and before Task 003 is
+dispatched; it records the known instrumentation gap without changing execution
+correctness.
+
 ## Development
 
 Install development dependencies:

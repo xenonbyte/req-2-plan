@@ -1,2 +1,2 @@
-description = "Execute a closed run's PLAN in place on the current branch via the subagent-driven SDD loop, then archive. Implements each PLAN-TASK with a fresh implementer subagent + task review; subagents are required."
+description = "Execute a closed run's PLAN in place on the current branch via the subagent-driven SDD loop, then archive. Strict is the only current profile; task roles default to targeted/directly affected verification and final review always runs the full suite. Every role needs a new zero-history subagent session; Gemini only forwards the wrapper, so fail closed if the host cannot provide that isolation. Metrics are controller-owned and non-authoritative."
 prompt = "!{\"{{R2P_BIN_DIR}}/r2p-execute\" {{args}}}"

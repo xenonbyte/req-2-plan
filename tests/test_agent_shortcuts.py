@@ -2102,6 +2102,11 @@ class TestExecuteShortcutAndRouting(unittest.TestCase):
         from tools.workflow_cli.state import RunStateManager, create_run_record
         from tools.workflow_cli.models import RunStatus, Stage, WorkId
         from tools.workflow_cli.artifact import write_artifact
+        if not (base / ".git").exists():
+            subprocess.run(["git", "init", "-q"], cwd=base, check=True)
+            subprocess.run(["git", "config", "user.email", "tests@example.invalid"], cwd=base, check=True)
+            subprocess.run(["git", "config", "user.name", "Tests"], cwd=base, check=True)
+            subprocess.run(["git", "commit", "--allow-empty", "-qm", "test base"], cwd=base, check=True)
         wid = WorkId(wid_str)
         run_dir = base / ".req-to-plan" / wid_str
         run_dir.mkdir(parents=True)

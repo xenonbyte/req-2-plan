@@ -537,10 +537,33 @@ class TestExecuteTemplateContent(unittest.TestCase):
                 f"{surface}: execution runs are closed; must not reference r2p-gap-open",
             )
 
+    def test_execute_surfaces_carry_phase_zero_role_and_metrics_protocol(self):
+        required = (
+            "brand-new zero-history subagent invocation",
+            "targeted or directly affected tests",
+            "shared/core/high-risk",
+            "scope=full_suite",
+            "Final reviewers and final re-reviewers always",
+            "execution/metrics.md",
+            "metrics ledger is non-authoritative",
+            "verification_records",
+            "verification_total_seconds",
+            "⚠️ DEFER",
+        )
+        for surface in EXECUTE_SURFACES:
+            text = (REPO_ROOT / surface).read_text(encoding="utf-8")
+            for token in required:
+                self.assertIn(token, text, f"{surface}: missing Phase 0 token: {token!r}")
+
+        codex = (REPO_ROOT / EXECUTE_SURFACES[1]).read_text(encoding="utf-8")
+        self.assertIn('fork_turns="none"', codex)
+
     def test_gemini_execute_toml_mentions_in_place_and_archive(self):
         text = (REPO_ROOT / "tools/workflow_cli/agent_templates/gemini/commands/r2p-execute.toml").read_text(encoding="utf-8")
         self.assertIn("r2p-execute", text)
         self.assertIn("current branch", text)
+        self.assertIn("zero-history", text)
+        self.assertIn("fail closed", text)
 
 
 if __name__ == "__main__":

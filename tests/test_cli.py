@@ -4301,6 +4301,115 @@ class TestRunArchive:
             assert rec.status.value == "closed_at_plan_checkpoint"
 
 
+class TestExecutionPhaseZeroIntegration:
+    def test_execute_start_defaults_to_strict_transaction_and_formats_human_result(self, monkeypatch):
+        from tools.workflow_cli import cli
+        from tools.workflow_cli.models import WorkId
+        from types import SimpleNamespace
+
+        calls = []
+        record = SimpleNamespace(work_id=WorkId("WF-20260101-exec"), status=RunStatus.EXECUTING)
+
+        def transaction(base_path, work_id, profile):
+            calls.append((base_path, work_id, profile))
+            return record
+
+        monkeypatch.setattr(cli, "start_execution_transaction", transaction, raising=False)
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output), pytest.raises(SystemExit) as exc:
+            main([
+                "--base-path", "/tmp/phase-zero", "run-execute-start",
+                "--work-id", "WF-20260101-exec",
+            ])
+
+        assert exc.value.code == 0
+        assert calls == [(Path("/tmp/phase-zero").resolve(), WorkId("WF-20260101-exec"), "strict")]
+        assert "Execution started: WF-20260101-exec" in output.getvalue()
+        assert "profile: strict" in output.getvalue()
+
+        monkeypatch.setenv("R2P_JSON", "1")
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output), pytest.raises(SystemExit) as exc:
+            main([
+                "--base-path", "/tmp/phase-zero", "run-execute-start",
+                "--work-id", "WF-20260101-exec",
+            ])
+        assert exc.value.code == 0
+        payload = json.loads(output.getvalue())
+        assert payload["status"] == "executing"
+        assert payload["profile"] == "strict"
+
+    def test_execution_prerequisite_check_v1_formats_result_and_rejects_v2(self, monkeypatch):
+        from tools.workflow_cli import cli
+
+        expected = {
+            "work_id": "WF-20260101-exec",
+            "task": 3,
+            "implementation_version": 1,
+            "semantics_version": 1,
+            "effective_profile": "strict",
+            "prerequisite": "PLAN-TASK-002",
+            "satisfied": True,
+        }
+        monkeypatch.setattr(cli, "check_prerequisite_v1", lambda *args: expected, raising=False)
+
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output), pytest.raises(SystemExit) as exc:
+            main([
+                "--base-path", "/tmp/phase-zero", "execution-prerequisite-check",
+                "--work-id", "WF-20260101-exec", "--task", "3", "--require-version", "1",
+            ])
+        assert exc.value.code == 0
+        assert "prerequisite_satisfied" in output.getvalue()
+        assert "implementation_version: 1" in output.getvalue()
+        assert "semantics_version: 1" in output.getvalue()
+
+        with pytest.raises(SystemExit) as exc:
+            main([
+                "--base-path", "/tmp/phase-zero", "execution-prerequisite-check",
+                "--work-id", "WF-20260101-exec", "--task", "3", "--require-version", "2",
+            ])
+        assert exc.value.code == 6
+
+    def test_bootstrap_and_samples_commands_preserve_core_result_shapes(self, monkeypatch):
+        from tools.workflow_cli import cli
+        from types import SimpleNamespace
+
+        monkeypatch.setattr(
+            cli,
+            "bootstrap_self_hosted_metrics",
+            lambda *args: SimpleNamespace(header={"profile": "strict", "task_count": 9}, invocations=()),
+            raising=False,
+        )
+        monkeypatch.setattr(
+            cli,
+            "validate_representative_samples",
+            lambda paths: {"status": "ok", "message": "representative_metrics_accepted", "samples": [], "aggregate": {}},
+            raising=False,
+        )
+
+        bootstrap = io.StringIO()
+        with contextlib.redirect_stdout(bootstrap), pytest.raises(SystemExit) as exc:
+            main([
+                "--base-path", "/tmp/phase-zero", "execution-metrics-bootstrap",
+                "--work-id", "WF-20260829-r2p-execute-token-phase-r2p",
+                "--profile", "strict", "--self-hosted-gap-through-task", "002",
+            ])
+        assert exc.value.code == 0
+        assert "metrics_bootstrapped" in bootstrap.getvalue()
+
+        samples = io.StringIO()
+        with contextlib.redirect_stdout(samples), pytest.raises(SystemExit) as exc:
+            main([
+                "execution-samples-validate",
+                "--sample-dir", "/tmp/WF-20260101-one",
+                "--sample-dir", "/tmp/WF-20260101-two",
+                "--sample-dir", "/tmp/WF-20260101-three",
+            ])
+        assert exc.value.code == 0
+        assert "representative_metrics_accepted" in samples.getvalue()
+
+
 class TestRunExecuteStart:
     _PLAN_WITH_READONLY_PHANTOM_TASK = (
         "# Plan\n\n## Tasks\n"
@@ -4315,6 +4424,11 @@ class TestRunExecuteStart:
         from tools.workflow_cli.state import RunStateManager, create_run_record
         from tools.workflow_cli.models import RunStatus, Stage, WorkId
         from tools.workflow_cli.artifact import write_artifact
+        if not (base / ".git").exists():
+            subprocess.run(["git", "init", "-q"], cwd=base, check=True)
+            subprocess.run(["git", "config", "user.email", "tests@example.invalid"], cwd=base, check=True)
+            subprocess.run(["git", "config", "user.name", "Tests"], cwd=base, check=True)
+            subprocess.run(["git", "commit", "--allow-empty", "-qm", "test base"], cwd=base, check=True)
         wid = WorkId(wid_str)
         run_dir = base / ".req-to-plan" / wid_str
         run_dir.mkdir(parents=True)
@@ -4396,8 +4510,9 @@ class TestRunExecuteStart:
             run_dir = self._closed_run_with_plan(base, "WF-20260101-exec", plan)
             (run_dir / "execution").write_text("not a directory", encoding="utf-8")
 
-            with pytest.raises(FileExistsError):
+            with pytest.raises(SystemExit) as exc:
                 main(["--base-path", str(base), "run-execute-start", "--work-id", "WF-20260101-exec"])
+            assert exc.value.code == 6
 
             rec = RunStateManager(run_dir).load()
             assert rec.status.value == "closed_at_plan_checkpoint"
@@ -4536,14 +4651,22 @@ class TestRunExecuteStart:
             assert scan_open_runs(base) == ["WF-20260101-exec-r1"]
 
     def test_execute_start_refuses_when_not_closed(self):
+        from tools.workflow_cli.artifact import write_artifact
         from tools.workflow_cli.state import RunStateManager, create_run_record
-        from tools.workflow_cli.models import WorkId
+        from tools.workflow_cli.models import Stage, WorkId
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
             wid = WorkId("WF-20260101-open")
             run_dir = base / ".req-to-plan" / "WF-20260101-open"
             run_dir.mkdir(parents=True)
             RunStateManager(run_dir).save(create_run_record(wid))  # ACTIVE_STAGE_DRAFT
+            write_artifact(
+                run_dir,
+                Stage.PLAN,
+                "# Plan\n\n### PLAN-TASK-001: task\n",
+                version=1,
+                status="approved",
+            )
             with pytest.raises(SystemExit) as exc:
                 main(["--base-path", str(base), "run-execute-start", "--work-id", "WF-20260101-open"])
             assert exc.value.code == 6  # EXIT_CONFLICT
@@ -4939,6 +5062,11 @@ class TestExecuteStartDoesNotSeedFinalReview:
         from tools.workflow_cli.state import RunStateManager, create_run_record
         from tools.workflow_cli.models import RunStatus, Stage, WorkId
         from tools.workflow_cli.artifact import write_artifact
+        if not (base / ".git").exists():
+            subprocess.run(["git", "init", "-q"], cwd=base, check=True)
+            subprocess.run(["git", "config", "user.email", "tests@example.invalid"], cwd=base, check=True)
+            subprocess.run(["git", "config", "user.name", "Tests"], cwd=base, check=True)
+            subprocess.run(["git", "commit", "--allow-empty", "-qm", "test base"], cwd=base, check=True)
         wid = WorkId(wid_str)
         run_dir = base / ".req-to-plan" / wid_str
         run_dir.mkdir(parents=True)
