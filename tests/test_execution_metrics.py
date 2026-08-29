@@ -1,11 +1,13 @@
 """Direct contracts for the Phase 0 metrics core."""
 from __future__ import annotations
 
-import json
+import errno
 import fcntl
+import json
 import os
 from pathlib import Path
 import re
+import stat
 
 import pytest
 
@@ -86,6 +88,34 @@ input_tokens: unavailable
 output_tokens: unavailable
 total_tokens: unavailable
 """
+
+
+def _bootstrap_ready_run(tmp_path: Path) -> tuple[WorkId, Path, Path, str, str, str]:
+    work_id = WorkId("WF-20260829-r2p-execute-token-phase-r2p")
+    run_dir = tmp_path / ".req-to-plan" / str(work_id)
+    record = create_run_record(work_id)
+    record.status = RunStatus.EXECUTING
+    record.current_stage = Stage.CLOSED
+    RunStateManager(run_dir).save(record)
+    write_artifact(run_dir, Stage.PLAN, _plan(9), version=1, status="approved")
+    base = _git_init(tmp_path)
+    task_one = _commit(tmp_path, "task-one")
+    task_two = _commit(tmp_path, "task-two")
+    execution = run_dir / "execution"
+    execution.mkdir()
+    rows = [
+        f"- [x] PLAN-TASK-{number:03d} task {number}"
+        if number < 3 else f"- [ ] PLAN-TASK-{number:03d} task {number}"
+        for number in range(1, 10)
+    ]
+    (execution / "progress.md").write_text("\n".join([
+        "# Execution Progress", "", f"work_id: {work_id}", "", f"Execution BASE: {base}", "",
+        *rows,
+        f"Task 1: complete (commits {base[:7]}..{task_one[:7]}, review clean)",
+        f"Task 2: complete (commits {task_one[:7]}..{task_two[:7]}, review clean)",
+        "",
+    ]), encoding="utf-8")
+    return work_id, run_dir, execution, base, task_one, task_two
 
 
 def test_quantize_elapsed_seconds_uses_monotonic_nanoseconds_and_half_up():
@@ -286,7 +316,7 @@ def test_prerequisite_v1_supports_later_strict_tasks(tmp_path):
     assert result["satisfied"] is True
 
 
-def test_bootstrap_retry_accepts_complete_task_three_plus_blocks(tmp_path):
+def test_bootstrap_retry_accepts_complete_task_three_blocks(tmp_path):
     work_id = WorkId("WF-20260829-r2p-execute-token-phase-r2p")
     run_dir = tmp_path / ".req-to-plan" / str(work_id)
     record = create_run_record(work_id)
@@ -308,14 +338,25 @@ def test_bootstrap_retry_accepts_complete_task_three_plus_blocks(tmp_path):
 
     first = bootstrap_self_hosted_metrics(tmp_path, work_id, 2)
     metrics_path = execution / "metrics.md"
-    metrics_path.write_text(metrics_path.read_text(encoding="utf-8") + _invocation("implementer", 3, 1), encoding="utf-8")
-    with (execution / "progress.md").open("a", encoding="utf-8") as stream:
-        stream.write(f"Task 3: complete (commits {task_two[:7]}..{task_two[:7]}, review clean)\n")
+    metrics_path.write_text(
+        metrics_path.read_text(encoding="utf-8")
+        + _invocation("implementer", 3, 1)
+        + "\n"
+        + _invocation("task_reviewer", 3, 2),
+        encoding="utf-8",
+    )
+    progress_path = execution / "progress.md"
+    progress = progress_path.read_text(encoding="utf-8").replace(
+        "- [ ] PLAN-TASK-003 task 3",
+        "- [x] PLAN-TASK-003 task 3",
+    )
+    progress += f"Task 3: complete (commits {task_two[:7]}..{task_two[:7]}, review clean)\n"
+    progress_path.write_text(progress, encoding="utf-8")
 
     retried = bootstrap_self_hosted_metrics(tmp_path, work_id, 2)
 
     assert first.header == retried.header
-    assert len(retried.invocations) == 1
+    assert len(retried.invocations) == 2
     assert retried.invocations[0]["task"] == 3
 
 
@@ -572,3 +613,250 @@ def test_prerequisite_v1_rejects_fast_only_state(tmp_path):
     ]), encoding="utf-8")
     with pytest.raises(PrerequisiteError, match="strict"):
         check_prerequisite_v1(tmp_path, work_id, 1)
+
+
+def test_representative_samples_reject_metrics_header_for_another_work_id(tmp_path):
+    one = _archived_sample(tmp_path, "WF-20260830-identity-one", 1, "single_module_code")
+    two = _archived_sample(tmp_path, "WF-20260830-identity-two", 2, "single_module_code")
+    three = _archived_sample(tmp_path, "WF-20260830-identity-three", 1, "docs_only")
+    metrics_path = one / "execution" / "metrics.md"
+    metrics_path.write_text(
+        metrics_path.read_text(encoding="utf-8").replace(
+            "work_id: WF-20260830-identity-one",
+            "work_id: WF-20260830-identity-two",
+            1,
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(RepresentativeSamplesError) as error:
+        validate_representative_samples((one, two, three))
+
+    assert error.value.result["details"] == [{
+        "sample_dir": str(one),
+        "work_id": "WF-20260830-identity-one",
+        "rule": "identity_unique",
+        "message": "metrics work_id does not match the pinned sample identity",
+    }]
+    assert "# Execution Metrics" not in error.value.result["details"][0]["message"]
+
+
+def test_bootstrap_retry_rejects_skipped_task_invocation(tmp_path):
+    work_id, _, execution, _, _, _ = _bootstrap_ready_run(tmp_path)
+    bootstrap_self_hosted_metrics(tmp_path, work_id, 2)
+    metrics_path = execution / "metrics.md"
+    metrics_path.write_text(
+        metrics_path.read_text(encoding="utf-8") + _invocation("implementer", 4, 1),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(MetricsFormatError, match="progress|Task 003|state"):
+        bootstrap_self_hosted_metrics(tmp_path, work_id, 2)
+
+
+def test_bootstrap_retry_accepts_contiguous_complete_then_active_task(tmp_path):
+    work_id, _, execution, _, _, task_two = _bootstrap_ready_run(tmp_path)
+    bootstrap_self_hosted_metrics(tmp_path, work_id, 2)
+    metrics_path = execution / "metrics.md"
+    metrics_path.write_text(
+        metrics_path.read_text(encoding="utf-8")
+        + _invocation("implementer", 3, 1)
+        + "\n"
+        + _invocation("task_reviewer", 3, 2)
+        + "\n"
+        + _invocation("implementer", 4, 3),
+        encoding="utf-8",
+    )
+    progress_path = execution / "progress.md"
+    progress = progress_path.read_text(encoding="utf-8").replace(
+        "- [ ] PLAN-TASK-003 task 3",
+        "- [x] PLAN-TASK-003 task 3",
+    )
+    progress += f"Task 3: complete (commits {task_two[:7]}..{task_two[:7]}, review clean)\n"
+    progress_path.write_text(progress, encoding="utf-8")
+
+    parsed = bootstrap_self_hosted_metrics(tmp_path, work_id, 2)
+
+    assert [item["task"] for item in parsed.invocations] == [3, 3, 4]
+
+
+def test_bootstrap_retry_rejects_out_of_order_task_groups(tmp_path):
+    work_id, _, execution, _, _, task_two = _bootstrap_ready_run(tmp_path)
+    bootstrap_self_hosted_metrics(tmp_path, work_id, 2)
+    metrics_path = execution / "metrics.md"
+    metrics_path.write_text(
+        metrics_path.read_text(encoding="utf-8")
+        + _invocation("implementer", 3, 1)
+        + "\n"
+        + _invocation("task_reviewer", 3, 2)
+        + "\n"
+        + _invocation("implementer", 4, 3)
+        + "\n"
+        + _invocation("implementer", 3, 4),
+        encoding="utf-8",
+    )
+    progress_path = execution / "progress.md"
+    progress = progress_path.read_text(encoding="utf-8").replace(
+        "- [ ] PLAN-TASK-003 task 3",
+        "- [x] PLAN-TASK-003 task 3",
+    )
+    progress += f"Task 3: complete (commits {task_two[:7]}..{task_two[:7]}, review clean)\n"
+    progress_path.write_text(progress, encoding="utf-8")
+
+    with pytest.raises(MetricsFormatError, match="ordered|frontier"):
+        bootstrap_self_hosted_metrics(tmp_path, work_id, 2)
+
+
+@pytest.mark.parametrize("replacement", ["regular", "symlink"])
+def test_bootstrap_rejects_pre_link_temp_replacement(tmp_path, monkeypatch, replacement):
+    work_id, _, execution, _, _, _ = _bootstrap_ready_run(tmp_path)
+    import tools.workflow_cli.execution_metrics as metrics_module
+
+    original_link = metrics_module.os.link
+
+    def replace_source_then_link(src, dst, *, src_dir_fd, dst_dir_fd, follow_symlinks):
+        metrics_module.os.unlink(src, dir_fd=src_dir_fd)
+        if replacement == "regular":
+            fd = metrics_module.os.open(
+                src,
+                metrics_module.os.O_WRONLY | metrics_module.os.O_CREAT | metrics_module.os.O_EXCL,
+                0o600,
+                dir_fd=src_dir_fd,
+            )
+            try:
+                metrics_module.os.write(fd, b"foreign\n")
+            finally:
+                metrics_module.os.close(fd)
+        else:
+            metrics_module.os.symlink("foreign-target", src, dir_fd=src_dir_fd)
+        return original_link(
+            src,
+            dst,
+            src_dir_fd=src_dir_fd,
+            dst_dir_fd=dst_dir_fd,
+            follow_symlinks=follow_symlinks,
+        )
+
+    monkeypatch.setattr(metrics_module.os, "link", replace_source_then_link)
+
+    with pytest.raises(MetricsFormatError, match="identity"):
+        bootstrap_self_hosted_metrics(tmp_path, work_id, 2)
+
+    assert (execution / "metrics.md").exists() or (execution / "metrics.md").is_symlink()
+
+
+def test_bootstrap_rejects_post_link_final_name_replacement(tmp_path, monkeypatch):
+    work_id, _, execution, _, _, _ = _bootstrap_ready_run(tmp_path)
+    import tools.workflow_cli.execution_metrics as metrics_module
+
+    original_link = metrics_module.os.link
+
+    def replace_final_after_link(src, dst, *, src_dir_fd, dst_dir_fd, follow_symlinks):
+        original_link(
+            src,
+            dst,
+            src_dir_fd=src_dir_fd,
+            dst_dir_fd=dst_dir_fd,
+            follow_symlinks=follow_symlinks,
+        )
+        metrics_module.os.unlink(dst, dir_fd=dst_dir_fd)
+        fd = metrics_module.os.open(
+            dst,
+            metrics_module.os.O_WRONLY | metrics_module.os.O_CREAT | metrics_module.os.O_EXCL,
+            0o600,
+            dir_fd=dst_dir_fd,
+        )
+        try:
+            metrics_module.os.write(fd, b"foreign\n")
+        finally:
+            metrics_module.os.close(fd)
+
+    monkeypatch.setattr(metrics_module.os, "link", replace_final_after_link)
+
+    with pytest.raises(MetricsFormatError, match="identity"):
+        bootstrap_self_hosted_metrics(tmp_path, work_id, 2)
+
+    assert (execution / "metrics.md").read_text(encoding="utf-8") == "foreign\n"
+
+
+def test_bootstrap_eexist_exact_publish_is_idempotent_and_retains_abandoned_temp(tmp_path, monkeypatch):
+    work_id, _, execution, _, _, _ = _bootstrap_ready_run(tmp_path)
+    import tools.workflow_cli.execution_metrics as metrics_module
+
+    original_link = metrics_module.os.link
+
+    def publish_then_report_eexist(src, dst, *, src_dir_fd, dst_dir_fd, follow_symlinks):
+        original_link(
+            src,
+            dst,
+            src_dir_fd=src_dir_fd,
+            dst_dir_fd=dst_dir_fd,
+            follow_symlinks=follow_symlinks,
+        )
+        raise FileExistsError(errno.EEXIST, "injected concurrent exact publish")
+
+    monkeypatch.setattr(metrics_module.os, "link", publish_then_report_eexist)
+
+    parsed = bootstrap_self_hosted_metrics(tmp_path, work_id, 2)
+
+    assert parsed.header["work_id"] == str(work_id)
+    assert (execution / "metrics.md").is_file()
+    assert len(list(execution.glob(".metrics-bootstrap.*.tmp"))) == 1
+
+
+@pytest.mark.parametrize("directory_fsync_call", [1, 2])
+def test_bootstrap_directory_fsync_crash_retries_from_exact_final(
+    tmp_path,
+    monkeypatch,
+    directory_fsync_call,
+):
+    work_id, _, execution, _, _, _ = _bootstrap_ready_run(tmp_path)
+    import tools.workflow_cli.execution_metrics as metrics_module
+
+    original_fsync = metrics_module.os.fsync
+    observed = 0
+
+    def fail_selected_directory_fsync(fd):
+        nonlocal observed
+        if stat.S_ISDIR(metrics_module.os.fstat(fd).st_mode) and (execution / "metrics.md").exists():
+            observed += 1
+            if observed == directory_fsync_call:
+                raise OSError("injected directory fsync failure")
+        return original_fsync(fd)
+
+    monkeypatch.setattr(metrics_module.os, "fsync", fail_selected_directory_fsync)
+    with pytest.raises(OSError, match="directory fsync"):
+        bootstrap_self_hosted_metrics(tmp_path, work_id, 2)
+
+    monkeypatch.setattr(metrics_module.os, "fsync", original_fsync)
+    parsed = bootstrap_self_hosted_metrics(tmp_path, work_id, 2)
+    assert parsed.header["work_id"] == str(work_id)
+
+
+def test_bootstrap_temp_cleanup_crash_retries_without_deleting_final(tmp_path, monkeypatch):
+    work_id, _, execution, _, _, _ = _bootstrap_ready_run(tmp_path)
+    import tools.workflow_cli.execution_metrics as metrics_module
+
+    original_unlink = metrics_module.os.unlink
+    injected = False
+
+    def fail_published_temp_cleanup(path, *, dir_fd=None):
+        nonlocal injected
+        if (
+            not injected
+            and isinstance(path, str)
+            and path.startswith(".metrics-bootstrap.")
+            and (execution / "metrics.md").exists()
+        ):
+            injected = True
+            raise OSError("injected temp cleanup failure")
+        return original_unlink(path, dir_fd=dir_fd)
+
+    monkeypatch.setattr(metrics_module.os, "unlink", fail_published_temp_cleanup)
+    with pytest.raises(OSError, match="temp cleanup"):
+        bootstrap_self_hosted_metrics(tmp_path, work_id, 2)
+
+    monkeypatch.setattr(metrics_module.os, "unlink", original_unlink)
+    parsed = bootstrap_self_hosted_metrics(tmp_path, work_id, 2)
+    assert parsed.header["work_id"] == str(work_id)
+    assert len(list(execution.glob(".metrics-bootstrap.*.tmp"))) == 1

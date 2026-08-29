@@ -927,6 +927,65 @@ def _bootstrap_metrics_text(work_id: WorkId, profile: str, task_count: int) -> s
     ))
 
 
+def _validate_bootstrap_retry_state(
+    progress: str,
+    rows: list[tuple[str, str]],
+    invocations: tuple[dict[str, Any], ...],
+) -> None:
+    """Bind Task 003+ metrics groups to the strict progress frontier."""
+    completed: set[int] = set()
+    untouched_seen = False
+    marker_like = re.findall(r"^Task (\d+): (?:implemented|complete).*$", progress, re.MULTILINE)
+    valid_markers = 0
+    for number, (checked, _) in enumerate(rows, start=1):
+        marker = _marker_for(progress, number)
+        if marker is not None:
+            valid_markers += 1
+        if (checked == "x") != (marker is not None):
+            raise MetricsFormatError("bootstrap progress checkbox/task marker state is inconsistent")
+        if checked == "x":
+            if untouched_seen:
+                raise MetricsFormatError("bootstrap progress reviewed-complete tasks are not a prefix")
+            completed.add(number)
+        else:
+            untouched_seen = True
+    if len(marker_like) != valid_markers or not {1, 2} <= completed:
+        raise MetricsFormatError("bootstrap progress task markers are malformed or incomplete")
+
+    groups: dict[int, list[dict[str, Any]]] = {}
+    last_task = 2
+    seen_final = False
+    for invocation in invocations:
+        task = invocation["task"]
+        if task == "final":
+            if len(completed) != len(rows):
+                raise MetricsFormatError("bootstrap final invocation precedes completed progress")
+            seen_final = True
+            continue
+        if seen_final or task < 3:
+            raise MetricsFormatError("bootstrap invocation blocks are not Task 003+ ordered state")
+        if task != last_task:
+            if task != last_task + 1 or last_task not in completed:
+                raise MetricsFormatError("bootstrap invocation task skips the legal progress frontier")
+            last_task = task
+        groups.setdefault(task, []).append(invocation)
+
+    completed_after_bootstrap = sorted(number for number in completed if number >= 3)
+    if completed_after_bootstrap != list(range(3, 3 + len(completed_after_bootstrap))):
+        raise MetricsFormatError("bootstrap completed task state is not contiguous from Task 003")
+    if any(number not in groups for number in completed_after_bootstrap):
+        raise MetricsFormatError("bootstrap completed progress task lacks invocation evidence")
+    for number, group in groups.items():
+        roles = [item["role"] for item in group]
+        if roles[0] != "implementer":
+            raise MetricsFormatError("bootstrap task invocation group must start with implementer")
+        if number in completed and not any(
+            item["role"] in {"task_reviewer", "task_rereviewer"} and item["status"] == "approved"
+            for item in group
+        ):
+            raise MetricsFormatError("bootstrap completed task lacks approved review evidence")
+
+
 def bootstrap_self_hosted_metrics(base_path: Path, work_id: WorkId, through_task: int) -> ParsedMetrics:
     """Crash-idempotently publish or validate the self-hosted metrics ledger."""
     if str(work_id) != SELF_HOSTED_WORK_ID or through_task != 2:
@@ -971,16 +1030,7 @@ def bootstrap_self_hosted_metrics(base_path: Path, work_id: WorkId, through_task
             parsed = parse_metrics(existing)
             if parsed.header != expected_header:
                 raise MetricsFormatError("existing metrics header does not match bootstrap")
-            seen_final = False
-            last_task = 2
-            for invocation in parsed.invocations:
-                task = invocation["task"]
-                if task == "final":
-                    seen_final = True
-                    continue
-                if seen_final or task < 3 or task < last_task:
-                    raise MetricsFormatError("bootstrap invocation blocks are not Task 003+ ordered state")
-                last_task = task
+            _validate_bootstrap_retry_state(progress, rows, parsed.invocations)
             return parsed
 
         if re.search(r"^Task [3-9]:", progress, re.MULTILINE):
@@ -1142,6 +1192,13 @@ def _summarize_sample(
     failures: list[dict[str, str]] = []
     header = parsed.header
 
+    if header["work_id"] != str(work_id):
+        failures.append(_sample_failure(
+            canonical,
+            str(work_id),
+            "identity_unique",
+            "metrics work_id does not match the pinned sample identity",
+        ))
     if record.status != RunStatus.ARCHIVED or header["profile"] != "strict" or str(work_id) == SELF_HOSTED_WORK_ID:
         failures.append(_sample_failure(canonical, str(work_id), "archived_strict", "sample must be an archived strict non-self-hosted run"))
     if (
