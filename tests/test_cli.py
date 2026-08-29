@@ -4384,7 +4384,20 @@ class TestExecutionPhaseZeroIntegration:
         monkeypatch.setattr(
             cli,
             "validate_representative_samples",
-            lambda paths: {"status": "ok", "message": "representative_metrics_accepted", "samples": [], "aggregate": {}},
+            lambda paths: {
+                "status": "ok",
+                "message": "representative_metrics_accepted",
+                "samples": [],
+                "aggregate": {
+                    "sample_count": 0,
+                    "work_ids": [],
+                    "task_counts": [],
+                    "change_shapes": [],
+                    "task_count_diverse": False,
+                    "change_shape_diverse": False,
+                    "representative": False,
+                },
+            },
             raising=False,
         )
 
@@ -4460,6 +4473,110 @@ class TestExecutionPhaseZeroIntegration:
             '{"details":[{"message":"sample is incomplete","sample":"WF-20260101-one"}],'
             '"message":"representative_metrics_missing","status":"blocked"}\n'
         )
+
+    def test_samples_validator_human_success_renders_complete_audit_and_status_last(self, monkeypatch):
+        from tools.workflow_cli import cli
+
+        sample = {
+            "path": "/samples/WF-20260101-one",
+            "work_id": "WF-20260101-one",
+            "r2p_version": "1.2.3",
+            "instrumentation_schema": 1,
+            "profile": "strict",
+            "task_count": 2,
+            "change_shape": "single_module_code",
+            "instrumentation_complete": True,
+            "bootstrap_gap": "none",
+            "metrics_finalized": True,
+            "plan_complete": True,
+            "final_verdict": "Approved",
+            "invocation_count": 5,
+            "role_counts": {
+                "implementer": 2,
+                "task_reviewer": 2,
+                "fixer": 0,
+                "task_rereviewer": 0,
+                "final_reviewer": 1,
+                "final_fixer": 0,
+                "final_rereviewer": 0,
+            },
+            "role_elapsed_total_seconds": "1.000000",
+            "verification_total_seconds": "0.500000",
+            "report_bytes_total": 123,
+            "full_suite": {"count": 1, "duration_seconds": "0.250000"},
+            "context_totals": {
+                "direct_acs": {
+                    "invocation_count": 5,
+                    "context_bytes_kind": "declared_payload_bytes",
+                    "context_bytes": 456,
+                },
+                "semantic_view": {
+                    "invocation_count": 0,
+                    "context_bytes_kind": "semantic_payload_bytes",
+                    "context_bytes": 0,
+                },
+            },
+            "token_totals": {
+                "status": "unavailable",
+                "input_tokens": "unavailable",
+                "output_tokens": "unavailable",
+                "total_tokens": "unavailable",
+            },
+            "rules": [
+                {"rule": "path_safety", "status": "passed", "details": []},
+                {"rule": "role_coverage", "status": "passed", "details": []},
+            ],
+        }
+        monkeypatch.setattr(
+            cli,
+            "validate_representative_samples",
+            lambda paths: {
+                "status": "ok",
+                "message": "representative_metrics_accepted",
+                "samples": [sample],
+                "aggregate": {
+                    "sample_count": 1,
+                    "work_ids": [sample["work_id"]],
+                    "task_counts": [2],
+                    "change_shapes": ["single_module_code"],
+                    "task_count_diverse": False,
+                    "change_shape_diverse": False,
+                    "representative": True,
+                },
+            },
+            raising=False,
+        )
+
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output), pytest.raises(SystemExit) as exc:
+            main([
+                "execution-samples-validate",
+                "--sample-dir", "/samples/WF-20260101-one",
+                "--sample-dir", "/samples/WF-20260101-two",
+                "--sample-dir", "/samples/WF-20260101-three",
+            ])
+
+        assert exc.value.code == 0
+        lines = output.getvalue().splitlines()
+        for expected in (
+            "sample 1:",
+            "path: /samples/WF-20260101-one",
+            "work_id: WF-20260101-one",
+            "instrumentation_schema: 1",
+            "final_verdict: Approved",
+            "role_counts:",
+            "implementer: 2",
+            "full_suite:",
+            "context_totals:",
+            "token_totals:",
+            "rules:",
+            "path_safety: passed",
+            "role_coverage: passed",
+            "aggregate:",
+            "representative: True",
+        ):
+            assert any(expected in line for line in lines), expected
+        assert lines[-1] == "status: representative_metrics_accepted"
 
 
 class TestRunExecuteStart:

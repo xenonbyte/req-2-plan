@@ -989,6 +989,79 @@ def _cmd_execution_metrics_bootstrap(args):
     )
 
 
+def _format_representative_samples_human(result: dict) -> str:
+    """Render the validator's typed success result as a complete audit record."""
+    lines = ["samples:"]
+    role_names = (
+        "implementer",
+        "task_reviewer",
+        "fixer",
+        "task_rereviewer",
+        "final_reviewer",
+        "final_fixer",
+        "final_rereviewer",
+    )
+    sample_fields = (
+        "path",
+        "work_id",
+        "r2p_version",
+        "instrumentation_schema",
+        "profile",
+        "task_count",
+        "change_shape",
+        "instrumentation_complete",
+        "bootstrap_gap",
+        "metrics_finalized",
+        "plan_complete",
+        "final_verdict",
+        "invocation_count",
+        "role_elapsed_total_seconds",
+        "verification_total_seconds",
+        "report_bytes_total",
+    )
+    for index, sample in enumerate(result["samples"], start=1):
+        lines.append(f"sample {index}:")
+        lines.extend(f"  {field}: {sample[field]}" for field in sample_fields)
+        lines.append("  role_counts:")
+        lines.extend(f"    {role}: {sample['role_counts'][role]}" for role in role_names)
+        lines.append("  full_suite:")
+        lines.append(f"    count: {sample['full_suite']['count']}")
+        lines.append(f"    duration_seconds: {sample['full_suite']['duration_seconds']}")
+        lines.append("  context_totals:")
+        for mode in ("direct_acs", "semantic_view"):
+            context = sample["context_totals"][mode]
+            lines.append(f"    {mode}:")
+            lines.append(f"      invocation_count: {context['invocation_count']}")
+            lines.append(f"      context_bytes_kind: {context['context_bytes_kind']}")
+            lines.append(f"      context_bytes: {context['context_bytes']}")
+        lines.append("  token_totals:")
+        for field in ("status", "input_tokens", "output_tokens", "total_tokens"):
+            lines.append(f"    {field}: {sample['token_totals'][field]}")
+        lines.append("  rules:")
+        for rule in sample["rules"]:
+            lines.append(f"    {rule['rule']}: {rule['status']}")
+            details = rule["details"]
+            if details:
+                lines.extend(f"      detail: {detail}" for detail in details)
+            else:
+                lines.append("      details: none")
+
+    aggregate = result["aggregate"]
+    lines.append("aggregate:")
+    for field in (
+        "sample_count",
+        "work_ids",
+        "task_counts",
+        "change_shapes",
+        "task_count_diverse",
+        "change_shape_diverse",
+        "representative",
+    ):
+        lines.append(f"  {field}: {aggregate[field]}")
+    lines.append(f"status: {result['message']}")
+    return "\n".join(lines)
+
+
 def _cmd_execution_samples_validate(args):
     try:
         result = validate_representative_samples(tuple(args.sample_dir))
@@ -1001,13 +1074,7 @@ def _cmd_execution_samples_validate(args):
         print_and_exit(format_error(str(exc), exit_code=EXIT_CONFLICT), EXIT_CONFLICT)
     if is_json_mode():
         print_and_exit(_canonical_json(result), EXIT_OK)
-    print_and_exit(
-        format_success(
-            {"sample_count": len(result["samples"]), "aggregate": result["aggregate"]},
-            message=result["message"],
-        ),
-        EXIT_OK,
-    )
+    print_and_exit(_format_representative_samples_human(result), EXIT_OK)
 
 
 def _cmd_gap_resolve(args):
