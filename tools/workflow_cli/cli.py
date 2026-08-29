@@ -7,7 +7,6 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import re
 import shutil
@@ -85,6 +84,7 @@ from tools.workflow_cli.execution_metrics import (
     MetricsFormatError,
     PrerequisiteError,
     RepresentativeSamplesError,
+    _canonical_json,
     bootstrap_self_hosted_metrics,
     check_prerequisite_v1,
     start_execution_transaction,
@@ -994,13 +994,13 @@ def _cmd_execution_samples_validate(args):
         result = validate_representative_samples(tuple(args.sample_dir))
     except RepresentativeSamplesError as exc:
         if is_json_mode():
-            print_and_exit(json.dumps(exc.result, ensure_ascii=False, sort_keys=True), EXIT_GATE_FAIL)
+            print_and_exit(_canonical_json(exc.result), EXIT_GATE_FAIL)
         details = [item["message"] for item in exc.result["details"]]
         print_and_exit(format_error(exc.result["message"], details=details, exit_code=EXIT_GATE_FAIL), EXIT_GATE_FAIL)
     except MetricsFormatError as exc:
         print_and_exit(format_error(str(exc), exit_code=EXIT_CONFLICT), EXIT_CONFLICT)
     if is_json_mode():
-        print_and_exit(json.dumps(result, ensure_ascii=False, sort_keys=True), EXIT_OK)
+        print_and_exit(_canonical_json(result), EXIT_OK)
     print_and_exit(
         format_success(
             {"sample_count": len(result["samples"]), "aggregate": result["aggregate"]},

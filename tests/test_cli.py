@@ -4409,6 +4409,58 @@ class TestExecutionPhaseZeroIntegration:
         assert exc.value.code == 0
         assert "representative_metrics_accepted" in samples.getvalue()
 
+    def test_samples_validator_json_uses_canonical_writer_for_success_and_failure(self, monkeypatch):
+        from tools.workflow_cli import cli
+        from tools.workflow_cli.execution_metrics import RepresentativeSamplesError
+
+        success = {
+            "status": "ok",
+            "message": "representative_metrics_accepted",
+            "samples": [{"work_id": "WF-20260101-one"}],
+            "aggregate": {"token_comparison": "unavailable"},
+        }
+        monkeypatch.setattr(cli, "validate_representative_samples", lambda paths: success, raising=False)
+        monkeypatch.setenv("R2P_JSON", "1")
+
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output), pytest.raises(SystemExit) as exc:
+            main([
+                "execution-samples-validate",
+                "--sample-dir", "/tmp/WF-20260101-one",
+                "--sample-dir", "/tmp/WF-20260101-two",
+                "--sample-dir", "/tmp/WF-20260101-three",
+            ])
+        assert exc.value.code == 0
+        assert output.getvalue() == (
+            '{"aggregate":{"token_comparison":"unavailable"},"message":"representative_metrics_accepted",'
+            '"samples":[{"work_id":"WF-20260101-one"}],"status":"ok"}\n'
+        )
+
+        failure = {
+            "status": "blocked",
+            "message": "representative_metrics_missing",
+            "details": [{"message": "sample is incomplete", "sample": "WF-20260101-one"}],
+        }
+        monkeypatch.setattr(
+            cli,
+            "validate_representative_samples",
+            lambda paths: (_ for _ in ()).throw(RepresentativeSamplesError(failure)),
+            raising=False,
+        )
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output), pytest.raises(SystemExit) as exc:
+            main([
+                "execution-samples-validate",
+                "--sample-dir", "/tmp/WF-20260101-one",
+                "--sample-dir", "/tmp/WF-20260101-two",
+                "--sample-dir", "/tmp/WF-20260101-three",
+            ])
+        assert exc.value.code == 3
+        assert output.getvalue() == (
+            '{"details":[{"message":"sample is incomplete","sample":"WF-20260101-one"}],'
+            '"message":"representative_metrics_missing","status":"blocked"}\n'
+        )
+
 
 class TestRunExecuteStart:
     _PLAN_WITH_READONLY_PHANTOM_TASK = (
