@@ -103,9 +103,13 @@ REQUIRED_TEMPLATE_HARDENING_TOKENS = [
     "against the brief's `Files`",
     # EXE-4: derive-on-resume BASE reconstruction (lowest-numbered unchecked task; preceding completion head7)
     "reconstruct the in-progress task's BASE",
-    # EXE-5: report evidence sections; no Context-Read checklist
-    "Verification Evidence",
+    # EXE-5: compact, audit-preserving report sections; no Context-Read checklist
+    "Status",
+    "Commit Range",
     "Changed Files",
+    "Verification Records",
+    "Concerns",
+    "⚠️ DEFER",
 ]
 
 
@@ -426,35 +430,36 @@ class TestExecuteTemplateContent(unittest.TestCase):
                     missing.append(f"{rel}:{tok}")
         self.assertEqual(missing, [], f"missing final-diff logs mkdir guidance: {missing}")
 
-    def test_execute_surfaces_hand_authoritative_context_set(self):
-        """DES-TEST-001 / FR-AC7: ACS block, matrix, per-role read instruction, and exclusion split on both surfaces."""
+    def test_execute_surfaces_adopt_role_side_semantic_context_view(self):
+        """SPEC-CONTEXT-011/REPORT-012: role-side view, compact audit, no payload relay."""
         surfaces = [
             "tools/workflow_cli/agent_templates/claude/commands/r2p-execute.md",
             "tools/workflow_cli/agent_templates/codex/skills/r2p-execute/SKILL.md",
         ]
 
-        # Whole-file required tokens: ACS heading (1), six read-set paths (2–7),
-        # matrix (8), conflict rule BLOCKED+reopen (9–10), ledger read-only (11),
-        # sibling escalation (12–13), §6 diff regen (14), report-path regression (15–16).
         required_whole = (
-            "## Authoritative Context Set",
-            "02-project-context.md",
-            "03-requirement-brief.md",
-            "04-risk-discovery.md",
-            "05-design.md",
-            "06-spec.md",
-            "execution/progress.md",
+            "## Semantic Context View",
+            "r2p-context-view --work-id <id>",
+            "semantic_view",
+            "semantic_payload_bytes",
+            "controller must not read or forward the semantic content",
+            "No persistent context artifact",
             "Responsibility Matrix",
             "BLOCKED",
             "reopen",
-            "read-only to subagents",
+            "subagents read but do not write to the ledger",
             "r2p-task-brief --task",
             "NEEDS_CONTEXT",
             "regenerates `logs/task-N-diff.md`",
             "Pass the `review_report_path` to the fix subagent",
             "Fix all Critical and Important findings in the review report",
+            "Status",
+            "Commit Range",
+            "Changed Files",
+            "Verification Records",
+            "Concerns",
+            "⚠️ DEFER",
         )
-        # Whole-file forbidden tokens: Scene-setting context absent (17), r2p-gap-open absent (18).
         forbidden_whole = (
             "Scene-setting context",
             "`r2p-gap-open`",
@@ -470,60 +475,23 @@ class TestExecuteTemplateContent(unittest.TestCase):
             for tok in forbidden_whole:
                 if tok in text:
                     offenders.append(f"{rel}:{tok}")
-        self.assertEqual(missing, [], f"missing ACS tokens: {missing}")
-        self.assertEqual(offenders, [], f"forbidden ACS tokens present: {offenders}")
+        self.assertEqual(missing, [], f"missing semantic-context tokens: {missing}")
+        self.assertEqual(offenders, [], f"forbidden semantic-context tokens present: {offenders}")
 
-        # Per-role slice: §2, §5, §6 each contain the ACS read instruction (check 8 per spec).
+        # Every role invokes the view itself; the controller passes only the command.
         for rel in surfaces:
             text = (REPO_ROOT / rel).read_text(encoding="utf-8")
             for section_prefix in ("### 2.", "### 5.", "### 6."):
                 section = _get_role_section(text, section_prefix)
                 self.assertIn(
-                    "Read the Authoritative Context Set before acting",
+                    "Run `{{R2P_BIN_DIR}}/r2p-context-view --work-id <id>` yourself before acting",
                     section,
-                    f"{rel}: section {section_prefix!r} must reference the ACS read instruction",
+                    f"{rel}: section {section_prefix!r} must require role-side context view",
                 )
 
-        # ACS read-set / exclusion split (check 9 per spec):
-        # The exclusion sentence names 07-plan.md, 00-raw-requirement.md, 01-intake-brief.md.
-        # Split the ACS block at that line; verify the six read-set paths appear BEFORE it
-        # and the three excluded paths do NOT appear before it.
         for rel in surfaces:
             text = (REPO_ROOT / rel).read_text(encoding="utf-8")
-            acs_start = text.find("## Authoritative Context Set")
-            self.assertNotEqual(acs_start, -1, f"{rel}: missing ACS heading")
-            next_h2 = text.find("\n## ", acs_start + 1)
-            acs_block = text[acs_start:next_h2] if next_h2 != -1 else text[acs_start:]
-            acs_lines = acs_block.splitlines()
-            # Find the first line in the ACS block that names the excluded 07-plan.md
-            excl_idx = next(
-                (i for i, line in enumerate(acs_lines) if "`07-plan.md`" in line),
-                None,
-            )
-            self.assertIsNotNone(
-                excl_idx,
-                f"{rel}: ACS block lacks an exclusion sentence for 07-plan.md",
-            )
-            read_set_portion = "\n".join(acs_lines[:excl_idx])
-            # Six read-set paths must appear before the exclusion line
-            for path in (
-                "02-project-context.md",
-                "03-requirement-brief.md",
-                "04-risk-discovery.md",
-                "05-design.md",
-                "06-spec.md",
-                "execution/progress.md",
-            ):
-                self.assertIn(
-                    path, read_set_portion,
-                    f"{rel}: {path!r} missing from ACS read-set portion (before exclusion line)",
-                )
-            # Three excluded paths must NOT appear before the exclusion line
-            for path in ("07-plan.md", "00-raw-requirement.md", "01-intake-brief.md"):
-                self.assertNotIn(
-                    path, read_set_portion,
-                    f"{rel}: excluded path {path!r} found in ACS read-set portion",
-                )
+            self.assertIn("No persistent context artifact", text, f"{rel}: no persistent context bundle")
 
     def test_execute_surfaces_carry_template_hardening_tokens(self):
         """SPEC-GUARD-001: EXE-1..EXE-5 distinctive tokens on both r2p-execute surfaces."""
@@ -549,6 +517,8 @@ class TestExecuteTemplateContent(unittest.TestCase):
             "verification_records",
             "verification_total_seconds",
             "⚠️ DEFER",
+            "semantic_view",
+            "semantic_payload_bytes",
         )
         for surface in EXECUTE_SURFACES:
             text = (REPO_ROOT / surface).read_text(encoding="utf-8")
@@ -574,6 +544,9 @@ class TestExecuteTemplateContent(unittest.TestCase):
         self.assertIn("current branch", text)
         self.assertIn("zero-history", text)
         self.assertIn("fail closed", text)
+        self.assertIn("strict default", text)
+        self.assertIn("fast", text)
+        self.assertIn("r2p-context-view", text)
 
 
 if __name__ == "__main__":

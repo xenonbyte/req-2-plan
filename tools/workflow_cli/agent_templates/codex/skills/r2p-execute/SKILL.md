@@ -54,20 +54,20 @@ Use the least powerful model that can handle each role:
 
 Between tool calls, the controller narrates at most one short line. Use the prefix `Narration:` for these inter-call notes (e.g. `Narration: implementer returned DONE, writing diff`). Never paste a subagent's returned text — report body, diff content, or review findings — into a later dispatch; reviewer findings move through `review_report_path`, not pasted text. What the controller restates into its own context is bounded to `status`, `report_path` or diff path, `review_report_path`, `commit_range`, `test_summary`, and `concerns`.
 
-## Authoritative Context Set
+## Semantic Context View
 
-Each subagent (implementer, reviewer, fix) receives these run-dir paths and reads them directly — bodies are never pasted:
+Each subagent consumes the Authoritative Context Set by running
+`{{R2P_BIN_DIR}}/r2p-context-view --work-id <id>` itself before acting. The
+wrapper reads the six approved sources and progress safely, strips
+non-semantic Markdown, and returns the live semantic view; the controller must not read or forward the semantic content. Record this role input as
+`context_mode=semantic_view` and
+`context_bytes_kind=semantic_payload_bytes`, using the view's aggregate
+`semantic_bytes`. The controller may retain only that byte count and the bounded
+inline return fields.
 
-| Path | Domain |
-|---|---|
-| `02-project-context.md` | planning-time repository baseline |
-| `03-requirement-brief.md` | goal / scope / non-goals / acceptance |
-| `04-risk-discovery.md` | cross-task risks and mitigations |
-| `05-design.md` | chosen design and rejected alternatives |
-| `06-spec.md` | full behavior / interface / data / error / test contracts |
-| `execution/progress.md` | execution ledger (task ID + title list), read-only to subagents |
-
-`07-plan.md`, `00-raw-requirement.md`, and `01-intake-brief.md` are **not** in the set. No generated `task-N-context.md` bundle, `context-manifest.json`, sha256/content-hash, or drift gate is introduced.
+No persistent context artifact, `task-N-context.md`, context bundle, manifest,
+hash, or drift gate is created. `07-plan.md`, `00-raw-requirement.md`, and
+`01-intake-brief.md` remain outside the per-task semantic view.
 
 ### Authority Responsibility Matrix
 
@@ -95,7 +95,11 @@ No artifact silently overrides another outside its domain. If a task cannot sati
 
 ### Required Consumption
 
-Each implementer, reviewer, and fix subagent must **read the full Authoritative Context Set before acting** — availability is not consumption. Subagents may skip the embedded `(read-only)` Upstream Summary / Project Context blocks within those files. On-demand depth applies only to the current codebase, git history, and prior task reports/reviews — never to whether to read an approved artifact. This rule is orthogonal to Model Selection: a cheap model on a mechanical task still reads the set.
+Each implementer, reviewer, fixer, re-reviewer, and final reviewer must run
+`{{R2P_BIN_DIR}}/r2p-context-view --work-id <id>` itself before acting —
+availability is not consumption. The controller supplies the command and does
+not relay its output. On-demand depth applies only to the current codebase, git
+history, and prior task reports/reviews.
 
 ### Ledger Ownership and Sibling Escalation
 
@@ -104,7 +108,7 @@ Default position/ownership derives from the ledger's `PLAN-TASK-NNN <title>` lis
 ### Path Delivery and Fail-Closed Preflight
 
 The controller derives `run_dir = parent(plan)` from the execute output and hands absolute paths by default, or repository-root-relative paths paired with an explicit `repo_root`. Each subagent runs a preflight before acting:
-1. Input paths must already exist and be readable. For each role, inputs include the Authoritative Context Set paths, the task brief path, the ledger path, and any handed report/review/diff path the subagent is meant to consume.
+1. Input paths must already exist and be readable. For each role, inputs include the role-side context-view command, the task brief path, the ledger path, and any handed report/review/diff path the subagent is meant to consume.
 2. Output paths do not need to exist at preflight. For each role, treat generated output paths as destination paths: implementer `execution/task-N-report.md`, task-reviewer `execution/task-N-review.md`, and final reviewer `execution/final-review-report.md`. Their parent directories must resolve under the same `run_dir` / `work_id` and be writable before the subagent writes.
 3. Every handed path resolves under the same `run_dir` / `work_id`.
 4. Any repo-root-relative path was resolved against the handed `repo_root`, not the process cwd.
@@ -122,7 +126,7 @@ explicitly before dispatch. Never continue or reawaken a previous implementer,
 reviewer, fixer, re-reviewer, or final-review session. The handoff is
 self-contained: work ID/run dir, role, task brief or final input paths,
 Git/BASE boundary, verification contract, report path, and inline return
-contract — never ACS bodies, prior role prose, or controller summaries.
+contract — never semantic-view content, prior role prose, or controller summaries.
 
 Implementers, task reviewers, fixers, and task re-reviewers default to the
 current task's targeted or directly affected tests. Escalate that task-level
@@ -146,11 +150,11 @@ Record BASE (`git rev-parse HEAD`) BEFORE dispatching the implementer — **neve
 
 Provide the subagent with:
 - The `brief_path` returned by `r2p-task-brief` (not pasted task text from `07-plan.md`)
-- **Read the Authoritative Context Set before acting**: the `02-project-context.md` entry supplies the project/dependency/architecture baseline deterministically
+- **Run `{{R2P_BIN_DIR}}/r2p-context-view --work-id <id>` yourself before acting**; consume its live semantic output and report `semantic_view` / `semantic_payload_bytes` to the controller without relaying the content
 - Global Constraints from the PLAN (`## Global Constraints`), copied verbatim when present — the brief carries only the task body, so the implementer does not otherwise see plan-level constraints
 - TDD instructions: follow `Skeleton`/`Steps`; prove `Verification` with evidence
 - A report file path (`execution/task-N-report.md`)
-  The implementer's `execution/task-N-report.md` must contain a `Verification Evidence` section (the command run and its fresh result) and a `Changed Files` section (the files the task actually changed). It must NOT contain a self-attested "Context Read" checklist. These sections are review aids; the `Changed Files` section also feeds the §5 reviewer comparison. Include ordered `Verification Records` with command, scope, reason, elapsed_seconds, and status. Return the same compact `verification_records` plus `verification_total_seconds` inline so the controller can record measured evidence.
+  The implementer's compact `execution/task-N-report.md` must contain exactly these audit sections: `Status`, `Commit Range`, `Changed Files`, `Verification Records`, `Concerns`, and `⚠️ DEFER`. Write `none` for absent concerns/defer items; preserve every actual concern and every `⚠️ DEFER` item in both the persistent section and inline `concerns`. `Verification Records` lists ordered command, scope, reason, elapsed_seconds, and status. `Changed Files` feeds the §5 reviewer comparison. Do not add a self-attested "Context Read" checklist. Return the same compact `verification_records` plus `verification_total_seconds` inline so the controller can record measured evidence.
 
 The implementer return contract is minimal and inline:
 - `status`: DONE / DONE_WITH_CONCERNS / NEEDS_CONTEXT / BLOCKED
@@ -185,7 +189,7 @@ The fresh implementer subagent verifies-then-removes ambiguity by evidence and T
 After the implementer reports DONE:
 1. `mkdir -p .req-to-plan/<work-id>/logs` then `git diff -U10 <base-commit> HEAD > .req-to-plan/<work-id>/logs/task-N-diff.md`. Keep diff scratch under `logs/` (gitignored), never under `execution/`.
 2. Dispatch a task-reviewer subagent with:
-   - **Read the Authoritative Context Set before acting**: the reviewer checks `Spec References` IDs against the full `06-spec.md` text, not the IDs alone
+   - **Run `{{R2P_BIN_DIR}}/r2p-context-view --work-id <id>` yourself before acting**: the reviewer checks `Spec References` IDs against the live semantic spec, not the IDs alone
    - The `brief_path` returned by `r2p-task-brief` (not pasted task text). The reviewer reads `Spec References` from the task brief. Do not pass separate `Spec References`.
    - The implementer report file path (`execution/task-N-report.md`)
    - The diff file path (`.req-to-plan/<work-id>/logs/task-N-diff.md`)
@@ -201,15 +205,11 @@ The task-reviewer writes detailed findings, if any, to `execution/task-N-review.
 
 Surface in `concerns` every ⚠️ "cannot verify from diff" item and every unfixed Minor finding — do not leave them only in the report. This is how the controller learns there is something to adjudicate (§6) without opening the report on a clean task.
 
-The review report records:
-- **Spec compliance**: checked against the task brief's `Spec References` and `Verification`
-- **Code quality**: clean, tested, maintainable
-- **Verification Records**: ordered command, scope, reason, elapsed_seconds, and status evidence
-- **⚠️ DEFER items**: explicit `cannot verify from diff` warnings for requirements satisfied by unchanged code, by sibling task work, or by evidence outside the task diff
+The compact review report contains `Status`, `Commit Range`, `Changed Files`, `Verification Records`, `Concerns`, `⚠️ DEFER`, `Spec Verdict`, and `Quality Verdict`. `Spec Verdict` checks the task brief's `Spec References` and `Verification`; `Quality Verdict` records whether the code is clean, tested, and maintainable. `Verification Records` retains ordered command, scope, reason, elapsed_seconds, and status evidence. Every `⚠️ DEFER` item is an explicit `cannot verify from diff` warning for a requirement satisfied by unchanged code, sibling task work, or evidence outside the diff, and must also appear inline in `concerns`.
 
 ### 6. Fix loop
 
-- Dispatch fix subagents for Critical and Important findings. Pass the `review_report_path` to the fix subagent with the instruction: Fix all Critical and Important findings in the review report. Do not paste the finding bodies into the dispatch. Also hand: **Read the Authoritative Context Set before acting**, the task brief path (`brief_path`), and the current task diff path (`logs/task-N-diff.md`).
+- Dispatch fix subagents for Critical and Important findings. Pass the `review_report_path` to the fix subagent with the instruction: Fix all Critical and Important findings in the review report. Do not paste the finding bodies into the dispatch. Also hand: **Run `{{R2P_BIN_DIR}}/r2p-context-view --work-id <id>` yourself before acting**, the task brief path (`brief_path`), and the current task diff path (`logs/task-N-diff.md`).
 - After each fix wave: the fix subagent commits only its intentionally-changed files (staging only files changed for this task, exactly as the §2 implementer does); then the loop regenerates `logs/task-N-diff.md` from the task's BASE to `HEAD` (`git diff -U10 <base-commit> HEAD > .req-to-plan/<work-id>/logs/task-N-diff.md`) — commit-then-diff — before re-dispatching the task-reviewer. The re-review must not run against an uncommitted working tree.
 - Re-dispatch the task-reviewer after each fix wave with the refreshed diff path
 - Before flipping the checkbox, adjudicate each reviewer "cannot verify from diff" warning. When `concerns` lists ⚠️ items, open `review_report_path` to adjudicate each; a `none`/empty `concerns` means no ⚠️ remains to adjudicate. Record one line per finding in `execution/progress.md`:
@@ -225,11 +225,11 @@ The review report records:
 ## Final Whole-Branch Review
 
 After all tasks complete, dispatch a final whole-branch review subagent on the **most capable model**:
-- **Read context for the final reviewer**: the full Authoritative Context Set (`02-project-context.md`, `03-requirement-brief.md`, `04-risk-discovery.md`, `05-design.md`, `06-spec.md`, `execution/progress.md`) plus `07-plan.md`, every `execution/task-N-report.md`, every `execution/task-N-review.md`, and every `Minor:` ledger entry. Note: the final reviewer is the one role that reads `07-plan.md`; the per-task ACS exclusion of `07-plan.md` does not apply to this section.
+- **Run `{{R2P_BIN_DIR}}/r2p-context-view --work-id <id>` yourself before acting**: consume the semantic view plus `07-plan.md`, every `execution/task-N-report.md`, every `execution/task-N-review.md`, and every `Minor:` ledger entry. Strict final review reads reports and reviews; fast primary final review reads every report but does not require nonexistent task-review files. Note: the final reviewer is the one role that reads `07-plan.md`; the per-task semantic-view exclusion of `07-plan.md` does not apply to this section.
 - First create the whole-branch diff: `mkdir -p .req-to-plan/<work-id>/logs` then `git diff -U10 <execution-base-commit> HEAD > .req-to-plan/<work-id>/logs/final-diff.md`
 - Scope: review the complete execution range `git diff -U10 <execution-base-commit> HEAD`, where `<execution-base-commit>` is the Task 1 BASE captured before dispatching the first implementer
 - Include the diff file path (`.req-to-plan/<work-id>/logs/final-diff.md`) in the reviewer dispatch; do not ask the reviewer to infer the changed range
-- Provide a final review report path (`execution/final-review-report.md`) and require detailed findings there
+- Provide a final review report path (`execution/final-review-report.md`) and require compact `Status`, `Commit Range`, `Changed Files`, `Verification Records`, `Concerns`, and `⚠️ DEFER` sections there; preserve every concern/defer item inline as well
 - **re-run the full verification suite** on the final HEAD and attach the fresh output (per-task greens do not catch cross-task regressions)
 - Write the final review's ordered `Verification Records` and compact inline `verification_records` / `verification_total_seconds`; the controller records that final-role metrics block just as it does every other role.
 - Walk the PLAN task-by-task as a line-by-line requirements checklist; report any gap

@@ -1672,7 +1672,7 @@ class TestInstallOpencode:
         opencode_names = {p.name for p in (ph_root / "opencode" / "commands").glob("r2p-*.md")}
         assert opencode_names == _claude_command_names()
 
-    def test_execute_command_derives_phase_zero_protocol_from_claude(self, tmp_path):
+    def test_execute_command_derives_phase_one_protocol_from_claude(self, tmp_path):
         svc, _, ph_root = make_service(tmp_path)
         svc.install("opencode")
         content = (ph_root / "opencode" / "commands" / "r2p-execute.md").read_text(encoding="utf-8")
@@ -1683,6 +1683,10 @@ class TestInstallOpencode:
             "targeted or directly affected tests",
             "execution/metrics.md",
             "verification_records",
+            "r2p-context-view --work-id <id>",
+            "semantic_view",
+            "semantic_payload_bytes",
+            "⚠️ DEFER",
         ):
             assert token in content
 

@@ -278,9 +278,19 @@ exposes. A missing model, timing, or Token value is written as `unavailable` —
 bytes and elapsed time must never be presented as an estimated Token count.
 
 Context bytes name the delivered payload kind: Phase 0 direct ACS uses
-`declared_payload_bytes` (the raw UTF-8 bytes of the required sources), while a
-future semantic view uses `semantic_payload_bytes`. These are auditable byte
+`declared_payload_bytes` (the raw UTF-8 bytes of the required sources). Phase 1
+roles run `r2p-context-view --work-id <id>` themselves and record
+`context_mode=semantic_view` with `semantic_payload_bytes` from its live,
+deterministically filtered output. The controller does not read or forward that
+content and no persistent context bundle is created. These are auditable byte
 measurements, not a claim about model-consumed context or Token usage.
+
+Role reports and reviews are compact audit records: `Status`, `Commit Range`,
+`Changed Files`, `Verification Records`, `Concerns`, and `⚠️ DEFER`; task
+reviews additionally retain `Spec Verdict` and `Quality Verdict`. Every concern
+and deferred item is preserved in both the persistent artifact and the role's
+inline concerns. Strict final review reads reports and reviews; fast primary
+final review reads every report and does not require nonexistent task reviews.
 
 The internal commands are intended for the controller and safe test tooling:
 `execution-prerequisite-check --work-id <id> --task <N> --require-version 1`,
