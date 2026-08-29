@@ -15,15 +15,22 @@ import json
 import os
 from pathlib import Path, PurePosixPath
 import re
+import secrets
 import stat
 import subprocess
 from typing import Any
 
-from tools.workflow_cli.artifact import read_artifact
-from tools.workflow_cli.atomic import UnsafeRegularFileError, atomic_write_text, read_regular_text
+from tools.workflow_cli.artifact import _parse_frontmatter, read_artifact
+from tools.workflow_cli.atomic import UnsafeRegularFileError, read_regular_text
 from tools.workflow_cli.markdown import plan_task_anchors, strip_nonsemantic_markdown
-from tools.workflow_cli.models import RunRecord, RunStatus, Stage, WorkId
-from tools.workflow_cli.state import RunStateManager, update_resume_context, update_run_status
+from tools.workflow_cli.models import RunRecord, RunStatus, STAGE_ARTIFACT_MAP, Stage, WorkId
+from tools.workflow_cli.state import (
+    RunStateManager,
+    parse_run_record,
+    run_record_to_markdown,
+    update_resume_context,
+    update_run_status,
+)
 from tools.workflow_cli.version import R2P_VERSION
 
 
@@ -59,6 +66,18 @@ class MetricsFormatError(ValueError):
 
 class PrerequisiteError(MetricsFormatError):
     """The legacy prerequisite is not met; callers must not dispatch a role."""
+
+
+class RepresentativeSamplesError(MetricsFormatError):
+    """Representative sample validation failed with a stable error payload."""
+
+    def __init__(self, result: dict[str, Any]):
+        super().__init__(result["message"])
+        self.result = result
+
+
+class _CommittedWriteError(OSError):
+    """An atomic replacement landed, but a post-commit durability step failed."""
 
 
 @dataclass(frozen=True)
@@ -100,6 +119,8 @@ def _parse_decimal(value: str, name: str) -> Decimal:
 
 
 def _parse_timestamp(value: str, name: str) -> str:
+    if not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{6}Z", value):
+        raise MetricsFormatError(f"{name} is not a canonical UTC timestamp")
     try:
         datetime.strptime(value, "%Y-%m-%dT%H:%M:%S.%fZ")
     except ValueError as exc:
@@ -187,6 +208,8 @@ def _parse_invocation(raw: dict[str, str], number: int, header: dict[str, Any]) 
         raise MetricsFormatError("model must be non-empty or unavailable")
     started_at = _parse_timestamp(raw["started_at"], "started_at")
     ended_at = _parse_timestamp(raw["ended_at"], "ended_at")
+    if ended_at < started_at:
+        raise MetricsFormatError("ended_at precedes started_at")
     elapsed = _parse_decimal(raw["elapsed_seconds"], "elapsed_seconds")
     if raw["context_mode"] == "direct_acs":
         expected_kind = "declared_payload_bytes"
@@ -258,7 +281,7 @@ def _parse_invocation(raw: dict[str, str], number: int, header: dict[str, Any]) 
 
 def parse_metrics(text: str) -> ParsedMetrics:
     """Parse the closed metrics grammar without accepting near-miss documents."""
-    if not isinstance(text, str) or not text.endswith("\n"):
+    if not isinstance(text, str) or not text.endswith("\n") or text.endswith("\n\n"):
         raise MetricsFormatError("metrics text must end in one newline")
     lines = text.splitlines()
     header = _parse_header(lines)
@@ -349,6 +372,254 @@ def classify_change_shape(name_status_z: bytes) -> str:
     return "mixed"
 
 
+_DIR_FLAGS = (
+    os.O_RDONLY
+    | getattr(os, "O_DIRECTORY", 0)
+    | getattr(os, "O_NOFOLLOW", 0)
+    | getattr(os, "O_NONBLOCK", 0)
+    | getattr(os, "O_CLOEXEC", 0)
+)
+_FILE_READ_FLAGS = (
+    os.O_RDONLY
+    | getattr(os, "O_NOFOLLOW", 0)
+    | getattr(os, "O_NONBLOCK", 0)
+    | getattr(os, "O_CLOEXEC", 0)
+)
+_FILE_WRITE_FLAGS = (
+    os.O_WRONLY
+    | os.O_CREAT
+    | os.O_EXCL
+    | getattr(os, "O_NOFOLLOW", 0)
+    | getattr(os, "O_CLOEXEC", 0)
+)
+
+
+def _require_fd_capabilities() -> None:
+    required = ("O_DIRECTORY", "O_NOFOLLOW", "O_NONBLOCK")
+    if any(not hasattr(os, name) for name in required):
+        raise MetricsFormatError("stable directory-fd capability unavailable")
+    if os.open not in os.supports_dir_fd or os.stat not in os.supports_dir_fd:
+        raise MetricsFormatError("stable directory-fd capability unavailable")
+
+
+def _open_absolute_dir(path: Path) -> int:
+    """Pin an absolute directory by walking from the filesystem root."""
+    _require_fd_capabilities()
+    path = Path(os.path.abspath(os.fspath(path)))
+    if not path.is_absolute():
+        raise MetricsFormatError("directory path must be absolute")
+    fd = os.open(path.anchor, _DIR_FLAGS)
+    try:
+        for component in path.parts[1:]:
+            if component in {"", ".", ".."}:
+                raise MetricsFormatError("unsafe directory component")
+            next_fd = os.open(component, _DIR_FLAGS, dir_fd=fd)
+            os.close(fd)
+            fd = next_fd
+        opened = os.fstat(fd)
+        if not stat.S_ISDIR(opened.st_mode):
+            raise MetricsFormatError("path is not a directory")
+        return fd
+    except OSError as exc:
+        os.close(fd)
+        if exc.errno in {errno.ELOOP, errno.ENOTDIR, errno.ENOENT}:
+            raise MetricsFormatError("unsafe or missing directory path") from exc
+        raise
+    except Exception:
+        os.close(fd)
+        raise
+
+
+def _open_dir_at(parent_fd: int, name: str) -> int:
+    if "/" in name or name in {"", ".", ".."}:
+        raise MetricsFormatError("unsafe directory component")
+    try:
+        fd = os.open(name, _DIR_FLAGS, dir_fd=parent_fd)
+    except OSError as exc:
+        if exc.errno in {errno.ELOOP, errno.ENOTDIR, errno.ENOENT}:
+            raise MetricsFormatError(f"unsafe or missing directory: {name}") from exc
+        raise
+    if not stat.S_ISDIR(os.fstat(fd).st_mode):
+        os.close(fd)
+        raise MetricsFormatError(f"not a directory: {name}")
+    return fd
+
+
+def _read_text_at(parent_fd: int, name: str, *, missing_ok: bool = False) -> str | None:
+    if "/" in name or name in {"", ".", ".."}:
+        raise MetricsFormatError("unsafe file component")
+    try:
+        before = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        if missing_ok:
+            return None
+        raise
+    if not stat.S_ISREG(before.st_mode):
+        raise MetricsFormatError(f"unsafe non-regular file: {name}")
+    fd: int | None = None
+    try:
+        fd = os.open(name, _FILE_READ_FLAGS, dir_fd=parent_fd)
+        opened = os.fstat(fd)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino)
+        ):
+            raise MetricsFormatError(f"file identity changed during read: {name}")
+        chunks: list[bytes] = []
+        while True:
+            chunk = os.read(fd, 1024 * 1024)
+            if not chunk:
+                break
+            chunks.append(chunk)
+        try:
+            return b"".join(chunks).decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise MetricsFormatError(f"trusted input is not UTF-8: {name}") from exc
+    except FileNotFoundError:
+        if missing_ok:
+            return None
+        raise
+    except OSError as exc:
+        if exc.errno in {errno.ELOOP, errno.ENOTDIR, errno.ENXIO}:
+            raise MetricsFormatError(f"unsafe regular file: {name}") from exc
+        raise
+    finally:
+        if fd is not None:
+            os.close(fd)
+
+
+def _write_all(fd: int, payload: bytes) -> None:
+    offset = 0
+    while offset < len(payload):
+        written = os.write(fd, payload[offset:])
+        if written <= 0:
+            raise OSError("short write")
+        offset += written
+
+
+def _write_new_text_at(parent_fd: int, name: str, content: str) -> os.stat_result:
+    fd = os.open(name, _FILE_WRITE_FLAGS, 0o600, dir_fd=parent_fd)
+    try:
+        _write_all(fd, content.encode("utf-8"))
+        os.fsync(fd)
+        opened = os.fstat(fd)
+        if not stat.S_ISREG(opened.st_mode):
+            raise MetricsFormatError(f"created path is not regular: {name}")
+        current = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        if (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino):
+            raise MetricsFormatError(f"created file identity changed: {name}")
+        return opened
+    finally:
+        os.close(fd)
+
+
+def _replace_text_at(parent_fd: int, name: str, content: str) -> None:
+    temp = f".{name}.{os.getpid()}.{secrets.token_hex(16)}.tmp"
+    fd = os.open(temp, _FILE_WRITE_FLAGS, 0o600, dir_fd=parent_fd)
+    try:
+        _write_all(fd, content.encode("utf-8"))
+        os.fsync(fd)
+        opened = os.fstat(fd)
+        current = os.stat(temp, dir_fd=parent_fd, follow_symlinks=False)
+        if not stat.S_ISREG(opened.st_mode) or (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino):
+            raise MetricsFormatError("atomic temp identity changed")
+        os.replace(temp, name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+        temp = ""
+        try:
+            os.fsync(parent_fd)
+        except OSError as exc:
+            raise _CommittedWriteError(str(exc)) from exc
+    finally:
+        os.close(fd)
+        if temp:
+            try:
+                os.unlink(temp, dir_fd=parent_fd)
+            except FileNotFoundError:
+                pass
+
+
+def _parse_record_at(run_fd: int, expected_work_id: WorkId) -> RunRecord:
+    text = _read_text_at(run_fd, "run.md")
+    assert text is not None
+    match = re.search(r"# Workflow Run: (WF-\S+)", text)
+    if not match:
+        raise MetricsFormatError("cannot parse work_id from run.md")
+    embedded = WorkId(match.group(1))
+    if embedded != expected_work_id:
+        raise MetricsFormatError("run record work_id does not match request")
+    return parse_run_record(text, embedded)
+
+
+def _plan_at(run_fd: int) -> str:
+    text = _read_text_at(run_fd, STAGE_ARTIFACT_MAP[Stage.PLAN])
+    assert text is not None
+    _, body = _parse_frontmatter(text)
+    return body
+
+
+def _open_run(base_path: Path, work_id: WorkId) -> tuple[int, int, int]:
+    repo_fd = _open_absolute_dir(Path(base_path))
+    workspace_fd: int | None = None
+    run_fd: int | None = None
+    try:
+        workspace_fd = _open_dir_at(repo_fd, ".req-to-plan")
+        run_fd = _open_dir_at(workspace_fd, str(work_id))
+        return repo_fd, workspace_fd, run_fd
+    except Exception:
+        if run_fd is not None:
+            os.close(run_fd)
+        if workspace_fd is not None:
+            os.close(workspace_fd)
+        os.close(repo_fd)
+        raise
+
+
+def _close_fds(*fds: int | None) -> None:
+    for fd in reversed(fds):
+        if fd is not None:
+            os.close(fd)
+
+
+def _open_lock_at(run_fd: int, filename: str) -> tuple[int, int]:
+    try:
+        os.mkdir("logs", 0o700, dir_fd=run_fd)
+    except FileExistsError:
+        pass
+    logs_fd = _open_dir_at(run_fd, "logs")
+    fd: int | None = None
+    try:
+        fd = os.open(
+            filename,
+            os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0),
+            0o600,
+            dir_fd=logs_fd,
+        )
+        opened = os.fstat(fd)
+        current = os.stat(filename, dir_fd=logs_fd, follow_symlinks=False)
+        if not stat.S_ISREG(opened.st_mode) or (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino):
+            raise MetricsFormatError("unsafe lock file")
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return logs_fd, fd
+    except BlockingIOError as exc:
+        if fd is not None:
+            os.close(fd)
+        os.close(logs_fd)
+        raise MetricsFormatError("execution lock is busy") from exc
+    except Exception:
+        if fd is not None:
+            os.close(fd)
+        os.close(logs_fd)
+        raise
+
+
+def _release_lock(logs_fd: int, lock_fd: int) -> None:
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+    finally:
+        os.close(lock_fd)
+        os.close(logs_fd)
+
+
 def _execution_base(base_path: Path) -> str:
     result = subprocess.run(
         ["git", "-C", str(base_path), "rev-parse", "HEAD"],
@@ -357,6 +628,21 @@ def _execution_base(base_path: Path) -> str:
     value = result.stdout.strip()
     if result.returncode != 0 or not re.fullmatch(r"[0-9a-f]{40}", value):
         raise MetricsFormatError("cannot determine full Execution BASE")
+    return value
+
+
+def _resolve_commit(base_path: Path, abbreviation: str) -> str:
+    if not _SHA7.fullmatch(abbreviation):
+        raise PrerequisiteError("commit abbreviation is not canonical")
+    result = subprocess.run(
+        ["git", "-C", str(base_path), "rev-parse", "--verify", f"{abbreviation}^{{commit}}"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    value = result.stdout.strip()
+    if result.returncode != 0 or not re.fullmatch(r"[0-9a-f]{40}", value):
+        raise PrerequisiteError("commit abbreviation is missing or ambiguous")
     return value
 
 
@@ -369,106 +655,177 @@ def _initial_metrics_text(work_id: WorkId, profile: str, task_count: int) -> str
     ))
 
 
-def _initial_progress_text(work_id: WorkId, execution_base: str, anchors: list[tuple[str, str]]) -> str:
-    lines = ["# Execution Progress", "", f"work_id: {work_id}", "", f"Execution BASE: {execution_base}", ""]
+def _initial_progress_text(
+    work_id: WorkId,
+    execution_base: str,
+    anchors: list[tuple[str, str]],
+    profile: str,
+) -> str:
+    lines = [
+        "# Execution Progress", "", f"work_id: {work_id}", "",
+        f"Execution BASE: {execution_base}", "", f"Execution Profile: {profile}", "",
+    ]
     lines.extend(f"- [ ] {task_id} {title}".rstrip() for task_id, title in anchors)
     return "\n".join(lines) + "\n"
 
 
-def _lock_file(path: Path) -> int:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if path.is_symlink():
-        raise MetricsFormatError("unsafe lock path")
-    flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
-    fd = os.open(path, flags, 0o600)
-    try:
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
-            raise MetricsFormatError("lock is not a regular file")
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        return fd
-    except Exception:
-        os.close(fd)
-        raise
-
-
 def start_execution_transaction(base_path: Path, work_id: WorkId, profile: str) -> RunRecord:
-    """Create the two initial ledgers and transition a closed run atomically enough to recover.
-
-    The marker makes partial creation explicit.  Existing residue is never
-    overwritten: a later integrator can surface recovery through the CLI.
-    """
+    """Own the pinned, no-clobber execution-start transaction and recovery."""
     if profile not in {"strict", "fast"}:
         raise MetricsFormatError("profile must be strict or fast")
     base_path = Path(base_path)
-    run_dir = base_path / ".req-to-plan" / str(work_id)
-    manager = RunStateManager(run_dir)
-    record = manager.load()
-    if record.work_id != work_id:
-        raise MetricsFormatError("run record work_id does not match request")
-    if record.status == RunStatus.EXECUTING:
-        execution_dir = run_dir / "execution"
-        marker = execution_dir / ".start-transaction.json"
-        try:
-            metrics = parse_metrics(read_regular_text(execution_dir / "metrics.md") or "")
-            progress = read_regular_text(execution_dir / "progress.md") or ""
-        except (FileNotFoundError, UnsafeRegularFileError) as exc:
-            raise MetricsFormatError("executing run has incomplete start ledgers") from exc
-        if metrics.header["profile"] != profile:
-            raise MetricsFormatError("executing run profile conflicts with requested profile")
-        if not marker.exists():
-            return record
-        try:
-            marker_text = read_regular_text(marker)
-            marker_data = json.loads(marker_text or "")
-        except (FileNotFoundError, UnsafeRegularFileError, json.JSONDecodeError) as exc:
-            raise MetricsFormatError("unsafe or malformed execution start marker") from exc
-        base_match = re.search(r"^Execution BASE: ([0-9a-f]{40})$", progress, re.MULTILINE)
-        expected_marker = {
-            "schema": 1, "work_id": str(work_id), "profile": profile,
-            "task_count": metrics.header["task_count"],
-            "execution_base": base_match.group(1) if base_match else None,
-        }
-        if marker_data != expected_marker:
-            raise MetricsFormatError("execution start marker does not match complete ledgers")
-        marker.unlink()
-        return record
-    if record.status != RunStatus.CLOSED_AT_PLAN_CHECKPOINT:
-        raise MetricsFormatError("run is not closed at the PLAN checkpoint")
-    plan_text = read_artifact(run_dir, Stage.PLAN)
-    anchors = plan_task_anchors(strip_nonsemantic_markdown(plan_text))
-    if not anchors:
-        raise MetricsFormatError("PLAN contains no PLAN-TASK anchors")
-    execution_base = _execution_base(base_path)
-    lock_fd = _lock_file(run_dir / "logs" / "execute-start.lock")
+    repo_fd = workspace_fd = run_fd = None
+    logs_fd = lock_fd = None
     try:
-        execution_dir = run_dir / "execution"
-        if execution_dir.exists() or execution_dir.is_symlink():
-            raise MetricsFormatError("execution start residue exists; refusing to clobber")
-        execution_dir.mkdir()
-        marker = execution_dir / ".start-transaction.json"
+        repo_fd, workspace_fd, run_fd = _open_run(base_path, work_id)
+        logs_fd, lock_fd = _open_lock_at(run_fd, "execute-start.lock")
+        record = _parse_record_at(run_fd, work_id)
+        anchors = plan_task_anchors(strip_nonsemantic_markdown(_plan_at(run_fd)))
+        if not anchors:
+            raise MetricsFormatError("PLAN contains no PLAN-TASK anchors")
+        execution_base = _execution_base(base_path)
         marker_payload = {
             "schema": 1, "work_id": str(work_id), "profile": profile,
             "task_count": len(anchors), "execution_base": execution_base,
         }
-        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
-        marker_fd = os.open(marker, flags, 0o600)
-        with os.fdopen(marker_fd, "w", encoding="utf-8") as stream:
-            stream.write(_canonical_json(marker_payload) + "\n")
-            stream.flush()
-            os.fsync(stream.fileno())
-        atomic_write_text(execution_dir / "progress.md", _initial_progress_text(work_id, execution_base, anchors))
-        atomic_write_text(execution_dir / "metrics.md", _initial_metrics_text(work_id, profile, len(anchors)))
-        parse_metrics(read_regular_text(execution_dir / "metrics.md") or "")
-        record = update_run_status(record, RunStatus.EXECUTING)
-        update_resume_context(record, last_operation="execute_start", next_operation="implement_tasks")
-        manager.save(record)
-        marker.unlink()
-        return record
-    except Exception:
-        raise
+        marker_text = _canonical_json(marker_payload) + "\n"
+        expected_progress = _initial_progress_text(work_id, execution_base, anchors, profile)
+        expected_metrics = _initial_metrics_text(work_id, profile, len(anchors))
+
+        if record.status == RunStatus.EXECUTING:
+            execution_fd = _open_dir_at(run_fd, "execution")
+            try:
+                progress = _read_text_at(execution_fd, "progress.md")
+                metrics_text = _read_text_at(execution_fd, "metrics.md")
+                assert progress is not None and metrics_text is not None
+                metrics = parse_metrics(metrics_text)
+                if metrics.header["profile"] != profile or metrics.header["task_count"] != len(anchors):
+                    raise MetricsFormatError("executing run profile/task count conflicts")
+                base_match = re.search(r"^Execution BASE: ([0-9a-f]{40})$", progress, re.MULTILINE)
+                profile_lines = re.findall(r"^Execution Profile: (strict|fast)$", progress, re.MULTILINE)
+                rows = re.findall(r"^- \[[ x]\] (PLAN-TASK-\d{3})\b", progress, re.MULTILINE)
+                if (
+                    base_match is None
+                    or profile_lines != [profile]
+                    or rows != [task_id for task_id, _ in anchors]
+                ):
+                    raise MetricsFormatError("executing progress does not match start contract")
+                existing_marker = _read_text_at(execution_fd, ".start-transaction.json", missing_ok=True)
+                if existing_marker is not None:
+                    expected = dict(marker_payload, execution_base=base_match.group(1))
+                    if existing_marker != _canonical_json(expected) + "\n":
+                        raise MetricsFormatError("execution start marker does not match complete ledgers")
+                    os.unlink(".start-transaction.json", dir_fd=execution_fd)
+                    os.fsync(execution_fd)
+                return record
+            finally:
+                os.close(execution_fd)
+
+        if record.status != RunStatus.CLOSED_AT_PLAN_CHECKPOINT:
+            raise MetricsFormatError("run is not closed at the PLAN checkpoint")
+
+        # Closed-run recovery. A matching marker owns only the exact allowed
+        # partial children; no-marker exact ledgers mean status-save crashed.
+        try:
+            execution_fd = _open_dir_at(run_fd, "execution")
+        except MetricsFormatError as exc:
+            try:
+                os.stat("execution", dir_fd=run_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                execution_fd = None
+            else:
+                raise exc
+        if execution_fd is not None:
+            try:
+                existing_marker = _read_text_at(execution_fd, ".start-transaction.json", missing_ok=True)
+                children = set(os.listdir(execution_fd))
+                allowed = {".start-transaction.json", "progress.md", "metrics.md"}
+                if existing_marker is not None:
+                    if existing_marker != marker_text or not children <= allowed:
+                        raise MetricsFormatError("foreign execution-start residue")
+                    for name in ("metrics.md", "progress.md", ".start-transaction.json"):
+                        if name in children:
+                            before = os.stat(name, dir_fd=execution_fd, follow_symlinks=False)
+                            if not stat.S_ISREG(before.st_mode):
+                                raise MetricsFormatError("unsafe execution-start residue")
+                            os.unlink(name, dir_fd=execution_fd)
+                    os.fsync(execution_fd)
+                    os.close(execution_fd)
+                    execution_fd = None
+                    os.rmdir("execution", dir_fd=run_fd)
+                    os.fsync(run_fd)
+                elif children == {"progress.md", "metrics.md"}:
+                    progress = _read_text_at(execution_fd, "progress.md")
+                    metrics_text = _read_text_at(execution_fd, "metrics.md")
+                    if progress != expected_progress or metrics_text != expected_metrics:
+                        raise MetricsFormatError("closed run has foreign complete ledgers")
+                    record = update_run_status(record, RunStatus.EXECUTING)
+                    update_resume_context(record, last_operation="execute_start", next_operation="implement_tasks")
+                    _replace_text_at(run_fd, "run.md", run_record_to_markdown(record))
+                    return record
+                else:
+                    raise MetricsFormatError("closed run has incomplete unowned execution residue")
+            finally:
+                if execution_fd is not None:
+                    os.close(execution_fd)
+
+        os.mkdir("execution", 0o700, dir_fd=run_fd)
+        execution_fd = _open_dir_at(run_fd, "execution")
+        owned_identity = os.fstat(execution_fd)
+        state_saved = False
+        try:
+            _write_new_text_at(execution_fd, ".start-transaction.json", marker_text)
+            _write_new_text_at(execution_fd, "progress.md", expected_progress)
+            _write_new_text_at(execution_fd, "metrics.md", expected_metrics)
+            if parse_metrics(_read_text_at(execution_fd, "metrics.md") or "").header["profile"] != profile:
+                raise MetricsFormatError("written metrics failed validation")
+            if _read_text_at(execution_fd, "progress.md") != expected_progress:
+                raise MetricsFormatError("written progress failed validation")
+            record = update_run_status(record, RunStatus.EXECUTING)
+            update_resume_context(record, last_operation="execute_start", next_operation="implement_tasks")
+            try:
+                _replace_text_at(run_fd, "run.md", run_record_to_markdown(record))
+            except _CommittedWriteError:
+                state_saved = True
+                raise
+            else:
+                state_saved = True
+            os.unlink(".start-transaction.json", dir_fd=execution_fd)
+            os.fsync(execution_fd)
+            return record
+        except Exception:
+            if not state_saved:
+                try:
+                    current_dir = os.stat("execution", dir_fd=run_fd, follow_symlinks=False)
+                    marker_now = _read_text_at(execution_fd, ".start-transaction.json", missing_ok=True)
+                    children = set(os.listdir(execution_fd))
+                    if (
+                        stat.S_ISDIR(current_dir.st_mode)
+                        and (current_dir.st_dev, current_dir.st_ino) == (owned_identity.st_dev, owned_identity.st_ino)
+                        and marker_now == marker_text
+                        and children <= {".start-transaction.json", "progress.md", "metrics.md"}
+                    ):
+                        for name in ("metrics.md", "progress.md", ".start-transaction.json"):
+                            if name in children:
+                                child = os.stat(name, dir_fd=execution_fd, follow_symlinks=False)
+                                if not stat.S_ISREG(child.st_mode):
+                                    raise MetricsFormatError("unsafe owned rollback child")
+                                os.unlink(name, dir_fd=execution_fd)
+                        os.fsync(execution_fd)
+                        os.close(execution_fd)
+                        execution_fd = None
+                        os.rmdir("execution", dir_fd=run_fd)
+                        os.fsync(run_fd)
+                except Exception:
+                    pass
+            raise
+        finally:
+            if execution_fd is not None:
+                os.close(execution_fd)
     finally:
-        fcntl.flock(lock_fd, fcntl.LOCK_UN)
-        os.close(lock_fd)
+        if lock_fd is not None and logs_fd is not None:
+            _release_lock(logs_fd, lock_fd)
+        _close_fds(run_fd, workspace_fd, repo_fd)
 
 
 def _read_progress(run_dir: Path) -> str:
@@ -489,25 +846,39 @@ def _marker_for(progress: str, task: int) -> tuple[str, str] | None:
 
 
 def check_prerequisite_v1(base_path: Path, work_id: WorkId, task: int) -> dict[str, Any]:
-    """Validate the legacy task-001/task-002 execution boundary without mutation."""
-    if task not in {1, 2}:
-        raise PrerequisiteError("prerequisite v1 only supports Task 001 or 002")
+    """Validate strict prerequisite semantics v1 without mutating the run."""
     run_dir = Path(base_path) / ".req-to-plan" / str(work_id)
     record = RunStateManager(run_dir).load()
     if record.status != RunStatus.EXECUTING:
         raise PrerequisiteError("run must be EXECUTING")
     plan_text = read_artifact(run_dir, Stage.PLAN)
     anchors = plan_task_anchors(strip_nonsemantic_markdown(plan_text))
-    expected = [f"PLAN-TASK-{number:03d}" for number in range(1, 10)]
-    if [anchor[0] for anchor in anchors] != expected:
-        raise PrerequisiteError("PLAN must have exactly nine contiguous task anchors")
+    expected = [f"PLAN-TASK-{number:03d}" for number in range(1, len(anchors) + 1)]
+    if not anchors or [anchor[0] for anchor in anchors] != expected:
+        raise PrerequisiteError("PLAN must have contiguous task anchors")
+    if task < 1 or task > len(anchors):
+        raise PrerequisiteError("task is outside PLAN bounds")
+    if task in {1, 2} and str(work_id) == SELF_HOSTED_WORK_ID and len(anchors) != 9:
+        raise PrerequisiteError("self-hosted PLAN must have exactly nine task anchors")
     progress = _read_progress(run_dir)
     rows = re.findall(r"^- \[([ x])\] (PLAN-TASK-\d{3})\b", progress, re.MULTILINE)
     if [item[1] for item in rows] != expected:
         raise PrerequisiteError("progress must have the corresponding nine task rows")
-    if re.search(r"^(?:Execution Profile|Profile Escalation|Task \d+: (?:implemented|complete)):", progress, re.MULTILINE):
-        if task == 1:
-            raise PrerequisiteError("Task 001 legacy preflight forbids profile and task markers")
+    profile_lines = re.findall(r"^Execution Profile: (\S+)$", progress, re.MULTILINE)
+    escalation_lines = re.findall(r"^Profile Escalation:.*$", progress, re.MULTILINE)
+    implemented_lines = re.findall(r"^Task \d+: implemented.*$", progress, re.MULTILINE)
+    if escalation_lines or implemented_lines:
+        raise PrerequisiteError("prerequisite v1 rejects fast-only ledger state")
+    if profile_lines not in ([], ["strict"]):
+        raise PrerequisiteError("prerequisite v1 requires legacy or explicit strict profile")
+    marker_like = re.findall(r"^Task (\d+): (?:implemented|complete).*$", progress, re.MULTILINE)
+    complete_markers: dict[int, tuple[str, str]] = {}
+    for number in range(1, len(anchors) + 1):
+        marker = _marker_for(progress, number)
+        if marker is not None:
+            complete_markers[number] = marker
+    if len(marker_like) != len(complete_markers):
+        raise PrerequisiteError("malformed or duplicate task marker")
     base_match = re.search(r"^Execution BASE: ([0-9a-f]{40})$", progress, re.MULTILINE)
     if not base_match:
         raise PrerequisiteError("progress must record a full Execution BASE")
@@ -516,13 +887,34 @@ def check_prerequisite_v1(base_path: Path, work_id: WorkId, task: int) -> dict[s
         raise PrerequisiteError("task is not the lowest unchecked task")
     head = _execution_base(Path(base_path))
     if task == 1:
+        if any(checked == "x" for checked, _ in rows) or complete_markers or profile_lines:
+            raise PrerequisiteError("Task 001 legacy preflight requires untouched ledger state")
         if base_match.group(1) != head:
             raise PrerequisiteError("Task 001 requires full Execution BASE to equal HEAD")
     else:
-        prior = _marker_for(progress, 1)
-        if prior is None or not head.startswith(prior[1]):
-            raise PrerequisiteError("Task 002 requires HEAD at Task 001 reviewed-complete head")
-    return {"version": PREREQUISITE_IMPLEMENTATION_VERSION, "task": task, "task_count": len(anchors), "execution_base": base_match.group(1)}
+        for number in range(1, task):
+            if rows[number - 1][0] != "x" or number not in complete_markers:
+                raise PrerequisiteError("all predecessor tasks must be reviewed-complete")
+        if any(number >= task for number in complete_markers):
+            raise PrerequisiteError("later task marker precedes current dispatch")
+        prior = complete_markers[task - 1]
+        if _resolve_commit(Path(base_path), prior[1]) != head:
+            raise PrerequisiteError("HEAD must equal predecessor reviewed-complete head")
+        expected_base = base_match.group(1)[:7] if task == 2 else complete_markers[task - 2][1]
+        if prior[0] != expected_base:
+            raise PrerequisiteError("completion marker BASE chain is discontinuous")
+    prerequisite = "none" if task == 1 else f"PLAN-TASK-{task - 1:03d}"
+    return {
+        "work_id": str(work_id),
+        "task": task,
+        "implementation_version": PREREQUISITE_IMPLEMENTATION_VERSION,
+        "semantics_version": 1,
+        "effective_profile": "strict",
+        "prerequisite": prerequisite,
+        "satisfied": True,
+        "task_count": len(anchors),
+        "execution_base": base_match.group(1),
+    }
 
 
 def _bootstrap_metrics_text(work_id: WorkId, profile: str, task_count: int) -> str:
@@ -536,136 +928,420 @@ def _bootstrap_metrics_text(work_id: WorkId, profile: str, task_count: int) -> s
 
 
 def bootstrap_self_hosted_metrics(base_path: Path, work_id: WorkId, through_task: int) -> ParsedMetrics:
-    """Publish the one self-hosted metrics header with no replacement fallback."""
+    """Crash-idempotently publish or validate the self-hosted metrics ledger."""
     if str(work_id) != SELF_HOSTED_WORK_ID or through_task != 2:
         raise PrerequisiteError("self-hosted bootstrap arguments are not canonical")
-    run_dir = Path(base_path) / ".req-to-plan" / str(work_id)
-    progress = _read_progress(run_dir)
-    record = RunStateManager(run_dir).load()
-    if record.status != RunStatus.EXECUTING:
-        raise PrerequisiteError("self-hosted bootstrap requires an EXECUTING run")
-    complete_one = _marker_for(progress, 1)
-    complete_two = _marker_for(progress, 2)
-    if complete_one is None or complete_two is None:
-        raise PrerequisiteError("self-hosted bootstrap requires Tasks 001 and 002 reviewed-complete")
-    if not _execution_base(Path(base_path)).startswith(complete_two[1]):
-        raise PrerequisiteError("self-hosted bootstrap requires HEAD at Task 002 reviewed-complete head")
-    if re.search(r"^Task [3-9]:", progress, re.MULTILINE):
-        raise PrerequisiteError("Task 003 must not have started before first bootstrap")
-    execution_dir = run_dir / "execution"
-    lock_fd = _lock_file(run_dir / "logs" / "metrics-bootstrap.lock")
+    repo_fd = workspace_fd = run_fd = execution_fd = None
+    logs_fd = lock_fd = None
+    temp_name = ""
+    temp_fd: int | None = None
+    temp_identity: tuple[int, int] | None = None
+    linked = False
     try:
-        target = execution_dir / "metrics.md"
+        repo_fd, workspace_fd, run_fd = _open_run(Path(base_path), work_id)
+        logs_fd, lock_fd = _open_lock_at(run_fd, "metrics-bootstrap.lock")
+        record = _parse_record_at(run_fd, work_id)
+        if record.status != RunStatus.EXECUTING:
+            raise PrerequisiteError("self-hosted bootstrap requires an EXECUTING run")
+        anchors = plan_task_anchors(strip_nonsemantic_markdown(_plan_at(run_fd)))
+        if [item[0] for item in anchors] != [f"PLAN-TASK-{n:03d}" for n in range(1, 10)]:
+            raise PrerequisiteError("self-hosted bootstrap requires the canonical nine-task PLAN")
+        execution_fd = _open_dir_at(run_fd, "execution")
+        progress = _read_text_at(execution_fd, "progress.md")
+        assert progress is not None
+        complete_one = _marker_for(progress, 1)
+        complete_two = _marker_for(progress, 2)
+        if complete_one is None or complete_two is None:
+            raise PrerequisiteError("self-hosted bootstrap requires Tasks 001 and 002 reviewed-complete")
+        base_match = re.search(r"^Execution BASE: ([0-9a-f]{40})$", progress, re.MULTILINE)
+        profile_lines = re.findall(r"^Execution Profile: (\S+)$", progress, re.MULTILINE)
+        rows = re.findall(r"^- \[([ x])\] (PLAN-TASK-\d{3})\b", progress, re.MULTILINE)
+        if (
+            base_match is None
+            or profile_lines not in ([], ["strict"])
+            or [item[1] for item in rows] != [f"PLAN-TASK-{n:03d}" for n in range(1, 10)]
+            or complete_one[0] != base_match.group(1)[:7]
+            or complete_two[0] != complete_one[1]
+        ):
+            raise PrerequisiteError("self-hosted bootstrap progress/BASE chain is invalid")
         expected = _bootstrap_metrics_text(work_id, "strict", 9)
-        if target.exists() or target.is_symlink():
-            parsed = parse_metrics(read_regular_text(target) or "")
-            if parsed.header != parse_metrics(expected).header:
+        expected_header = parse_metrics(expected).header
+        existing = _read_text_at(execution_fd, "metrics.md", missing_ok=True)
+        if existing is not None:
+            parsed = parse_metrics(existing)
+            if parsed.header != expected_header:
                 raise MetricsFormatError("existing metrics header does not match bootstrap")
+            seen_final = False
+            last_task = 2
+            for invocation in parsed.invocations:
+                task = invocation["task"]
+                if task == "final":
+                    seen_final = True
+                    continue
+                if seen_final or task < 3 or task < last_task:
+                    raise MetricsFormatError("bootstrap invocation blocks are not Task 003+ ordered state")
+                last_task = task
             return parsed
-        nonce = os.urandom(16).hex()
-        temp = execution_dir / f".metrics-bootstrap.{os.getpid()}.{nonce}.tmp"
-        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
-        fd = os.open(temp, flags, 0o600)
+
+        if re.search(r"^Task [3-9]:", progress, re.MULTILINE):
+            raise PrerequisiteError("Task 003 must not have started before first bootstrap")
+        if _resolve_commit(Path(base_path), complete_two[1]) != _execution_base(Path(base_path)):
+            raise PrerequisiteError("self-hosted bootstrap requires HEAD at Task 002 reviewed-complete head")
+
+        temp_name = f".metrics-bootstrap.{os.getpid()}.{secrets.token_hex(16)}.tmp"
+        temp_fd = os.open(temp_name, _FILE_WRITE_FLAGS, 0o600, dir_fd=execution_fd)
         try:
-            os.write(fd, expected.encode("utf-8"))
-            os.fsync(fd)
-            source = os.fstat(fd)
-            before = os.lstat(temp)
+            _write_all(temp_fd, expected.encode("utf-8"))
+            os.fsync(temp_fd)
+            source = os.fstat(temp_fd)
+            temp_identity = (source.st_dev, source.st_ino)
+            before = os.stat(temp_name, dir_fd=execution_fd, follow_symlinks=False)
             if not stat.S_ISREG(source.st_mode) or (source.st_dev, source.st_ino) != (before.st_dev, before.st_ino):
                 raise MetricsFormatError("bootstrap temp identity changed")
             try:
-                os.link(temp, target, follow_symlinks=False)
+                os.link(
+                    temp_name,
+                    "metrics.md",
+                    src_dir_fd=execution_fd,
+                    dst_dir_fd=execution_fd,
+                    follow_symlinks=False,
+                )
+                linked = True
             except FileExistsError:
-                parsed = parse_metrics(read_regular_text(target) or "")
-                if parsed.header != parse_metrics(expected).header:
+                concurrent = _read_text_at(execution_fd, "metrics.md")
+                parsed = parse_metrics(concurrent or "")
+                if parsed.header != expected_header or parsed.invocations:
                     raise MetricsFormatError("concurrent bootstrap target mismatches")
                 return parsed
-            final = os.lstat(target)
-            current = os.lstat(temp)
-            if (final.st_dev, final.st_ino) != (source.st_dev, source.st_ino) or (current.st_dev, current.st_ino) != (source.st_dev, source.st_ino):
+            final = os.stat("metrics.md", dir_fd=execution_fd, follow_symlinks=False)
+            current = os.stat(temp_name, dir_fd=execution_fd, follow_symlinks=False)
+            identity = (source.st_dev, source.st_ino)
+            if (
+                not stat.S_ISREG(final.st_mode)
+                or (final.st_dev, final.st_ino) != identity
+                or (current.st_dev, current.st_ino) != identity
+            ):
                 raise MetricsFormatError("bootstrap publish identity changed")
-            os.fsync(fd)
-            temp.unlink()
-            return parse_metrics(read_regular_text(target) or "")
+            os.fsync(execution_fd)
+            os.unlink(temp_name, dir_fd=execution_fd)
+            temp_name = ""
+            os.fsync(execution_fd)
+            return parse_metrics(_read_text_at(execution_fd, "metrics.md") or "")
         finally:
-            os.close(fd)
+            if temp_fd is not None:
+                os.close(temp_fd)
+                temp_fd = None
+    except Exception:
+        if temp_name and not linked and execution_fd is not None:
+            try:
+                current = os.stat(temp_name, dir_fd=execution_fd, follow_symlinks=False)
+                identity_matches = temp_identity is not None and (current.st_dev, current.st_ino) == temp_identity
+                if identity_matches and _read_text_at(execution_fd, "metrics.md", missing_ok=True) is None:
+                    os.unlink(temp_name, dir_fd=execution_fd)
+            except Exception:
+                pass
+        raise
     finally:
-        fcntl.flock(lock_fd, fcntl.LOCK_UN)
-        os.close(lock_fd)
+        if temp_fd is not None:
+            os.close(temp_fd)
+        if lock_fd is not None and logs_fd is not None:
+            _release_lock(logs_fd, lock_fd)
+        _close_fds(execution_fd, run_fd, workspace_fd, repo_fd)
 
 
-def _sample_error(message: str) -> MetricsFormatError:
-    return MetricsFormatError(f"representative_metrics_missing: {message}")
+_SAMPLE_RULES = (
+    "path_safety",
+    "identity_unique",
+    "archived_strict",
+    "instrumentation_complete",
+    "plan_complete",
+    "final_review_approved",
+    "role_coverage",
+    "measured_fields_complete",
+    "metrics_totals_consistent",
+)
+_ROLE_ORDER = (
+    "implementer",
+    "task_reviewer",
+    "fixer",
+    "task_rereviewer",
+    "final_reviewer",
+    "final_fixer",
+    "final_rereviewer",
+)
 
 
-def _sample_summary(sample_dir: Path) -> dict[str, Any]:
-    if not sample_dir.is_absolute() or sample_dir.is_symlink() or not sample_dir.is_dir():
-        raise _sample_error("sample directory must be an absolute regular directory")
-    canonical = sample_dir.resolve(strict=True)
-    try:
-        work_id = WorkId(canonical.name)
-    except ValueError as exc:
-        raise _sample_error("sample basename is not a WorkId") from exc
-    try:
-        record = RunStateManager(canonical).load()
-        metrics_text = read_regular_text(canonical / "execution" / "metrics.md")
-        progress = read_regular_text(canonical / "execution" / "progress.md")
-        plan_text = read_artifact(canonical, Stage.PLAN)
-        final_review = read_regular_text(canonical / "execution" / "final-review.md")
-    except (FileNotFoundError, UnsafeRegularFileError, ValueError) as exc:
-        raise _sample_error("sample has unsafe or missing authoritative input") from exc
-    if record.work_id != work_id or record.status != RunStatus.ARCHIVED:
-        raise _sample_error("sample is not archived")
-    if str(work_id) == SELF_HOSTED_WORK_ID:
-        raise _sample_error("self-hosted run cannot be a sample")
-    parsed = parse_metrics(metrics_text or "")
-    header = parsed.header
-    if header["profile"] != "strict" or not header["instrumentation_complete"] or header["bootstrap_gap"] != "none" or not header["metrics_finalized"]:
-        raise _sample_error("sample metrics header is not finalized strict instrumentation")
-    if header["instrumentation_schema"] != INSTRUMENTATION_SCHEMA or header["change_shape"] == "unavailable":
-        raise _sample_error("sample schema or shape is unsupported")
-    anchors = plan_task_anchors(strip_nonsemantic_markdown(plan_text))
-    if len(anchors) != header["task_count"]:
-        raise _sample_error("sample PLAN task count differs from metrics")
-    task_ids = [item[0] for item in anchors]
-    if any(not re.search(rf"^- \[x\] {re.escape(task_id)}\b", progress or "", re.MULTILINE) for task_id in task_ids):
-        raise _sample_error("sample progress is incomplete")
-    verdicts = re.findall(r"^Verdict:\s*(.+?)\s*$", final_review or "", re.MULTILINE)
-    if not verdicts or verdicts[-1] != "Approved":
-        raise _sample_error("sample final verdict is not Approved")
-    roles = {role: 0 for role in sorted(_ROLES)}
-    for invocation in parsed.invocations:
-        roles[invocation["role"]] += 1
-    if roles["final_reviewer"] < 1 or any(roles["implementer"] < len(anchors) for _ in [0]) or roles["task_reviewer"] < len(anchors):
-        raise _sample_error("sample role coverage is incomplete")
-    duration = sum((Decimal(item["elapsed_seconds"]) for item in parsed.invocations), Decimal())
-    reports = sum(item["report_bytes"] for item in parsed.invocations)
-    contexts = sum(item["context_bytes"] for item in parsed.invocations)
-    tokens_available = all(item["total_tokens"] != "unavailable" for item in parsed.invocations)
+def _sample_failure(
+    sample_dir: str,
+    work_id: str,
+    rule: str,
+    message: str,
+) -> dict[str, str]:
+    return {"sample_dir": sample_dir, "work_id": work_id, "rule": rule, "message": message}
+
+
+def _sample_error_result(details: list[dict[str, str]]) -> dict[str, Any]:
     return {
-        "path": str(canonical), "work_id": str(work_id), "r2p_version": header["r2p_version"],
-        "instrumentation_schema": header["instrumentation_schema"], "task_count": header["task_count"],
-        "change_shape": header["change_shape"], "role_counts": roles, "final_verdict": "Approved",
-        "duration_seconds": format(duration, "f"), "report_bytes": reports, "context_bytes": contexts,
-        "total_tokens": sum(int(item["total_tokens"]) for item in parsed.invocations) if tokens_available else "unavailable",
+        "status": "error",
+        "message": "BLOCKED: representative_metrics_missing",
+        "exit_code": 3,
+        "details": details,
     }
 
 
-def validate_representative_samples(sample_dirs: tuple[Path, Path, Path]) -> dict[str, Any]:
-    """Validate exactly three pinned archived strict samples without discovery or writes."""
-    if not isinstance(sample_dirs, tuple) or len(sample_dirs) != 3:
-        raise _sample_error("exactly three sample directories are required")
-    summaries = [_sample_summary(Path(path)) for path in sample_dirs]
-    if len({item["path"] for item in summaries}) != 3 or len({item["work_id"] for item in summaries}) != 3:
-        raise _sample_error("sample paths and work IDs must be unique")
-    if len({item["task_count"] for item in summaries}) < 2 and len({item["change_shape"] for item in summaries}) < 2:
-        raise _sample_error("samples are not representative")
+def _six(value: Decimal) -> str:
+    return format(value.quantize(Decimal("0.000001")), "f")
+
+
+def _safe_sample_inputs(sample_dir: Path) -> tuple[str, WorkId, int, int, RunRecord, str, ParsedMetrics, str, str]:
+    raw = os.fspath(sample_dir)
+    if not sample_dir.is_absolute() or any(part in {"..", "."} for part in sample_dir.parts):
+        raise MetricsFormatError("sample directory must be an absolute canonical path")
+    canonical = Path(os.path.abspath(raw))
+    try:
+        before = os.lstat(canonical)
+    except OSError as exc:
+        raise MetricsFormatError("sample directory is missing or unreadable") from exc
+    if not stat.S_ISDIR(before.st_mode):
+        raise MetricsFormatError("sample directory is not a regular directory")
+    try:
+        work_id = WorkId(canonical.name)
+    except ValueError as exc:
+        raise MetricsFormatError("sample basename is not a WorkId") from exc
+    sample_fd = _open_absolute_dir(canonical)
+    execution_fd: int | None = None
+    try:
+        opened = os.fstat(sample_fd)
+        if (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino):
+            raise MetricsFormatError("sample directory identity changed")
+        record = _parse_record_at(sample_fd, work_id)
+        plan = _plan_at(sample_fd)
+        execution_fd = _open_dir_at(sample_fd, "execution")
+        progress = _read_text_at(execution_fd, "progress.md")
+        metrics_text = _read_text_at(execution_fd, "metrics.md")
+        final_review = _read_text_at(execution_fd, "final-review.md")
+        assert progress is not None and metrics_text is not None and final_review is not None
+        metrics = parse_metrics(metrics_text)
+        return str(canonical), work_id, sample_fd, execution_fd, record, plan, metrics, progress, final_review
+    except Exception:
+        if execution_fd is not None:
+            os.close(execution_fd)
+        os.close(sample_fd)
+        raise
+
+
+def _summarize_sample(
+    canonical: str,
+    work_id: WorkId,
+    record: RunRecord,
+    plan: str,
+    parsed: ParsedMetrics,
+    progress: str,
+    final_review: str,
+) -> tuple[dict[str, Any] | None, list[dict[str, str]]]:
+    failures: list[dict[str, str]] = []
+    header = parsed.header
+
+    if record.status != RunStatus.ARCHIVED or header["profile"] != "strict" or str(work_id) == SELF_HOSTED_WORK_ID:
+        failures.append(_sample_failure(canonical, str(work_id), "archived_strict", "sample must be an archived strict non-self-hosted run"))
+    if (
+        header["instrumentation_schema"] != INSTRUMENTATION_SCHEMA
+        or not header["instrumentation_complete"]
+        or header["bootstrap_gap"] != "none"
+        or not header["metrics_finalized"]
+        or header["change_shape"] == "unavailable"
+        or not header["r2p_version"]
+    ):
+        failures.append(_sample_failure(canonical, str(work_id), "instrumentation_complete", "metrics instrumentation is incomplete, unsupported, or unfinalized"))
+
+    anchors = plan_task_anchors(strip_nonsemantic_markdown(plan))
+    task_ids = [item[0] for item in anchors]
+    rows = re.findall(r"^- \[([ x])\] (PLAN-TASK-\d{3})\b", strip_nonsemantic_markdown(progress), re.MULTILINE)
+    plan_ok = (
+        task_ids == [f"PLAN-TASK-{n:03d}" for n in range(1, len(anchors) + 1)]
+        and len(anchors) == header["task_count"]
+        and [task_id for _, task_id in rows] == task_ids
+        and all(mark == "x" for mark, _ in rows)
+    )
+    if not plan_ok:
+        failures.append(_sample_failure(canonical, str(work_id), "plan_complete", "PLAN task count or progress completion is inconsistent"))
+
+    verdicts = re.findall(r"^Verdict:\s*(.+?)\s*$", strip_nonsemantic_markdown(final_review), re.MULTILINE)
+    if not verdicts or verdicts[-1] != "Approved":
+        failures.append(_sample_failure(canonical, str(work_id), "final_review_approved", "last final-review verdict is not Approved"))
+
+    role_counts = {role: 0 for role in _ROLE_ORDER}
+    task_roles: dict[tuple[str, int], int] = {}
+    fixer_waves: set[tuple[int, int]] = set()
+    rereviewer_waves: set[tuple[int, int]] = set()
+    final_fixer_waves: set[int] = set()
+    final_rereviewer_waves: set[int] = set()
+    measured_ok = True
+    totals_ok = True
+    role_elapsed = Decimal()
+    verification_elapsed = Decimal()
+    report_bytes = 0
+    full_suite_count = 0
+    full_suite_duration = Decimal()
+    contexts = {
+        "direct_acs": {"invocation_count": 0, "context_bytes_kind": "declared_payload_bytes", "context_bytes": 0},
+        "semantic_view": {"invocation_count": 0, "context_bytes_kind": "semantic_payload_bytes", "context_bytes": 0},
+    }
+    tokens_available = True
+    input_tokens = output_tokens = total_tokens = 0
+    for invocation in parsed.invocations:
+        role = invocation["role"]
+        role_counts[role] += 1
+        if isinstance(invocation["task"], int):
+            task_roles[(role, invocation["task"])] = task_roles.get((role, invocation["task"]), 0) + 1
+        if role == "fixer":
+            fixer_waves.add((invocation["task"], invocation["fix_wave"]))
+        elif role == "task_rereviewer":
+            rereviewer_waves.add((invocation["task"], invocation["fix_wave"]))
+        elif role == "final_fixer":
+            final_fixer_waves.add(invocation["fix_wave"])
+        elif role == "final_rereviewer":
+            final_rereviewer_waves.add(invocation["fix_wave"])
+        role_elapsed += Decimal(invocation["elapsed_seconds"])
+        report_bytes += invocation["report_bytes"]
+        records = invocation["verification_records"]
+        if records == "unavailable" or invocation["verification_total_seconds"] == "unavailable":
+            measured_ok = False
+            continue
+        record_total = sum((Decimal(item["elapsed_seconds"]) for item in records), Decimal())
+        verification_elapsed += record_total
+        if record_total != Decimal(invocation["verification_total_seconds"]):
+            totals_ok = False
+        for item in records:
+            if item["status"] != "passed":
+                measured_ok = False
+            if item["scope"] == "full_suite":
+                full_suite_count += 1
+                full_suite_duration += Decimal(item["elapsed_seconds"])
+        context = contexts[invocation["context_mode"]]
+        context["invocation_count"] += 1
+        context["context_bytes"] += invocation["context_bytes"]
+        if invocation["total_tokens"] == "unavailable":
+            tokens_available = False
+        elif tokens_available:
+            input_tokens += int(invocation["input_tokens"])
+            output_tokens += int(invocation["output_tokens"])
+            total_tokens += int(invocation["total_tokens"])
+
+    coverage_ok = (
+        role_counts["implementer"] == header["task_count"]
+        and role_counts["task_reviewer"] == header["task_count"]
+        and role_counts["final_reviewer"] >= 1
+        and all(task_roles.get(("implementer", task)) == 1 for task in range(1, header["task_count"] + 1))
+        and all(task_roles.get(("task_reviewer", task)) == 1 for task in range(1, header["task_count"] + 1))
+        and fixer_waves == rereviewer_waves
+        and final_fixer_waves == final_rereviewer_waves
+    )
+    if not coverage_ok:
+        failures.append(_sample_failure(canonical, str(work_id), "role_coverage", "required role coverage or fix-wave pairing is incomplete"))
+    if not measured_ok:
+        failures.append(_sample_failure(canonical, str(work_id), "measured_fields_complete", "required measured timing or verification fields are unavailable/failed"))
+    if not totals_ok:
+        failures.append(_sample_failure(canonical, str(work_id), "metrics_totals_consistent", "verification totals are inconsistent"))
+    if failures:
+        return None, failures
+
+    token_totals: dict[str, Any]
+    if tokens_available:
+        token_totals = {
+            "status": "available",
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "total_tokens": total_tokens,
+        }
+    else:
+        token_totals = {
+            "status": "unavailable",
+            "input_tokens": "unavailable",
+            "output_tokens": "unavailable",
+            "total_tokens": "unavailable",
+        }
+    rules = [{"rule": rule, "status": "passed", "details": []} for rule in _SAMPLE_RULES]
     return {
-        "status": "ok", "samples": summaries,
+        "path": canonical,
+        "work_id": str(work_id),
+        "r2p_version": header["r2p_version"],
+        "instrumentation_schema": header["instrumentation_schema"],
+        "profile": "strict",
+        "task_count": header["task_count"],
+        "change_shape": header["change_shape"],
+        "instrumentation_complete": True,
+        "bootstrap_gap": "none",
+        "metrics_finalized": True,
+        "plan_complete": True,
+        "final_verdict": "Approved",
+        "invocation_count": len(parsed.invocations),
+        "role_counts": role_counts,
+        "role_elapsed_total_seconds": _six(role_elapsed),
+        "verification_total_seconds": _six(verification_elapsed),
+        "report_bytes_total": report_bytes,
+        "full_suite": {"count": full_suite_count, "duration_seconds": _six(full_suite_duration)},
+        "context_totals": contexts,
+        "token_totals": token_totals,
+        "rules": rules,
+    }, []
+
+
+def validate_representative_samples(sample_dirs: tuple[Path, Path, Path]) -> dict[str, Any]:
+    """Validate exactly three pinned archived strict samples without writes."""
+    observed = len(sample_dirs) if isinstance(sample_dirs, tuple) else -1
+    if not isinstance(sample_dirs, tuple) or observed != 3:
+        raise RepresentativeSamplesError(_sample_error_result([
+            _sample_failure("invocation", "unavailable", "argument_count", f"expected 3 sample dirs, observed {observed}")
+        ]))
+
+    summaries: list[dict[str, Any]] = []
+    failures: list[dict[str, str]] = []
+    identities: set[tuple[str, str]] = set()
+    for raw_path in sample_dirs:
+        source = os.fspath(raw_path)
+        sample_fd = execution_fd = None
+        try:
+            canonical, work_id, sample_fd, execution_fd, record, plan, parsed, progress, final_review = _safe_sample_inputs(Path(raw_path))
+        except Exception as exc:
+            failures.append(_sample_failure(source, "unavailable", "path_safety", str(exc)))
+            continue
+        try:
+            identity = (canonical, str(work_id))
+            if identity in identities:
+                failures.append(_sample_failure(source, str(work_id), "identity_unique", "canonical sample path/work ID is duplicated"))
+                continue
+            identities.add(identity)
+            summary, sample_failures = _summarize_sample(
+                canonical, work_id, record, plan, parsed, progress, final_review
+            )
+            failures.extend(sample_failures)
+            if summary is not None:
+                summaries.append(summary)
+        finally:
+            _close_fds(execution_fd, sample_fd)
+
+    if failures:
+        raise RepresentativeSamplesError(_sample_error_result(failures))
+    task_counts = sorted({item["task_count"] for item in summaries})
+    change_shapes = sorted({item["change_shape"] for item in summaries})
+    task_count_diverse = len(task_counts) >= 2
+    change_shape_diverse = len(change_shapes) >= 2
+    if not (task_count_diverse or change_shape_diverse):
+        raise RepresentativeSamplesError(_sample_error_result([
+            _sample_failure("aggregate", "unavailable", "aggregate_representative", "samples lack task-count and change-shape diversity")
+        ]))
+    return {
+        "status": "ok",
+        "message": "representative_metrics_accepted",
+        "samples": summaries,
         "aggregate": {
-            "duration_seconds": format(sum((Decimal(item["duration_seconds"]) for item in summaries), Decimal()), "f"),
-            "report_bytes": sum(item["report_bytes"] for item in summaries),
-            "context_bytes": sum(item["context_bytes"] for item in summaries),
-            "total_tokens": "unavailable" if any(item["total_tokens"] == "unavailable" for item in summaries) else sum(int(item["total_tokens"]) for item in summaries),
+            "sample_count": 3,
+            "work_ids": [item["work_id"] for item in summaries],
+            "task_counts": task_counts,
+            "change_shapes": change_shapes,
+            "task_count_diverse": task_count_diverse,
+            "change_shape_diverse": change_shape_diverse,
+            "representative": True,
         },
     }
