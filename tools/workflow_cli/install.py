@@ -1043,6 +1043,7 @@ def _looks_like_managed_bin_script(content: str) -> bool:
         and (
             "tools.workflow_cli.agent_shortcuts" in content
             or "tools.workflow_cli.install_cli" in content
+            or 'tools.workflow_cli context-view "$@"' in content
         )
     )
     return common and (legacy or trusted_bootstrap)

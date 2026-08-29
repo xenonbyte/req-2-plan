@@ -898,6 +898,20 @@ class TestInstallService:
         svc.uninstall("codex")
         assert not bin_dir.exists(), "bin dir removed after last platform gone"
 
+    def test_uninstall_removes_context_view_wrapper_after_final_shared_platform(self, tmp_path):
+        svc, manifest_root, _ = make_service(tmp_path)
+        svc.install("codex")
+        svc.install("claude")
+        wrapper = manifest_root / "bin" / "r2p-context-view"
+        assert wrapper.exists()
+
+        svc.uninstall("claude")
+        assert wrapper.exists(), "shared wrapper must remain for codex"
+
+        svc.uninstall("codex")
+        assert not wrapper.exists(), "managed context-view wrapper must not be restored"
+        assert not (manifest_root / "bin").exists()
+
     def test_uninstall_preserves_shared_bin_scripts_when_other_platforms_installed(self, tmp_path):
         svc, manifest_root, _ = make_service(tmp_path)
         svc.install("claude")
@@ -1160,8 +1174,17 @@ class TestInstallService:
             assert "{{args}}" in content, command
             assert "!{" in content, command
 
-    @pytest.mark.parametrize("flag", ["-E", "-I"])
-    def test_trusted_and_legacy_isolated_wrappers_are_recognized_as_managed(self, flag):
+    @pytest.mark.parametrize(
+        ("flag", "target"),
+        [
+            ("-E", "tools.workflow_cli.agent_shortcuts start"),
+            ("-I", "tools.workflow_cli.agent_shortcuts start"),
+            ("-E", "tools.workflow_cli context-view"),
+        ],
+    )
+    def test_trusted_and_legacy_isolated_wrappers_are_recognized_as_managed(
+        self, flag, target
+    ):
         from tools.workflow_cli.install import _looks_like_managed_bin_script
 
         wrapper = f"""#!/usr/bin/env bash
@@ -1169,13 +1192,25 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${{BASH_SOURCE[0]}}")" && pwd)"
 REPO_ROOT=/trusted/req-to-plan
 if command -v python3 >/dev/null 2>&1; then
-    exec python3 {flag} "$REPO_ROOT/tools/workflow_cli/__main__.py" tools.workflow_cli.agent_shortcuts start "$@"
+    exec python3 {flag} "$REPO_ROOT/tools/workflow_cli/__main__.py" {target} "$@"
 else
-    exec python {flag} "$REPO_ROOT/tools/workflow_cli/__main__.py" tools.workflow_cli.agent_shortcuts start "$@"
+    exec python {flag} "$REPO_ROOT/tools/workflow_cli/__main__.py" {target} "$@"
 fi
 """
 
         assert _looks_like_managed_bin_script(wrapper)
+
+    def test_context_view_prefix_is_not_recognized_as_a_managed_wrapper(self):
+        from tools.workflow_cli.install import _looks_like_managed_bin_script
+
+        wrapper = """#!/usr/bin/env bash
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT=/trusted/req-to-plan
+exec python3 -E "$REPO_ROOT/tools/workflow_cli/__main__.py" tools.workflow_cli context-view-evil "$@"
+"""
+
+        assert not _looks_like_managed_bin_script(wrapper)
 
     # -----------------------------------------------------------------------
     # Return value shape
