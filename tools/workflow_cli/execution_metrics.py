@@ -699,8 +699,12 @@ def start_execution_transaction(base_path: Path, work_id: WorkId, profile: str) 
                 metrics_text = _read_text_at(execution_fd, "metrics.md")
                 assert progress is not None and metrics_text is not None
                 metrics = parse_metrics(metrics_text)
-                if metrics.header["profile"] != profile or metrics.header["task_count"] != len(anchors):
-                    raise MetricsFormatError("executing run profile/task count conflicts")
+                if (
+                    metrics.header["work_id"] != str(work_id)
+                    or metrics.header["profile"] != profile
+                    or metrics.header["task_count"] != len(anchors)
+                ):
+                    raise MetricsFormatError("executing run metrics work_id/profile/task count conflicts")
                 base_match = re.search(r"^Execution BASE: ([0-9a-f]{40})$", progress, re.MULTILINE)
                 profile_lines = re.findall(r"^Execution Profile: (strict|fast)$", progress, re.MULTILINE)
                 rows = re.findall(r"^- \[[ x]\] (PLAN-TASK-\d{3})\b", progress, re.MULTILINE)
@@ -799,11 +803,14 @@ def start_execution_transaction(base_path: Path, work_id: WorkId, profile: str) 
                     current_dir = os.stat("execution", dir_fd=run_fd, follow_symlinks=False)
                     marker_now = _read_text_at(execution_fd, ".start-transaction.json", missing_ok=True)
                     children = set(os.listdir(execution_fd))
+                    owned_empty = marker_now is None and not children
+                    owned_with_marker = marker_now == marker_text and children <= {
+                        ".start-transaction.json", "progress.md", "metrics.md"
+                    }
                     if (
                         stat.S_ISDIR(current_dir.st_mode)
                         and (current_dir.st_dev, current_dir.st_ino) == (owned_identity.st_dev, owned_identity.st_ino)
-                        and marker_now == marker_text
-                        and children <= {".start-transaction.json", "progress.md", "metrics.md"}
+                        and (owned_empty or owned_with_marker)
                     ):
                         for name in ("metrics.md", "progress.md", ".start-transaction.json"):
                             if name in children:
@@ -1143,7 +1150,51 @@ def _six(value: Decimal) -> str:
     return format(value.quantize(Decimal("0.000001")), "f")
 
 
-def _safe_sample_inputs(sample_dir: Path) -> tuple[str, WorkId, int, int, RunRecord, str, ParsedMetrics, str, str]:
+def _fix_waves(text: str) -> set[int]:
+    semantic = strip_nonsemantic_markdown(text)
+    return {
+        int(match)
+        for match in re.findall(r"(?i)\bfix[ -]wave\s+([1-9][0-9]*)\b", semantic)
+    }
+
+
+def _sample_role_evidence(
+    execution_fd: int,
+    task_count: int,
+    final_review: str,
+) -> dict[str, set[tuple[int, int]] | set[int]]:
+    task_fixers: set[tuple[int, int]] = set()
+    task_rereviewers: set[tuple[int, int]] = set()
+    for task in range(1, task_count + 1):
+        report = _read_text_at(execution_fd, f"task-{task}-report.md", missing_ok=True)
+        review = _read_text_at(execution_fd, f"task-{task}-review.md", missing_ok=True)
+        if report is not None:
+            task_fixers.update((task, wave) for wave in _fix_waves(report))
+        if review is not None:
+            task_rereviewers.update((task, wave) for wave in _fix_waves(review))
+    final_waves = _fix_waves(final_review)
+    return {
+        "fixer": task_fixers,
+        "task_rereviewer": task_rereviewers,
+        "final_fixer": set(final_waves),
+        "final_rereviewer": set(final_waves),
+    }
+
+
+def _safe_sample_inputs(
+    sample_dir: Path,
+) -> tuple[
+    str,
+    WorkId,
+    int,
+    int,
+    RunRecord,
+    str,
+    ParsedMetrics,
+    str,
+    str,
+    dict[str, set[tuple[int, int]] | set[int]],
+]:
     raw = os.fspath(sample_dir)
     if not sample_dir.is_absolute() or any(part in {"..", "."} for part in sample_dir.parts):
         raise MetricsFormatError("sample directory must be an absolute canonical path")
@@ -1172,7 +1223,11 @@ def _safe_sample_inputs(sample_dir: Path) -> tuple[str, WorkId, int, int, RunRec
         final_review = _read_text_at(execution_fd, "final-review.md")
         assert progress is not None and metrics_text is not None and final_review is not None
         metrics = parse_metrics(metrics_text)
-        return str(canonical), work_id, sample_fd, execution_fd, record, plan, metrics, progress, final_review
+        evidence = _sample_role_evidence(execution_fd, metrics.header["task_count"], final_review)
+        return (
+            str(canonical), work_id, sample_fd, execution_fd, record, plan, metrics,
+            progress, final_review, evidence,
+        )
     except Exception:
         if execution_fd is not None:
             os.close(execution_fd)
@@ -1188,6 +1243,7 @@ def _summarize_sample(
     parsed: ParsedMetrics,
     progress: str,
     final_review: str,
+    role_evidence: dict[str, set[tuple[int, int]] | set[int]],
 ) -> tuple[dict[str, Any] | None, list[dict[str, str]]]:
     failures: list[dict[str, str]] = []
     header = parsed.header
@@ -1294,7 +1350,20 @@ def _summarize_sample(
         and fixer_waves == rereviewer_waves
         and final_fixer_waves == final_rereviewer_waves
     )
-    if not coverage_ok:
+    evidence_ok = (
+        role_evidence["fixer"] <= fixer_waves
+        and role_evidence["task_rereviewer"] <= rereviewer_waves
+        and role_evidence["final_fixer"] <= final_fixer_waves
+        and role_evidence["final_rereviewer"] <= final_rereviewer_waves
+    )
+    if not evidence_ok:
+        failures.append(_sample_failure(
+            canonical,
+            str(work_id),
+            "role_coverage",
+            "persistent role/fix-wave evidence is missing matching metrics blocks",
+        ))
+    elif not coverage_ok:
         failures.append(_sample_failure(canonical, str(work_id), "role_coverage", "required role coverage or fix-wave pairing is incomplete"))
     if not measured_ok:
         failures.append(_sample_failure(canonical, str(work_id), "measured_fields_complete", "required measured timing or verification fields are unavailable/failed"))
@@ -1359,7 +1428,10 @@ def validate_representative_samples(sample_dirs: tuple[Path, Path, Path]) -> dic
         source = os.fspath(raw_path)
         sample_fd = execution_fd = None
         try:
-            canonical, work_id, sample_fd, execution_fd, record, plan, parsed, progress, final_review = _safe_sample_inputs(Path(raw_path))
+            (
+                canonical, work_id, sample_fd, execution_fd, record, plan, parsed,
+                progress, final_review, role_evidence,
+            ) = _safe_sample_inputs(Path(raw_path))
         except Exception as exc:
             failures.append(_sample_failure(source, "unavailable", "path_safety", str(exc)))
             continue
@@ -1370,7 +1442,7 @@ def validate_representative_samples(sample_dirs: tuple[Path, Path, Path]) -> dic
                 continue
             identities.add(identity)
             summary, sample_failures = _summarize_sample(
-                canonical, work_id, record, plan, parsed, progress, final_review
+                canonical, work_id, record, plan, parsed, progress, final_review, role_evidence
             )
             failures.extend(sample_failures)
             if summary is not None:

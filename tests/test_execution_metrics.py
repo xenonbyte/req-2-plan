@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import re
 import stat
+import subprocess
 
 import pytest
 
@@ -64,10 +65,16 @@ def _plan(count: int) -> str:
     return "\n".join(f"### PLAN-TASK-{number:03d}: task {number}" for number in range(1, count + 1)) + "\n"
 
 
-def _invocation(role: str, task: int | str, sequence: int, *, context_mode: str = "direct_acs") -> str:
+def _invocation(
+    role: str,
+    task: int | str,
+    sequence: int,
+    *,
+    context_mode: str = "direct_acs",
+    fix_wave: int = 0,
+) -> str:
     status = "approved" if "reviewer" in role else "complete"
     kind = "declared_payload_bytes" if context_mode == "direct_acs" else "semantic_payload_bytes"
-    wave = 0
     return f"""## Invocation {sequence}
 role: {role}
 task: {task}
@@ -83,7 +90,7 @@ verification_total_seconds: 0.100000
 report_bytes: 42
 status: {status}
 concerns_json: []
-fix_wave: {wave}
+fix_wave: {fix_wave}
 input_tokens: unavailable
 output_tokens: unavailable
 total_tokens: unavailable
@@ -860,3 +867,204 @@ def test_bootstrap_temp_cleanup_crash_retries_without_deleting_final(tmp_path, m
     parsed = bootstrap_self_hosted_metrics(tmp_path, work_id, 2)
     assert parsed.header["work_id"] == str(work_id)
     assert len(list(execution.glob(".metrics-bootstrap.*.tmp"))) == 1
+
+
+def test_executing_start_rejects_metrics_for_another_work_id_without_mutation(tmp_path):
+    work_id, run_dir = _closed_run(tmp_path, "WF-20260830-start-identity")
+    start_execution_transaction(tmp_path, work_id, "strict")
+    execution = run_dir / "execution"
+    metrics_path = execution / "metrics.md"
+    progress_path = execution / "progress.md"
+    metrics_path.write_text(
+        metrics_path.read_text(encoding="utf-8").replace(
+            f"work_id: {work_id}",
+            "work_id: WF-20260830-foreign-identity",
+            1,
+        ),
+        encoding="utf-8",
+    )
+    metrics_before = metrics_path.read_bytes()
+    progress_before = progress_path.read_bytes()
+    run_before = (run_dir / "run.md").read_bytes()
+
+    with pytest.raises(MetricsFormatError, match="work_id|identity"):
+        start_execution_transaction(tmp_path, work_id, "strict")
+
+    assert metrics_path.read_bytes() == metrics_before
+    assert progress_path.read_bytes() == progress_before
+    assert (run_dir / "run.md").read_bytes() == run_before
+    assert RunStateManager(run_dir).load().status == RunStatus.EXECUTING
+
+
+@pytest.mark.parametrize("artifact_name", ["task-1-report.md", "task-1-review.md"])
+def test_sample_validator_rejects_fix_wave_evidence_without_role_blocks(tmp_path, artifact_name):
+    one = _archived_sample(tmp_path, "WF-20260830-wave-one", 1, "single_module_code")
+    two = _archived_sample(tmp_path, "WF-20260830-wave-two", 2, "single_module_code")
+    three = _archived_sample(tmp_path, "WF-20260830-wave-three", 1, "docs_only")
+    (one / "execution" / artifact_name).write_text(
+        "# Task 1 Report\n\n## Fix Wave 1\n\nsecret diagnostic body\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(RepresentativeSamplesError) as error:
+        validate_representative_samples((one, two, three))
+
+    assert error.value.result["details"] == [{
+        "sample_dir": str(one),
+        "work_id": "WF-20260830-wave-one",
+        "rule": "role_coverage",
+        "message": "persistent role/fix-wave evidence is missing matching metrics blocks",
+    }]
+    assert "secret diagnostic body" not in json.dumps(error.value.result)
+
+
+def test_sample_validator_accepts_matching_report_review_fix_wave_blocks(tmp_path):
+    one = _archived_sample(tmp_path, "WF-20260830-wave-match-one", 1, "single_module_code")
+    two = _archived_sample(tmp_path, "WF-20260830-wave-match-two", 2, "single_module_code")
+    three = _archived_sample(tmp_path, "WF-20260830-wave-match-three", 1, "docs_only")
+    execution = one / "execution"
+    (execution / "task-1-report.md").write_text(
+        "# Task 1 Report\n\n## Fix Wave 1\n",
+        encoding="utf-8",
+    )
+    (execution / "task-1-review.md").write_text(
+        "# Task 1 Review\n\n## Fix Wave 1\n",
+        encoding="utf-8",
+    )
+    metrics_path = execution / "metrics.md"
+    metrics = metrics_path.read_text(encoding="utf-8")
+    metrics_path.write_text(
+        metrics.replace(
+            _invocation("final_reviewer", "final", 3, context_mode="semantic_view"),
+            _invocation("fixer", 1, 3, fix_wave=1)
+            + "\n"
+            + _invocation("task_rereviewer", 1, 4, fix_wave=1)
+            + "\n"
+            + _invocation("final_reviewer", "final", 5, context_mode="semantic_view"),
+        ),
+        encoding="utf-8",
+    )
+
+    result = validate_representative_samples((one, two, three))
+
+    assert result["samples"][0]["role_counts"]["fixer"] == 1
+    assert result["samples"][0]["role_counts"]["task_rereviewer"] == 1
+
+
+@pytest.mark.parametrize("unsafe_kind", ["symlink", "fifo"])
+def test_sample_validator_rejects_unsafe_report_without_leaking_body(tmp_path, unsafe_kind):
+    one = _archived_sample(tmp_path, "WF-20260830-report-link-one", 1, "single_module_code")
+    two = _archived_sample(tmp_path, "WF-20260830-report-link-two", 2, "single_module_code")
+    three = _archived_sample(tmp_path, "WF-20260830-report-link-three", 1, "docs_only")
+    report = one / "execution" / "task-1-report.md"
+    if unsafe_kind == "symlink":
+        external = tmp_path / "secret-report"
+        external.write_text("do-not-leak-this-report-body\n", encoding="utf-8")
+        report.symlink_to(external)
+    else:
+        os.mkfifo(report)
+
+    with pytest.raises(RepresentativeSamplesError) as error:
+        validate_representative_samples((one, two, three))
+
+    detail = error.value.result["details"][0]
+    assert detail["rule"] == "path_safety"
+    assert "do-not-leak-this-report-body" not in json.dumps(error.value.result)
+
+
+@pytest.mark.parametrize(
+    ("failed_name", "slug"),
+    [(".start-transaction.json", "marker"), ("progress.md", "progress")],
+)
+def test_start_transaction_write_failure_removes_owned_partial(tmp_path, monkeypatch, failed_name, slug):
+    work_id, run_dir = _closed_run(tmp_path, f"WF-20260830-write-failure-{slug}")
+    import tools.workflow_cli.execution_metrics as metrics_module
+
+    original = metrics_module._write_new_text_at
+
+    def fail_selected_write(parent_fd, name, content):
+        if name == failed_name:
+            raise OSError(f"injected {failed_name} write failure")
+        return original(parent_fd, name, content)
+
+    monkeypatch.setattr(metrics_module, "_write_new_text_at", fail_selected_write)
+    with pytest.raises(OSError, match="injected"):
+        start_execution_transaction(tmp_path, work_id, "strict")
+
+    assert not (run_dir / "execution").exists()
+    assert RunStateManager(run_dir).load().status == RunStatus.CLOSED_AT_PLAN_CHECKPOINT
+
+
+def test_start_transaction_preserves_preexisting_empty_execution_directory(tmp_path):
+    work_id, run_dir = _closed_run(tmp_path, "WF-20260830-empty-execution")
+    execution = run_dir / "execution"
+    execution.mkdir()
+
+    with pytest.raises(MetricsFormatError, match="residue"):
+        start_execution_transaction(tmp_path, work_id, "strict")
+
+    assert execution.is_dir()
+    assert list(execution.iterdir()) == []
+    assert RunStateManager(run_dir).load().status == RunStatus.CLOSED_AT_PLAN_CHECKPOINT
+
+
+def test_start_transaction_marker_cleanup_failure_recovers_without_rewriting_ledgers(tmp_path, monkeypatch):
+    work_id, run_dir = _closed_run(tmp_path, "WF-20260830-marker-cleanup")
+    import tools.workflow_cli.execution_metrics as metrics_module
+
+    original_unlink = metrics_module.os.unlink
+    injected = False
+
+    def fail_marker_cleanup(path, *, dir_fd=None):
+        nonlocal injected
+        if path == ".start-transaction.json" and not injected:
+            injected = True
+            raise OSError("injected marker cleanup failure")
+        return original_unlink(path, dir_fd=dir_fd)
+
+    monkeypatch.setattr(metrics_module.os, "unlink", fail_marker_cleanup)
+    with pytest.raises(OSError, match="marker cleanup"):
+        start_execution_transaction(tmp_path, work_id, "strict")
+
+    execution = run_dir / "execution"
+    progress_before = (execution / "progress.md").read_bytes()
+    metrics_before = (execution / "metrics.md").read_bytes()
+    assert RunStateManager(run_dir).load().status == RunStatus.EXECUTING
+    assert (execution / ".start-transaction.json").is_file()
+
+    monkeypatch.setattr(metrics_module.os, "unlink", original_unlink)
+    assert start_execution_transaction(tmp_path, work_id, "strict").status == RunStatus.EXECUTING
+    assert (execution / "progress.md").read_bytes() == progress_before
+    assert (execution / "metrics.md").read_bytes() == metrics_before
+    assert not (execution / ".start-transaction.json").exists()
+
+
+def test_start_transaction_rebuilds_closed_owned_marker_partial(tmp_path):
+    work_id, run_dir = _closed_run(tmp_path, "WF-20260830-owned-rebuild")
+    execution = run_dir / "execution"
+    execution.mkdir()
+    head = subprocess.run(
+        ["git", "-C", str(tmp_path), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    marker = {
+        "schema": 1,
+        "work_id": str(work_id),
+        "profile": "strict",
+        "task_count": 1,
+        "execution_base": head,
+    }
+    (execution / ".start-transaction.json").write_text(
+        json.dumps(marker, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+    (execution / "progress.md").write_text("owned partial\n", encoding="utf-8")
+
+    result = start_execution_transaction(tmp_path, work_id, "strict")
+
+    assert result.status == RunStatus.EXECUTING
+    assert not (execution / ".start-transaction.json").exists()
+    assert "Execution Profile: strict" in (execution / "progress.md").read_text(encoding="utf-8")
+    assert parse_metrics((execution / "metrics.md").read_text(encoding="utf-8")).header["work_id"] == str(work_id)
