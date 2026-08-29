@@ -115,13 +115,21 @@ For each PLAN-TASK (in order):
 
 ### Role dispatch and verification cadence
 
-Every role call is a brand-new zero-history subagent invocation. Create a fresh
-session with zero inherited turns/messages; if the platform cannot guarantee
-that isolation, fail explicitly before dispatch. Never continue or reawaken a
-previous implementer, reviewer, fixer, re-reviewer, or final-review session.
-The handoff is self-contained: work ID/run dir, role, task brief or final input
-paths, Git/BASE boundary, verification contract, report path, and inline return
-contract — never ACS bodies, prior role prose, or controller summaries.
+Every role call is a brand-new zero-history subagent invocation. On Claude Code,
+dispatch the built-in `Agent` tool as a new non-fork invocation: do not configure
+a conversation fork. Do not resume an agent ID. A qualifying new invocation
+has its own context window and receives only its agent/system prompt, the handoff
+prompt, project instructions, and configured tools — not the controller's
+conversation history. On the Claude-derived OpenCode command, dispatch the
+built-in `Task` tool without `task_id`; `task_id` resumes an existing subagent session
+and is forbidden for every role call in this loop. If the active host
+does not expose one of these concrete new-session operations, or cannot prove
+that the selected operation has this no-history contract, fail explicitly before
+dispatch. Never continue or reawaken a previous implementer, reviewer, fixer,
+re-reviewer, or final-review session. The handoff is self-contained: work ID/run
+dir, role, task brief or final input paths, Git/BASE boundary, verification
+contract, report path, and inline return contract — never ACS bodies, prior role
+prose, or controller summaries.
 
 Implementers, task reviewers, fixers, and task re-reviewers default to the
 current task's targeted or directly affected tests. Escalate that task-level

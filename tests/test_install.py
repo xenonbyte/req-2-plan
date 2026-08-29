@@ -1622,6 +1622,8 @@ class TestInstallOpencode:
         content = (ph_root / "opencode" / "commands" / "r2p-execute.md").read_text(encoding="utf-8")
         for token in (
             "brand-new zero-history subagent invocation",
+            "built-in `Task` tool without `task_id`",
+            "`task_id` resumes an existing subagent session",
             "targeted or directly affected tests",
             "execution/metrics.md",
             "verification_records",

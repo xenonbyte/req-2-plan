@@ -558,6 +558,16 @@ class TestExecuteTemplateContent(unittest.TestCase):
         codex = (REPO_ROOT / EXECUTE_SURFACES[1]).read_text(encoding="utf-8")
         self.assertIn('fork_turns="none"', codex)
 
+        claude = (REPO_ROOT / EXECUTE_SURFACES[0]).read_text(encoding="utf-8")
+        for token in (
+            "built-in `Agent` tool",
+            "new non-fork invocation",
+            "Do not resume an agent ID",
+            "built-in `Task` tool without `task_id`",
+            "`task_id` resumes an existing subagent session",
+        ):
+            self.assertIn(token, claude)
+
     def test_gemini_execute_toml_mentions_in_place_and_archive(self):
         text = (REPO_ROOT / "tools/workflow_cli/agent_templates/gemini/commands/r2p-execute.toml").read_text(encoding="utf-8")
         self.assertIn("r2p-execute", text)
