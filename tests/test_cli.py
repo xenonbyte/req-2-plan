@@ -3935,6 +3935,128 @@ class TestContextBuildCommand:
 
 
 # ---------------------------------------------------------------------------
+# context-view command
+# ---------------------------------------------------------------------------
+
+
+class TestContextViewCommand:
+    """SPEC-CONTEXT-011: expose the pinned semantic view through the internal CLI."""
+
+    WORK_ID = "WF-20260830-context-cli"
+
+    @staticmethod
+    def _seed_executing_context_run(base: Path, *, status=RunStatus.EXECUTING) -> Path:
+        from tools.workflow_cli.execution_context import CONTEXT_SOURCE_PATHS
+        from tools.workflow_cli.state import create_run_record
+
+        run_dir = base / ".req-to-plan" / TestContextViewCommand.WORK_ID
+        (run_dir / "execution").mkdir(parents=True)
+        record = create_run_record(WorkId(TestContextViewCommand.WORK_ID))
+        record.status = status
+        record.current_stage = Stage.CLOSED
+        RunStateManager(run_dir).save(record)
+
+        source_text = {
+            "02-project-context.md": "# Context\n你好 <!-- masked -->\n",
+            "03-requirement-brief.md": "brief\n",
+            "04-risk-discovery.md": "risk\n",
+            "05-design.md": "design\n",
+            "06-spec.md": "spec\n",
+            "execution/progress.md": "progress\n",
+        }
+        for relative_path in CONTEXT_SOURCE_PATHS:
+            path = run_dir / relative_path
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(source_text[relative_path], encoding="utf-8")
+        return run_dir
+
+    def test_context_view_emits_exact_human_content_and_json_shape(self, tmp_path, capsys, monkeypatch):
+        run_dir = self._seed_executing_context_run(tmp_path)
+        expected_content = (
+            "===== 02-project-context.md =====\n# Context\n你好\n\n"
+            "===== 03-requirement-brief.md =====\nbrief\n\n"
+            "===== 04-risk-discovery.md =====\nrisk\n\n"
+            "===== 05-design.md =====\ndesign\n\n"
+            "===== 06-spec.md =====\nspec\n\n"
+            "===== execution/progress.md =====\nprogress\n"
+        )
+
+        invoke(["context-view", "--work-id", self.WORK_ID], base_path=tmp_path)
+        assert capsys.readouterr().out == expected_content
+
+        monkeypatch.setenv("R2P_JSON", "1")
+        invoke(["context-view", "--work-id", self.WORK_ID], base_path=tmp_path)
+        payload = json.loads(capsys.readouterr().out)
+        assert set(payload) == {
+            "status", "message", "work_id", "sources", "raw_bytes", "semantic_bytes", "content"
+        }
+        assert payload["status"] == "ok"
+        assert payload["work_id"] == self.WORK_ID
+        assert payload["content"] == expected_content
+        assert [item["path"] for item in payload["sources"]] == [
+            "02-project-context.md",
+            "03-requirement-brief.md",
+            "04-risk-discovery.md",
+            "05-design.md",
+            "06-spec.md",
+            "execution/progress.md",
+        ]
+        assert payload["raw_bytes"] == sum(
+            len(path.read_bytes())
+            for path in (
+                run_dir / "02-project-context.md",
+                run_dir / "03-requirement-brief.md",
+                run_dir / "04-risk-discovery.md",
+                run_dir / "05-design.md",
+                run_dir / "06-spec.md",
+                run_dir / "execution/progress.md",
+            )
+        )
+        assert payload["semantic_bytes"] == len(expected_content.encode("utf-8"))
+
+    def test_context_view_invalid_argument_exits_cli_error(self, tmp_path):
+        self._seed_executing_context_run(tmp_path)
+        invoke(["context-view", "--work-id", "../../outside"], base_path=tmp_path, expect_exit=2)
+
+    def test_context_view_missing_source_exits_not_found_without_partial_content(self, tmp_path, capsys, monkeypatch):
+        run_dir = self._seed_executing_context_run(tmp_path)
+        (run_dir / "06-spec.md").unlink()
+        monkeypatch.setenv("R2P_JSON", "1")
+
+        invoke(["context-view", "--work-id", self.WORK_ID], base_path=tmp_path, expect_exit=7)
+
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["status"] == "error"
+        assert payload["exit_code"] == 7
+        assert "content" not in payload
+        assert "sources" not in payload
+
+    def test_context_view_unsafe_source_and_wrong_status_exit_conflict_without_partial_content(self, tmp_path, capsys, monkeypatch):
+        run_dir = self._seed_executing_context_run(tmp_path)
+        outside = tmp_path / "outside.md"
+        outside.write_text("outside", encoding="utf-8")
+        (run_dir / "04-risk-discovery.md").unlink()
+        (run_dir / "04-risk-discovery.md").symlink_to(outside)
+        monkeypatch.setenv("R2P_JSON", "1")
+
+        invoke(["context-view", "--work-id", self.WORK_ID], base_path=tmp_path, expect_exit=6)
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["status"] == "error"
+        assert payload["exit_code"] == 6
+        assert "content" not in payload
+        assert "sources" not in payload
+
+        run_dir = self._seed_executing_context_run(tmp_path / "closed", status=RunStatus.CLOSED_AT_PLAN_CHECKPOINT)
+        monkeypatch.delenv("R2P_JSON")
+        invoke(
+            ["context-view", "--work-id", self.WORK_ID],
+            base_path=tmp_path / "closed",
+            expect_exit=6,
+        )
+        assert "===== " not in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
 # run-start: Context Pack + link expansion
 # ---------------------------------------------------------------------------
 

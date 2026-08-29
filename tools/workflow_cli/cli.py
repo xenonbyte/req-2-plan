@@ -90,6 +90,12 @@ from tools.workflow_cli.execution_metrics import (
     start_execution_transaction,
     validate_representative_samples,
 )
+from tools.workflow_cli.execution_context import (
+    ContextSourceNotFoundError,
+    ContextViewError,
+    UnsafeContextSourceError,
+    build_context_view,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -2559,12 +2565,55 @@ def _cmd_context_build(args):
     )
 
 
+def _cmd_context_view(args):
+    """Print the complete deterministic semantic context view for an executing run."""
+    work_id = _validate_work_id(args.work_id)
+    try:
+        view = build_context_view(args.base_path or Path.cwd(), work_id)
+    except ContextSourceNotFoundError as exc:
+        print_and_exit(format_error(str(exc), exit_code=EXIT_NOT_FOUND), EXIT_NOT_FOUND)
+    except (UnsafeContextSourceError, ContextViewError) as exc:
+        print_and_exit(format_error(str(exc), exit_code=EXIT_CONFLICT), EXIT_CONFLICT)
+
+    if is_json_mode():
+        print_and_exit(
+            format_success(
+                {
+                    "work_id": view.work_id,
+                    "sources": [
+                        {
+                            "path": source.path,
+                            "raw_bytes": source.raw_bytes,
+                            "semantic_bytes": source.semantic_bytes,
+                        }
+                        for source in view.sources
+                    ],
+                    "raw_bytes": view.raw_bytes,
+                    "semantic_bytes": view.semantic_bytes,
+                    "content": view.content,
+                },
+                message="context view ready",
+            ),
+            EXIT_OK,
+        )
+
+    sys.stdout.write(view.content)
+    sys.exit(EXIT_OK)
+
+
 def _register_context_commands(subparsers):
     p = subparsers.add_parser("context-build", help="Build Project Context Pack for a run")
     p.add_argument("--work-id", required=True)
     p.add_argument("--repo-path", required=True)
     p.add_argument("--base-path", type=Path, default=argparse.SUPPRESS)
     p.set_defaults(func=_cmd_context_build)
+
+    p = subparsers.add_parser(
+        "context-view", help="Print the deterministic semantic context view for an executing run"
+    )
+    p.add_argument("--work-id", required=True)
+    p.add_argument("--base-path", type=Path, default=argparse.SUPPRESS)
+    p.set_defaults(func=_cmd_context_view)
 
 
 # ---------------------------------------------------------------------------
