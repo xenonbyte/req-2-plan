@@ -1068,3 +1068,111 @@ def test_start_transaction_rebuilds_closed_owned_marker_partial(tmp_path):
     assert not (execution / ".start-transaction.json").exists()
     assert "Execution Profile: strict" in (execution / "progress.md").read_text(encoding="utf-8")
     assert parse_metrics((execution / "metrics.md").read_text(encoding="utf-8")).header["work_id"] == str(work_id)
+
+
+@pytest.mark.parametrize(
+    ("blocked_role", "task", "fix_wave", "completed_status"),
+    [
+        ("implementer", 1, 0, "complete"),
+        ("task_reviewer", 1, 0, "changes_requested"),
+        ("fixer", 1, 1, "complete"),
+        ("task_rereviewer", 1, 1, "approved"),
+        ("final_reviewer", "final", 0, "changes_requested"),
+        ("final_fixer", "final", 1, "complete"),
+        ("final_rereviewer", "final", 1, "approved"),
+    ],
+)
+def test_sample_validator_rejects_blocked_role_in_completed_fix_chain(
+    tmp_path,
+    blocked_role,
+    task,
+    fix_wave,
+    completed_status,
+):
+    one = _archived_sample(tmp_path, "WF-20260830-blocked-one", 1, "single_module_code")
+    two = _archived_sample(tmp_path, "WF-20260830-blocked-two", 2, "single_module_code")
+    three = _archived_sample(tmp_path, "WF-20260830-blocked-three", 1, "docs_only")
+    metrics_path = one / "execution" / "metrics.md"
+    header = metrics_path.read_text(encoding="utf-8").split("## Invocation 1", 1)[0]
+    role_specs = [
+        ("implementer", 1, 0, "complete"),
+        ("task_reviewer", 1, 0, "changes_requested"),
+        ("fixer", 1, 1, "complete"),
+        ("task_rereviewer", 1, 1, "approved"),
+        ("final_reviewer", "final", 0, "changes_requested"),
+        ("final_fixer", "final", 1, "complete"),
+        ("final_rereviewer", "final", 1, "approved"),
+    ]
+    blocks = []
+    for sequence, (role, role_task, wave, status_value) in enumerate(role_specs, start=1):
+        block = _invocation(
+            role,
+            role_task,
+            sequence,
+            context_mode="semantic_view" if role.startswith("final_") else "direct_acs",
+            fix_wave=wave,
+        )
+        automatic_status = "approved" if "reviewer" in role else "complete"
+        block = block.replace(f"status: {automatic_status}", f"status: {status_value}")
+        if (role, role_task, wave, status_value) == (
+            blocked_role,
+            task,
+            fix_wave,
+            completed_status,
+        ):
+            block = block.replace(f"status: {status_value}", "status: blocked")
+        blocks.append(block)
+    metrics_path.write_text(header + "\n".join(blocks), encoding="utf-8")
+
+    with pytest.raises(RepresentativeSamplesError) as error:
+        validate_representative_samples((one, two, three))
+
+    assert error.value.result["details"] == [{
+        "sample_dir": str(one),
+        "work_id": "WF-20260830-blocked-one",
+        "rule": "role_coverage",
+        "message": "required role invocation did not complete successfully",
+    }]
+
+
+def test_start_transaction_missing_directory_fd_capability_is_zero_mutation(tmp_path, monkeypatch):
+    work_id, run_dir = _closed_run(tmp_path, "WF-20260830-missing-dir-fd")
+    run_before = (run_dir / "run.md").read_bytes()
+    import tools.workflow_cli.execution_metrics as metrics_module
+
+    monkeypatch.setattr(metrics_module.os, "supports_dir_fd", set())
+
+    with pytest.raises(MetricsFormatError, match="capability unavailable"):
+        start_execution_transaction(tmp_path, work_id, "strict")
+
+    assert (run_dir / "run.md").read_bytes() == run_before
+    assert not (run_dir / "execution").exists()
+    assert RunStateManager(run_dir).load().status == RunStatus.CLOSED_AT_PLAN_CHECKPOINT
+
+
+def test_start_transaction_concurrent_execution_mkdir_collision_preserves_residue(
+    tmp_path,
+    monkeypatch,
+):
+    work_id, run_dir = _closed_run(tmp_path, "WF-20260830-concurrent-execution-dir")
+    run_before = (run_dir / "run.md").read_bytes()
+    import tools.workflow_cli.execution_metrics as metrics_module
+
+    original_mkdir = metrics_module.os.mkdir
+
+    def create_execution_then_collide(path, mode=0o777, *, dir_fd=None):
+        if path == "execution":
+            original_mkdir(path, mode, dir_fd=dir_fd)
+            raise FileExistsError(errno.EEXIST, "injected concurrent execution directory")
+        return original_mkdir(path, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(metrics_module.os, "mkdir", create_execution_then_collide)
+
+    with pytest.raises(FileExistsError, match="concurrent execution directory"):
+        start_execution_transaction(tmp_path, work_id, "strict")
+
+    execution = run_dir / "execution"
+    assert execution.is_dir()
+    assert list(execution.iterdir()) == []
+    assert (run_dir / "run.md").read_bytes() == run_before
+    assert RunStateManager(run_dir).load().status == RunStatus.CLOSED_AT_PLAN_CHECKPOINT

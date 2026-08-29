@@ -1289,6 +1289,9 @@ def _summarize_sample(
     rereviewer_waves: set[tuple[int, int]] = set()
     final_fixer_waves: set[int] = set()
     final_rereviewer_waves: set[int] = set()
+    task_review_statuses: dict[int, list[str]] = {}
+    final_review_statuses: list[str] = []
+    completed_statuses_ok = True
     measured_ok = True
     totals_ok = True
     role_elapsed = Decimal()
@@ -1305,8 +1308,14 @@ def _summarize_sample(
     for invocation in parsed.invocations:
         role = invocation["role"]
         role_counts[role] += 1
+        if invocation["status"] == "blocked":
+            completed_statuses_ok = False
         if isinstance(invocation["task"], int):
             task_roles[(role, invocation["task"])] = task_roles.get((role, invocation["task"]), 0) + 1
+            if role in {"task_reviewer", "task_rereviewer"}:
+                task_review_statuses.setdefault(invocation["task"], []).append(invocation["status"])
+        elif role in {"final_reviewer", "final_rereviewer"}:
+            final_review_statuses.append(invocation["status"])
         if role == "fixer":
             fixer_waves.add((invocation["task"], invocation["fix_wave"]))
         elif role == "task_rereviewer":
@@ -1350,6 +1359,16 @@ def _summarize_sample(
         and fixer_waves == rereviewer_waves
         and final_fixer_waves == final_rereviewer_waves
     )
+    completed_statuses_ok = (
+        completed_statuses_ok
+        and all(
+            task_review_statuses.get(task)
+            and task_review_statuses[task][-1] == "approved"
+            for task in range(1, header["task_count"] + 1)
+        )
+        and bool(final_review_statuses)
+        and final_review_statuses[-1] == "approved"
+    )
     evidence_ok = (
         role_evidence["fixer"] <= fixer_waves
         and role_evidence["task_rereviewer"] <= rereviewer_waves
@@ -1362,6 +1381,13 @@ def _summarize_sample(
             str(work_id),
             "role_coverage",
             "persistent role/fix-wave evidence is missing matching metrics blocks",
+        ))
+    elif not completed_statuses_ok:
+        failures.append(_sample_failure(
+            canonical,
+            str(work_id),
+            "role_coverage",
+            "required role invocation did not complete successfully",
         ))
     elif not coverage_ok:
         failures.append(_sample_failure(canonical, str(work_id), "role_coverage", "required role coverage or fix-wave pairing is incomplete"))
