@@ -1529,7 +1529,7 @@ def _require_finalization_truth(
     progress_lines = [
         line for line, _, _ in unfenced_markdown_lines(semantic_progress)
     ]
-    unchecked_re = re.compile(r"^\s*-\s*\[\s\]\s*(PLAN-TASK-\d+)\b")
+    unchecked_re = re.compile(r"^\s*-\s*\[\s*\]\s*(PLAN-TASK-\d+)\b")
     checked_re = re.compile(r"^\s*-\s*\[[xX]\]\s*(PLAN-TASK-\d+)\b")
     if any(unchecked_re.match(line) for line in progress_lines):
         raise MetricsFormatError("execution progress is incomplete")

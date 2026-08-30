@@ -565,6 +565,30 @@ def test_finalize_accepts_the_same_checked_row_shape_as_authoritative_gate(tmp_p
     assert finalize_metrics(tmp_path, work_id, 3)["result"] == "finalized"
 
 
+@pytest.mark.parametrize("unchecked_inner_whitespace", ("", " ", "   "))
+def test_finalize_rejects_authoritative_unchecked_duplicate_whitespace_without_rewriting(
+    tmp_path, unchecked_inner_whitespace
+):
+    work_id, run_dir, execution, base = _started_metrics_run(tmp_path)
+    _append_complete_metrics_sequence(tmp_path, work_id, execution)
+    head = _commit_paths(tmp_path, ("src/stale-checkbox.py",))
+    _record_authoritative_completion(execution, base, head)
+
+    progress_path = execution / "progress.md"
+    progress = progress_path.read_text(encoding="utf-8")
+    progress += (
+        f"- [{unchecked_inner_whitespace}] PLAN-TASK-001 — stale duplicate\n"
+    )
+    progress_path.write_text(progress, encoding="utf-8")
+    (execution / "final-review.md").write_text("Verdict: Approved\n", encoding="utf-8")
+    before = (execution / "metrics.md").read_bytes()
+
+    assert check_execution_complete(run_dir).passed is False
+    with pytest.raises(MetricsFormatError, match="progress"):
+        finalize_metrics(tmp_path, work_id, 3)
+    assert (execution / "metrics.md").read_bytes() == before
+
+
 @pytest.mark.parametrize("verdict", ("Changes Requested", ""))
 def test_finalize_rejects_nonapproved_or_missing_final_verdict_without_rewriting(
     tmp_path, verdict
