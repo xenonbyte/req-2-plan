@@ -1456,9 +1456,14 @@ def append_metrics_invocation(
                 work_id, parsed.header["profile"], parsed.header["task_count"]
             )
             try:
-                normalized = parse_metrics(header + block).invocations[0]
+                normalized = dict(
+                    parse_metrics(
+                        header + _invocation_block(1, fields)
+                    ).invocations[0]
+                )
             except MetricsFormatError as exc:
                 raise MetricsInputError(str(exc)) from exc
+            normalized["sequence"] = sequence
             if parsed.invocations[sequence - 1] != normalized:
                 raise MetricsFormatError("conflicting retry for existing sequence")
             result = _status_result(parsed, "already_applied")
@@ -1520,11 +1525,25 @@ def _require_finalization_truth(
     ):
         raise MetricsFormatError("metrics instrumentation is incomplete")
     task_count = parsed.header["task_count"]
-    rows = re.findall(r"^- \[([ x])\] PLAN-TASK-(\d{3})\b", progress, re.MULTILINE)
-    if rows != [("x", f"{number:03d}") for number in range(1, task_count + 1)]:
+    semantic_progress = strip_html_comments_outside_fences(progress)
+    progress_lines = [
+        line for line, _, _ in unfenced_markdown_lines(semantic_progress)
+    ]
+    unchecked_re = re.compile(r"^\s*-\s*\[\s\]\s*(PLAN-TASK-\d+)\b")
+    checked_re = re.compile(r"^\s*-\s*\[[xX]\]\s*(PLAN-TASK-\d+)\b")
+    if any(unchecked_re.match(line) for line in progress_lines):
         raise MetricsFormatError("execution progress is incomplete")
+    checked_ids = {
+        match.group(1)
+        for line in progress_lines
+        if (match := checked_re.match(line))
+    }
+    expected_ids = {f"PLAN-TASK-{number:03d}" for number in range(1, task_count + 1)}
+    if not expected_ids.issubset(checked_ids):
+        raise MetricsFormatError("execution progress is incomplete")
+    semantic_progress_text = "\n".join(progress_lines)
     for number in range(1, task_count + 1):
-        if _marker_for(progress, number) is None:
+        if _marker_for(semantic_progress_text, number) is None:
             raise MetricsFormatError("execution progress lacks reviewed-complete task markers")
     final_review = _read_text_at(execution_fd, "final-review.md")
     assert final_review is not None
@@ -1549,7 +1568,9 @@ def _require_finalization_truth(
     )
     if dirty.returncode != 0 or dirty.stdout:
         raise MetricsFormatError("code worktree outside .req-to-plan must be clean")
-    base_match = re.search(r"^Execution BASE: ([0-9a-f]{40})$", progress, re.MULTILINE)
+    base_match = re.search(
+        r"^Execution BASE: ([0-9a-f]{40})$", semantic_progress_text, re.MULTILINE
+    )
     if base_match is None:
         raise MetricsFormatError("progress must record a full Execution BASE")
     execution_base = base_match.group(1)

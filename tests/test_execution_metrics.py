@@ -29,6 +29,7 @@ from tools.workflow_cli.execution_metrics import (
     start_execution_transaction,
     validate_representative_samples,
 )
+from tools.workflow_cli.gates import check_execution_complete
 from tools.workflow_cli.artifact import write_artifact
 from tools.workflow_cli.models import RunStatus, Stage, WorkId
 from tools.workflow_cli.state import RunStateManager, create_run_record
@@ -152,6 +153,63 @@ def _started_metrics_run(tmp_path: Path, *, task_count: int = 1) -> tuple[WorkId
     base = _git_init(tmp_path)
     start_execution_transaction(tmp_path, work_id, "strict")
     return work_id, run_dir, run_dir / "execution", base
+
+
+def _append_complete_metrics_sequence(
+    base_path: Path,
+    work_id: WorkId,
+    execution: Path,
+    *,
+    failed_verification: bool = False,
+) -> None:
+    for sequence, role, task, status in (
+        (1, "implementer", 1, "complete"),
+        (2, "task_reviewer", 1, "approved"),
+        (3, "final_reviewer", "final", "approved"),
+    ):
+        record = _structured_record(
+            execution,
+            expected_sequence=sequence,
+            role=role,
+            task=task,
+            status=status,
+        )
+        if failed_verification and sequence == 3:
+            record["verification_records"][0]["status"] = "failed"
+        append_metrics_invocation(base_path, work_id, record)
+
+
+def _commit_paths(base_path: Path, paths: tuple[str, ...]) -> str:
+    for relative in paths:
+        target = base_path / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(f"content for {relative}\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(base_path), "add", "--", *paths], check=True)
+    subprocess.run(["git", "-C", str(base_path), "commit", "-qm", "change"], check=True)
+    return subprocess.run(
+        ["git", "-C", str(base_path), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+
+def _record_authoritative_completion(
+    execution: Path,
+    base: str,
+    head: str,
+    *,
+    checked_row: str = "- [x] PLAN-TASK-001 — task 1",
+    verdict: str = "Approved",
+) -> None:
+    progress_path = execution / "progress.md"
+    progress = progress_path.read_text(encoding="utf-8")
+    progress = re.sub(r"^- \[ \] PLAN-TASK-001.*$", checked_row, progress, flags=re.MULTILINE)
+    progress += f"\nTask 1: complete (commits {base[:7]}..{head[:7]}, review clean)\n"
+    progress_path.write_text(progress, encoding="utf-8")
+    (execution / "final-review.md").write_text(
+        f"Verdict: {verdict}\n", encoding="utf-8"
+    )
 
 
 def test_structured_metrics_status_append_and_exact_retry(tmp_path):
@@ -460,6 +518,339 @@ def test_finalize_metrics_rejects_incomplete_authoritative_state_without_rewriti
     with pytest.raises(MetricsFormatError, match="progress|role sequence"):
         finalize_metrics(tmp_path, work_id, 0)
     assert (execution / "metrics.md").read_bytes() == before
+
+
+@pytest.mark.parametrize("container", ("fence", "comment"))
+@pytest.mark.parametrize("evidence_kind", ("checkbox", "marker"))
+def test_finalize_rejects_nonsemantic_progress_evidence_without_rewriting(
+    tmp_path, container, evidence_kind
+):
+    work_id, run_dir, execution, base = _started_metrics_run(tmp_path)
+    _append_complete_metrics_sequence(tmp_path, work_id, execution)
+    head = _commit_paths(tmp_path, ("src/semantic.py",))
+    marker = f"Task 1: complete (commits {base[:7]}..{head[:7]}, review clean)"
+    evidence = "- [x] PLAN-TASK-001 — task 1" if evidence_kind == "checkbox" else marker
+    wrapped = f"```text\n{evidence}\n```" if container == "fence" else f"<!--\n{evidence}\n-->"
+    progress_path = execution / "progress.md"
+    replacement = wrapped if evidence_kind == "checkbox" else "- [x] PLAN-TASK-001 — task 1"
+    progress = re.sub(
+        r"^- \[ \] PLAN-TASK-001.*$", replacement,
+        progress_path.read_text(encoding="utf-8"),
+        flags=re.MULTILINE,
+    )
+    progress += f"\n{marker if evidence_kind == 'checkbox' else wrapped}\n"
+    progress_path.write_text(progress, encoding="utf-8")
+    (execution / "final-review.md").write_text("Verdict: Approved\n", encoding="utf-8")
+    before = (execution / "metrics.md").read_bytes()
+
+    assert check_execution_complete(run_dir).passed is (evidence_kind == "marker")
+    with pytest.raises(MetricsFormatError, match="progress"):
+        finalize_metrics(tmp_path, work_id, 3)
+
+    assert (execution / "metrics.md").read_bytes() == before
+
+
+def test_finalize_accepts_the_same_checked_row_shape_as_authoritative_gate(tmp_path):
+    work_id, run_dir, execution, base = _started_metrics_run(tmp_path)
+    _append_complete_metrics_sequence(tmp_path, work_id, execution)
+    head = _commit_paths(tmp_path, ("src/semantic.py",))
+    _record_authoritative_completion(
+        execution,
+        base,
+        head,
+        checked_row="  -  [X] PLAN-TASK-001 — task 1",
+    )
+
+    assert check_execution_complete(run_dir).passed is True
+    assert finalize_metrics(tmp_path, work_id, 3)["result"] == "finalized"
+
+
+@pytest.mark.parametrize("verdict", ("Changes Requested", ""))
+def test_finalize_rejects_nonapproved_or_missing_final_verdict_without_rewriting(
+    tmp_path, verdict
+):
+    work_id, _, execution, base = _started_metrics_run(tmp_path)
+    _append_complete_metrics_sequence(tmp_path, work_id, execution)
+    head = _commit_paths(tmp_path, ("src/verdict.py",))
+    _record_authoritative_completion(execution, base, head, verdict=verdict)
+    before = (execution / "metrics.md").read_bytes()
+
+    with pytest.raises(MetricsFormatError, match="final review"):
+        finalize_metrics(tmp_path, work_id, 3)
+
+    assert (execution / "metrics.md").read_bytes() == before
+
+
+@pytest.mark.parametrize("evidence", ("missing", "blocked", "failed"))
+def test_finalize_rejects_missing_blocked_or_failed_role_evidence_without_rewriting(
+    tmp_path, evidence
+):
+    work_id, _, execution, base = _started_metrics_run(tmp_path)
+    if evidence == "missing":
+        for sequence, role, task, status in (
+            (1, "implementer", 1, "complete"),
+            (2, "task_reviewer", 1, "approved"),
+        ):
+            append_metrics_invocation(
+                tmp_path,
+                work_id,
+                _structured_record(
+                    execution,
+                    expected_sequence=sequence,
+                    role=role,
+                    task=task,
+                    status=status,
+                ),
+            )
+        expected = 2
+    elif evidence == "blocked":
+        append_metrics_invocation(
+            tmp_path,
+            work_id,
+            _structured_record(
+                execution,
+                expected_sequence=1,
+                role="implementer",
+                task=1,
+                status="blocked",
+            ),
+        )
+        expected = 1
+    else:
+        _append_complete_metrics_sequence(
+            tmp_path, work_id, execution, failed_verification=True
+        )
+        expected = 3
+    head = _commit_paths(tmp_path, (f"src/{evidence}.py",))
+    _record_authoritative_completion(execution, base, head)
+    before = (execution / "metrics.md").read_bytes()
+
+    with pytest.raises(MetricsFormatError, match="role sequence|blocked|verification"):
+        finalize_metrics(tmp_path, work_id, expected)
+
+    assert (execution / "metrics.md").read_bytes() == before
+
+
+def test_finalize_rejects_dirty_code_tree_without_rewriting(tmp_path):
+    work_id, _, execution, base = _started_metrics_run(tmp_path)
+    _append_complete_metrics_sequence(tmp_path, work_id, execution)
+    head = _commit_paths(tmp_path, ("src/clean.py",))
+    _record_authoritative_completion(execution, base, head)
+    (tmp_path / "src" / "dirty.py").write_text("dirty = True\n", encoding="utf-8")
+    before = (execution / "metrics.md").read_bytes()
+
+    with pytest.raises(MetricsFormatError, match="worktree"):
+        finalize_metrics(tmp_path, work_id, 3)
+
+    assert (execution / "metrics.md").read_bytes() == before
+
+
+@pytest.mark.parametrize("case", ("empty", "invalid"))
+def test_finalize_rejects_empty_or_invalid_git_diff_without_rewriting(
+    tmp_path, monkeypatch, case
+):
+    work_id, _, execution, base = _started_metrics_run(tmp_path)
+    _append_complete_metrics_sequence(tmp_path, work_id, execution)
+    if case == "empty":
+        head = base
+    else:
+        head = _commit_paths(tmp_path, ("src/invalid.py",))
+        original_run = subprocess.run
+
+        def invalid_name_status(arguments, *args, **kwargs):
+            if "diff" in arguments and "--name-status" in arguments:
+                return subprocess.CompletedProcess(arguments, 0, stdout=b"Z\0src/invalid.py\0")
+            return original_run(arguments, *args, **kwargs)
+
+        monkeypatch.setattr(subprocess, "run", invalid_name_status)
+    _record_authoritative_completion(execution, base, head)
+    before = (execution / "metrics.md").read_bytes()
+
+    with pytest.raises(MetricsFormatError, match="invalid git name-status"):
+        finalize_metrics(tmp_path, work_id, 3)
+
+    assert (execution / "metrics.md").read_bytes() == before
+
+
+def test_finalize_rejects_stale_count_and_self_host_gap_without_rewriting(tmp_path):
+    work_id, _, execution, base = _started_metrics_run(tmp_path)
+    _append_complete_metrics_sequence(tmp_path, work_id, execution)
+    head = _commit_paths(tmp_path, ("src/stale.py",))
+    _record_authoritative_completion(execution, base, head)
+    before = (execution / "metrics.md").read_bytes()
+    with pytest.raises(MetricsFormatError, match="stale"):
+        finalize_metrics(tmp_path, work_id, 2)
+    assert (execution / "metrics.md").read_bytes() == before
+
+    self_host_id, _, self_host_execution, _, _, _ = _bootstrap_ready_run(tmp_path / "self-host")
+    bootstrap_self_hosted_metrics(tmp_path / "self-host", self_host_id, 2)
+    self_host_before = (self_host_execution / "metrics.md").read_bytes()
+    with pytest.raises(MetricsFormatError, match="instrumentation"):
+        finalize_metrics(tmp_path / "self-host", self_host_id, 0)
+    assert (self_host_execution / "metrics.md").read_bytes() == self_host_before
+
+
+def test_append_after_finalized_rejects_new_sequence_but_exact_retry_is_readable(tmp_path):
+    work_id, _, execution, base = _started_metrics_run(tmp_path)
+    _append_complete_metrics_sequence(tmp_path, work_id, execution)
+    head = _commit_paths(tmp_path, ("src/finalized.py",))
+    _record_authoritative_completion(execution, base, head)
+    finalize_metrics(tmp_path, work_id, 3)
+    before = (execution / "metrics.md").read_bytes()
+
+    exact = _structured_record(
+        execution,
+        expected_sequence=3,
+        role="final_reviewer",
+        task="final",
+        status="approved",
+    )
+    assert append_metrics_invocation(tmp_path, work_id, exact)["result"] == "already_applied"
+    with pytest.raises(MetricsFormatError, match="after metrics finalization"):
+        append_metrics_invocation(
+            tmp_path,
+            work_id,
+            _structured_record(
+                execution,
+                expected_sequence=4,
+                role="final_fixer",
+                task="final",
+                status="complete",
+                fix_wave=1,
+            ),
+        )
+
+    assert (execution / "metrics.md").read_bytes() == before
+
+
+def test_append_and_finalize_share_one_nonblocking_lock(tmp_path):
+    work_id, run_dir, execution, base = _started_metrics_run(tmp_path)
+    append_request = _structured_record(
+        execution,
+        expected_sequence=1,
+        role="implementer",
+        task=1,
+        status="complete",
+    )
+    lock_path = run_dir / "logs" / "metrics.lock"
+    lock_path.parent.mkdir(exist_ok=True)
+    before = (execution / "metrics.md").read_bytes()
+    with lock_path.open("a+") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        with pytest.raises(MetricsFormatError, match="busy"):
+            append_metrics_invocation(tmp_path, work_id, append_request)
+        with pytest.raises(MetricsFormatError, match="busy"):
+            finalize_metrics(tmp_path, work_id, 0)
+        fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+    assert (execution / "metrics.md").read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    ("shape", "paths"),
+    (
+        ("migration", ("migrations/001.sql",)),
+        ("single_module_code", ("src/feature.py",)),
+        ("cross_module_code", ("src/feature.py", "lib/helper.py")),
+        ("docs_only", ("docs/guide.md",)),
+        ("config_only", ("settings.yaml",)),
+        ("test_only", ("tests/test_feature.py",)),
+        ("mixed", ("docs/guide.md", "settings.yaml")),
+    ),
+)
+def test_finalize_computes_every_supported_change_shape(tmp_path, shape, paths):
+    work_id, _, execution, base = _started_metrics_run(tmp_path)
+    _append_complete_metrics_sequence(tmp_path, work_id, execution)
+    head = _commit_paths(tmp_path, paths)
+    _record_authoritative_completion(execution, base, head)
+
+    result = finalize_metrics(tmp_path, work_id, 3)
+
+    assert result["change_shape"] == shape
+    assert result["metrics_finalized"] is True
+
+
+def test_isolated_opencode_install_executes_all_metrics_wrappers_to_finalized_state(tmp_path):
+    from tools.workflow_cli.install import InstallService
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    work_id, _, execution, base = _started_metrics_run(workspace)
+    manifest_root = tmp_path / "isolated-home"
+    platform_root = tmp_path / "platforms"
+    service = InstallService(
+        repo_root=Path(__file__).resolve().parents[1],
+        manifest_root=manifest_root,
+        platform_homes={
+            name: platform_root / name
+            for name in ("claude", "codex", "gemini", "opencode")
+        },
+    )
+    service.install("opencode")
+    derived = (
+        platform_root / "opencode" / "commands" / "r2p-execute.md"
+    ).read_text(encoding="utf-8")
+    assert "r2p-metrics-status" in derived
+    assert "r2p-metrics-append" in derived
+    assert "r2p-metrics-finalize" in derived
+    assert "never emits ad-hoc" in derived
+    assert "`## Role` prose" in derived
+
+    environment = os.environ.copy()
+    environment["R2P_JSON"] = "1"
+    environment["PATH"] = (
+        f"{Path(__file__).resolve().parents[1] / '.venv' / 'bin'}:"
+        f"{environment.get('PATH', '')}"
+    )
+
+    def installed(name: str, *arguments: str) -> dict[str, object]:
+        completed = subprocess.run(
+            [str(manifest_root / "bin" / name), *arguments],
+            cwd=workspace,
+            env=environment,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        return json.loads(completed.stdout)
+
+    assert installed("r2p-metrics-status", "--work-id", str(work_id))["next_sequence"] == 1
+    for sequence, role, task, status in (
+        (1, "implementer", 1, "complete"),
+        (2, "task_reviewer", 1, "approved"),
+        (3, "final_reviewer", "final", "approved"),
+    ):
+        result = installed(
+            "r2p-metrics-append",
+            "--work-id",
+            str(work_id),
+            "--record-json",
+            json.dumps(
+                _structured_record(
+                    execution,
+                    expected_sequence=sequence,
+                    role=role,
+                    task=task,
+                    status=status,
+                ),
+                separators=(",", ":"),
+            ),
+        )
+        assert result["result"] == "appended"
+    head = _commit_paths(workspace, ("src/installed.py",))
+    _record_authoritative_completion(execution, base, head)
+
+    result = installed(
+        "r2p-metrics-finalize",
+        "--work-id",
+        str(work_id),
+        "--expected-invocation-count",
+        "3",
+    )
+
+    assert result["result"] == "finalized"
+    parsed = parse_metrics((execution / "metrics.md").read_text(encoding="utf-8"))
+    assert parsed.header["metrics_finalized"] is True
+    assert len(parsed.invocations) == 3
 
 
 def test_metrics_wrappers_produce_archive_accepted_by_unchanged_sample_validator(tmp_path):
