@@ -15,13 +15,17 @@ import pytest
 from tools.workflow_cli.execution_metrics import (
     INSTRUMENTATION_SCHEMA,
     MetricsFormatError,
+    MetricsInputError,
     PrerequisiteError,
     RepresentativeSamplesError,
+    append_metrics_invocation,
     bootstrap_self_hosted_metrics,
     check_prerequisite_v1,
     classify_change_shape,
     parse_metrics,
     quantize_elapsed_seconds,
+    read_metrics_status,
+    finalize_metrics,
     start_execution_transaction,
     validate_representative_samples,
 )
@@ -95,6 +99,453 @@ input_tokens: unavailable
 output_tokens: unavailable
 total_tokens: unavailable
 """
+
+
+def _structured_record(
+    execution: Path,
+    *,
+    expected_sequence: int,
+    role: str,
+    task: int | str,
+    status: str,
+    fix_wave: int = 0,
+) -> dict[str, object]:
+    if task == "final":
+        report = execution / "final-review-report.md"
+    elif "reviewer" in role:
+        report = execution / f"task-{task}-review.md"
+    else:
+        report = execution / f"task-{task}-report.md"
+    report.write_text("report\n", encoding="utf-8")
+    return {
+        "expected_sequence": expected_sequence,
+        "role": role,
+        "task": task,
+        "model": "unavailable",
+        "started_at": "2026-08-31T00:00:00.000000Z",
+        "ended_at": "2026-08-31T00:00:01.000000Z",
+        "elapsed_seconds": "1.000000",
+        "context_mode": "semantic_view",
+        "context_bytes": 123,
+        "verification_records": [{
+            "command": "pytest -q",
+            "scope": "targeted",
+            "reason": "direct contract",
+            "elapsed_seconds": "0.125000",
+            "status": "passed",
+        }],
+        "report_path": str(report),
+        "status": status,
+        "concerns": [],
+        "fix_wave": fix_wave,
+    }
+
+
+def _started_metrics_run(tmp_path: Path, *, task_count: int = 1) -> tuple[WorkId, Path, Path, str]:
+    work_id = WorkId("WF-20260831-structured-metrics")
+    run_dir = tmp_path / ".req-to-plan" / str(work_id)
+    record = create_run_record(work_id)
+    record.status = RunStatus.CLOSED_AT_PLAN_CHECKPOINT
+    record.current_stage = Stage.CLOSED
+    RunStateManager(run_dir).save(record)
+    write_artifact(run_dir, Stage.PLAN, _plan(task_count), version=1, status="approved")
+    base = _git_init(tmp_path)
+    start_execution_transaction(tmp_path, work_id, "strict")
+    return work_id, run_dir, run_dir / "execution", base
+
+
+def test_structured_metrics_status_append_and_exact_retry(tmp_path):
+    work_id, _, execution, _ = _started_metrics_run(tmp_path)
+
+    initial = read_metrics_status(tmp_path, work_id)
+    assert initial["result"] == "status"
+    assert initial["invocation_count"] == 0
+    assert initial["next_sequence"] == 1
+
+    request = _structured_record(
+        execution,
+        expected_sequence=1,
+        role="implementer",
+        task=1,
+        status="complete",
+    )
+    appended = append_metrics_invocation(tmp_path, work_id, request)
+    retried = append_metrics_invocation(tmp_path, work_id, request)
+
+    assert appended["result"] == "appended"
+    assert retried["result"] == "already_applied"
+    parsed = parse_metrics((execution / "metrics.md").read_text(encoding="utf-8"))
+    invocation = parsed.invocations[0]
+    assert invocation["context_bytes_kind"] == "semantic_payload_bytes"
+    assert invocation["verification_total_seconds"] == "0.125000"
+    assert invocation["report_bytes"] == len("report\n".encode())
+
+
+def test_structured_metrics_rejects_record_schema_errors_as_input_errors(tmp_path):
+    work_id, _, execution, _ = _started_metrics_run(tmp_path)
+    record = _structured_record(
+        execution,
+        expected_sequence=1,
+        role="implementer",
+        task=1,
+        status="complete",
+    )
+    with pytest.raises(MetricsInputError, match="unknown"):
+        append_metrics_invocation(tmp_path, work_id, dict(record, surprise=True))
+    with pytest.raises(MetricsInputError, match="fractional"):
+        append_metrics_invocation(tmp_path, work_id, dict(record, elapsed_seconds="1.0"))
+
+
+def test_structured_metrics_rejects_skips_conflicts_and_illegal_role_transitions(tmp_path):
+    work_id, _, execution, _ = _started_metrics_run(tmp_path)
+    first = _structured_record(
+        execution,
+        expected_sequence=1,
+        role="implementer",
+        task=1,
+        status="complete",
+    )
+    append_metrics_invocation(tmp_path, work_id, first)
+
+    with pytest.raises(MetricsFormatError, match="conflict"):
+        append_metrics_invocation(tmp_path, work_id, dict(first, context_bytes=999))
+    with pytest.raises(MetricsFormatError, match="sequence"):
+        append_metrics_invocation(
+            tmp_path,
+            work_id,
+            _structured_record(
+                execution,
+                expected_sequence=3,
+                role="task_reviewer",
+                task=1,
+                status="approved",
+            ),
+        )
+    with pytest.raises(MetricsFormatError, match="role transition"):
+        append_metrics_invocation(
+            tmp_path,
+            work_id,
+            _structured_record(
+                execution,
+                expected_sequence=2,
+                role="implementer",
+                task=1,
+                status="complete",
+            ),
+        )
+
+
+def test_structured_metrics_fix_waves_are_contiguous_paired_and_close_before_final(tmp_path):
+    work_id, _, execution, _ = _started_metrics_run(tmp_path)
+    sequence = (
+        ("implementer", 1, "complete", 0),
+        ("task_reviewer", 1, "changes_requested", 0),
+        ("fixer", 1, "complete", 1),
+        ("task_rereviewer", 1, "changes_requested", 1),
+        ("fixer", 1, "complete", 2),
+        ("task_rereviewer", 1, "approved", 2),
+        ("final_reviewer", "final", "changes_requested", 0),
+        ("final_fixer", "final", "complete", 1),
+        ("final_rereviewer", "final", "approved", 1),
+    )
+    for number, (role, task, status, wave) in enumerate(sequence, start=1):
+        result = append_metrics_invocation(
+            tmp_path,
+            work_id,
+            _structured_record(
+                execution,
+                expected_sequence=number,
+                role=role,
+                task=task,
+                status=status,
+                fix_wave=wave,
+            ),
+        )
+        assert result["sequence"] == number
+    assert read_metrics_status(tmp_path, work_id)["next_sequence"] == 10
+
+
+def test_structured_metrics_records_blocked_role_with_unavailable_verification(tmp_path):
+    work_id, _, execution, _ = _started_metrics_run(tmp_path)
+    record = _structured_record(
+        execution,
+        expected_sequence=1,
+        role="implementer",
+        task=1,
+        status="blocked",
+    )
+    record["verification_records"] = "unavailable"
+
+    result = append_metrics_invocation(tmp_path, work_id, record)
+
+    assert result["result"] == "appended"
+    parsed = parse_metrics((execution / "metrics.md").read_text(encoding="utf-8"))
+    assert parsed.invocations[0]["verification_records"] == "unavailable"
+    assert parsed.invocations[0]["verification_total_seconds"] == "unavailable"
+
+
+def test_structured_metrics_self_host_bootstrap_sequence_starts_at_task_three(tmp_path):
+    work_id, _, execution, _, _, _ = _bootstrap_ready_run(tmp_path)
+    bootstrap_self_hosted_metrics(tmp_path, work_id, 2)
+
+    first = append_metrics_invocation(
+        tmp_path,
+        work_id,
+        _structured_record(
+            execution,
+            expected_sequence=1,
+            role="implementer",
+            task=3,
+            status="complete",
+        ),
+    )
+    second = append_metrics_invocation(
+        tmp_path,
+        work_id,
+        _structured_record(
+            execution,
+            expected_sequence=2,
+            role="task_reviewer",
+            task=3,
+            status="approved",
+        ),
+    )
+
+    assert first["result"] == "appended"
+    assert second["result"] == "appended"
+
+
+def test_structured_metrics_lock_contention_and_unsafe_report_are_fail_closed(tmp_path):
+    work_id, run_dir, execution, _ = _started_metrics_run(tmp_path)
+    lock_path = run_dir / "logs" / "metrics.lock"
+    lock_path.parent.mkdir(exist_ok=True)
+    with lock_path.open("a+") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        with pytest.raises(MetricsFormatError, match="busy"):
+            read_metrics_status(tmp_path, work_id)
+        fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+    outside = tmp_path / "outside-report.md"
+    outside.write_text("outside\n", encoding="utf-8")
+    report = execution / "task-1-report.md"
+    report.symlink_to(outside)
+    record = _structured_record(
+        execution,
+        expected_sequence=1,
+        role="implementer",
+        task=1,
+        status="complete",
+    )
+    report.unlink()
+    report.symlink_to(outside)
+    with pytest.raises(MetricsFormatError, match="non-regular|unsafe"):
+        append_metrics_invocation(tmp_path, work_id, record)
+
+
+def test_structured_metrics_post_commit_retry_recovers_without_duplicate(tmp_path, monkeypatch):
+    import tools.workflow_cli.execution_metrics as metrics_module
+
+    work_id, _, execution, _ = _started_metrics_run(tmp_path)
+    record = _structured_record(
+        execution,
+        expected_sequence=1,
+        role="implementer",
+        task=1,
+        status="complete",
+    )
+    original = metrics_module._replace_text_at
+    injected = False
+
+    def landed_then_uncertain(parent_fd, name, content):
+        nonlocal injected
+        original(parent_fd, name, content)
+        if name == "metrics.md" and not injected:
+            injected = True
+            raise OSError("injected committed-state unknown")
+
+    monkeypatch.setattr(metrics_module, "_replace_text_at", landed_then_uncertain)
+    with pytest.raises(OSError, match="committed-state unknown"):
+        append_metrics_invocation(tmp_path, work_id, record)
+    monkeypatch.setattr(metrics_module, "_replace_text_at", original)
+
+    recovered = append_metrics_invocation(tmp_path, work_id, record)
+    assert recovered["result"] == "already_applied"
+    assert len(parse_metrics((execution / "metrics.md").read_text()).invocations) == 1
+
+
+def test_structured_metrics_precommit_write_failure_preserves_document(tmp_path, monkeypatch):
+    import tools.workflow_cli.execution_metrics as metrics_module
+
+    work_id, _, execution, _ = _started_metrics_run(tmp_path)
+    before = (execution / "metrics.md").read_bytes()
+    monkeypatch.setattr(
+        metrics_module,
+        "_write_all",
+        lambda *args: (_ for _ in ()).throw(OSError("injected short write")),
+    )
+    with pytest.raises(OSError, match="short write"):
+        append_metrics_invocation(
+            tmp_path,
+            work_id,
+            _structured_record(
+                execution,
+                expected_sequence=1,
+                role="implementer",
+                task=1,
+                status="complete",
+            ),
+        )
+    assert (execution / "metrics.md").read_bytes() == before
+    assert not list(execution.glob(".metrics.md.*.tmp"))
+
+
+def test_finalize_metrics_derives_change_shape_closes_header_and_is_idempotent(tmp_path):
+    work_id, _, execution, base = _started_metrics_run(tmp_path)
+    append_metrics_invocation(
+        tmp_path,
+        work_id,
+        _structured_record(
+            execution, expected_sequence=1, role="implementer", task=1, status="complete"
+        ),
+    )
+    append_metrics_invocation(
+        tmp_path,
+        work_id,
+        _structured_record(
+            execution, expected_sequence=2, role="task_reviewer", task=1, status="approved"
+        ),
+    )
+    append_metrics_invocation(
+        tmp_path,
+        work_id,
+        _structured_record(
+            execution, expected_sequence=3, role="final_reviewer", task="final", status="approved"
+        ),
+    )
+    source = tmp_path / "src" / "feature.py"
+    source.parent.mkdir()
+    source.write_text("enabled = True\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(tmp_path), "add", "src/feature.py"], check=True)
+    subprocess.run(["git", "-C", str(tmp_path), "commit", "-qm", "feature"], check=True)
+    head = subprocess.run(
+        ["git", "-C", str(tmp_path), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    progress = (execution / "progress.md").read_text(encoding="utf-8")
+    progress = progress.replace("- [ ] PLAN-TASK-001", "- [x] PLAN-TASK-001")
+    progress += f"\nTask 1: complete (commits {base[:7]}..{head[:7]}, review clean)\n"
+    (execution / "progress.md").write_text(progress, encoding="utf-8")
+    (execution / "final-review.md").write_text(
+        "```text\nVerdict: Changes Requested\n```\nVerdict: Approved\n",
+        encoding="utf-8",
+    )
+
+    finalized = finalize_metrics(tmp_path, work_id, 3)
+    retried = finalize_metrics(tmp_path, work_id, 3)
+
+    assert finalized["result"] == "finalized"
+    assert finalized["change_shape"] == "single_module_code"
+    assert finalized["metrics_finalized"] is True
+    assert retried["result"] == "already_finalized"
+    parsed = parse_metrics((execution / "metrics.md").read_text(encoding="utf-8"))
+    assert parsed.header["change_shape"] == "single_module_code"
+    assert parsed.header["metrics_finalized"] is True
+
+
+def test_finalize_metrics_rejects_incomplete_authoritative_state_without_rewriting(tmp_path):
+    work_id, _, execution, _ = _started_metrics_run(tmp_path)
+    before = (execution / "metrics.md").read_bytes()
+    with pytest.raises(MetricsFormatError, match="progress|role sequence"):
+        finalize_metrics(tmp_path, work_id, 0)
+    assert (execution / "metrics.md").read_bytes() == before
+
+
+def test_metrics_wrappers_produce_archive_accepted_by_unchanged_sample_validator(tmp_path):
+    from tools.workflow_cli.cli import main
+
+    work_id, _, execution, base = _started_metrics_run(tmp_path)
+    repo_root = Path(__file__).resolve().parents[1]
+    environment = os.environ.copy()
+    environment["PATH"] = f"{repo_root / '.venv' / 'bin'}:{environment.get('PATH', '')}"
+    environment["R2P_JSON"] = "1"
+
+    def wrapper(name: str, *arguments: str) -> dict[str, object]:
+        completed = subprocess.run(
+            [str(repo_root / "tools" / name), *arguments],
+            cwd=tmp_path,
+            env=environment,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        return json.loads(completed.stdout)
+
+    status = wrapper("r2p-metrics-status", "--work-id", str(work_id))
+    assert status["result"] == "status"
+    assert status["next_sequence"] == 1
+    for sequence, role, task, status in (
+        (1, "implementer", 1, "complete"),
+        (2, "task_reviewer", 1, "approved"),
+        (3, "final_reviewer", "final", "approved"),
+    ):
+        appended = wrapper(
+            "r2p-metrics-append",
+            "--work-id",
+            str(work_id),
+            "--record-json",
+            json.dumps(
+                _structured_record(
+                    execution,
+                    expected_sequence=sequence,
+                    role=role,
+                    task=task,
+                    status=status,
+                ),
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ),
+        )
+        assert appended["result"] == "appended"
+    source = tmp_path / "src" / "accepted.py"
+    source.parent.mkdir()
+    source.write_text("accepted = True\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(tmp_path), "add", "src/accepted.py"], check=True)
+    subprocess.run(["git", "-C", str(tmp_path), "commit", "-qm", "accepted"], check=True)
+    head = subprocess.run(
+        ["git", "-C", str(tmp_path), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    progress_path = execution / "progress.md"
+    progress = progress_path.read_text(encoding="utf-8").replace(
+        "- [ ] PLAN-TASK-001", "- [x] PLAN-TASK-001"
+    )
+    progress += f"\nTask 1: complete (commits {base[:7]}..{head[:7]}, review clean)\n"
+    progress_path.write_text(progress, encoding="utf-8")
+    (execution / "final-review.md").write_text("Verdict: Approved\n", encoding="utf-8")
+    finalized = wrapper(
+        "r2p-metrics-finalize",
+        "--work-id",
+        str(work_id),
+        "--expected-invocation-count",
+        "3",
+    )
+    assert finalized["result"] == "finalized"
+
+    with pytest.raises(SystemExit) as archived:
+        main(["--base-path", str(tmp_path), "run-archive", "--work-id", str(work_id)])
+    assert archived.value.code == 0
+    produced = tmp_path / ".req-to-plan" / "archive" / str(work_id)
+    fixture_root = tmp_path / "independent-samples"
+    two = _archived_sample(fixture_root, "WF-20260831-independent-two", 2, "single_module_code")
+    three = _archived_sample(fixture_root, "WF-20260831-independent-three", 1, "docs_only")
+
+    accepted = validate_representative_samples((produced, two, three))
+    assert accepted["message"] == "representative_metrics_accepted"
+    assert accepted["samples"][0]["metrics_finalized"] is True
 
 
 def _bootstrap_ready_run(tmp_path: Path) -> tuple[WorkId, Path, Path, str, str, str]:

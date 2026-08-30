@@ -1,8 +1,9 @@
 """Non-authoritative execution metrics primitives.
 
-This module deliberately has no command registration.  It owns the Phase 0
-on-disk metrics grammar and the recoverable execution-start transaction; later
-integration work supplies the CLI and agent-facing orchestration.
+This module deliberately has no command registration. It owns the Phase 0
+on-disk metrics grammar, recoverable execution-start transaction, structured
+role append/status operations, and deterministic finalization. CLI registration
+and agent-facing orchestration remain separate.
 """
 from __future__ import annotations
 
@@ -22,7 +23,12 @@ from typing import Any
 
 from tools.workflow_cli.artifact import _parse_frontmatter, read_artifact
 from tools.workflow_cli.atomic import UnsafeRegularFileError, read_regular_text
-from tools.workflow_cli.markdown import plan_task_anchors, strip_nonsemantic_markdown
+from tools.workflow_cli.markdown import (
+    plan_task_anchors,
+    strip_html_comments_outside_fences,
+    strip_nonsemantic_markdown,
+    unfenced_markdown_lines,
+)
 from tools.workflow_cli.models import RunRecord, RunStatus, STAGE_ARTIFACT_MAP, Stage, WorkId
 from tools.workflow_cli.state import (
     RunStateManager,
@@ -62,6 +68,10 @@ _SHA7 = re.compile(r"^[0-9a-f]{7}$")
 
 class MetricsFormatError(ValueError):
     """The metrics document is absent, malformed, or internally inconsistent."""
+
+
+class MetricsInputError(MetricsFormatError):
+    """A structured metrics request is syntactically valid JSON but invalid input."""
 
 
 class PrerequisiteError(MetricsFormatError):
@@ -1101,6 +1111,519 @@ def bootstrap_self_hosted_metrics(base_path: Path, work_id: WorkId, through_task
     finally:
         if temp_fd is not None:
             os.close(temp_fd)
+        if lock_fd is not None and logs_fd is not None:
+            _release_lock(logs_fd, lock_fd)
+        _close_fds(execution_fd, run_fd, workspace_fd, repo_fd)
+
+
+_APPEND_REQUIRED_KEYS = {
+    "expected_sequence", "role", "task", "model", "started_at", "ended_at",
+    "elapsed_seconds", "context_mode", "context_bytes", "verification_records",
+    "report_path", "status", "concerns", "fix_wave",
+}
+_TOKEN_KEYS = {"input_tokens", "output_tokens", "total_tokens"}
+
+
+def _status_result(parsed: ParsedMetrics, result: str) -> dict[str, Any]:
+    return {
+        "work_id": parsed.header["work_id"],
+        "profile": parsed.header["profile"],
+        "instrumentation_schema": parsed.header["instrumentation_schema"],
+        "result": result,
+        "invocation_count": len(parsed.invocations),
+        "next_sequence": len(parsed.invocations) + 1,
+        "metrics_finalized": parsed.header["metrics_finalized"],
+        "change_shape": parsed.header["change_shape"],
+    }
+
+
+def _open_metrics_run(
+    base_path: Path,
+    work_id: WorkId,
+) -> tuple[int, int, int, int, RunRecord, ParsedMetrics, str]:
+    repo_fd = workspace_fd = run_fd = execution_fd = None
+    try:
+        repo_fd, workspace_fd, run_fd = _open_run(base_path, work_id)
+        record = _parse_record_at(run_fd, work_id)
+        if record.status != RunStatus.EXECUTING:
+            raise MetricsFormatError("metrics operations require an EXECUTING run")
+        anchors = plan_task_anchors(strip_nonsemantic_markdown(_plan_at(run_fd)))
+        if not anchors:
+            raise MetricsFormatError("PLAN contains no PLAN-TASK anchors")
+        execution_fd = _open_dir_at(run_fd, "execution")
+        metrics_text = _read_text_at(execution_fd, "metrics.md")
+        progress = _read_text_at(execution_fd, "progress.md")
+        assert metrics_text is not None and progress is not None
+        parsed = parse_metrics(metrics_text)
+        profiles = re.findall(r"^Execution Profile: (strict|fast)$", progress, re.MULTILINE)
+        if not profiles:
+            profiles = ["strict"]
+        if (
+            parsed.header["work_id"] != str(work_id)
+            or parsed.header["instrumentation_schema"] != INSTRUMENTATION_SCHEMA
+            or parsed.header["task_count"] != len(anchors)
+            or profiles != [parsed.header["profile"]]
+        ):
+            raise MetricsFormatError("metrics header identity does not match the run")
+        return repo_fd, workspace_fd, run_fd, execution_fd, record, parsed, progress
+    except Exception:
+        _close_fds(execution_fd, run_fd, workspace_fd, repo_fd)
+        raise
+
+
+def _validate_current_metrics(
+    run_fd: int,
+    work_id: WorkId,
+    parsed: ParsedMetrics,
+    progress: str,
+) -> None:
+    anchors = plan_task_anchors(strip_nonsemantic_markdown(_plan_at(run_fd)))
+    profiles = re.findall(r"^Execution Profile: (strict|fast)$", progress, re.MULTILINE)
+    if not profiles:
+        profiles = ["strict"]
+    if (
+        not anchors
+        or parsed.header["work_id"] != str(work_id)
+        or parsed.header["instrumentation_schema"] != INSTRUMENTATION_SCHEMA
+        or parsed.header["task_count"] != len(anchors)
+        or profiles != [parsed.header["profile"]]
+    ):
+        raise MetricsFormatError("metrics header identity does not match the run")
+
+
+def _report_name(base_path: Path, work_id: WorkId, value: str) -> str:
+    if not isinstance(value, str) or not value:
+        raise MetricsFormatError("report_path must be a non-empty string")
+    candidate = Path(value)
+    if candidate.is_absolute():
+        expected_parent = (
+            Path(os.path.abspath(os.fspath(base_path)))
+            / ".req-to-plan" / str(work_id) / "execution"
+        )
+        if candidate.parent != expected_parent:
+            raise MetricsFormatError("report_path must be inside this run's execution directory")
+        name = candidate.name
+    else:
+        parts = candidate.parts
+        if len(parts) == 1:
+            name = parts[0]
+        elif len(parts) == 2 and parts[0] == "execution":
+            name = parts[1]
+        else:
+            raise MetricsFormatError("report_path must name one execution artifact")
+    if name in {"", ".", ".."} or "/" in name:
+        raise MetricsFormatError("report_path is unsafe")
+    return name
+
+
+def _canonical_append_fields(
+    base_path: Path,
+    work_id: WorkId,
+    execution_fd: int,
+    record: dict[str, Any],
+) -> tuple[int, tuple[str, ...]]:
+    if not isinstance(record, dict):
+        raise MetricsInputError("record must be a JSON object")
+    keys = set(record)
+    token_keys = keys & _TOKEN_KEYS
+    if keys - _APPEND_REQUIRED_KEYS - _TOKEN_KEYS:
+        raise MetricsInputError("record contains unknown keys")
+    if not _APPEND_REQUIRED_KEYS <= keys:
+        raise MetricsInputError("record is missing required keys")
+    if token_keys and token_keys != _TOKEN_KEYS:
+        raise MetricsInputError("token keys must be supplied as one complete group")
+
+    sequence = record["expected_sequence"]
+    if isinstance(sequence, bool) or not isinstance(sequence, int) or sequence <= 0:
+        raise MetricsInputError("expected_sequence must be a positive integer")
+    string_fields = (
+        "role", "model", "started_at", "ended_at", "elapsed_seconds",
+        "context_mode", "status", "report_path",
+    )
+    if any(not isinstance(record[field], str) for field in string_fields):
+        raise MetricsInputError("record scalar types are invalid")
+    task = record["task"]
+    if not ((isinstance(task, int) and not isinstance(task, bool)) or task == "final"):
+        raise MetricsInputError("task must be a positive integer or final")
+    context_bytes = record["context_bytes"]
+    wave = record["fix_wave"]
+    if (
+        isinstance(context_bytes, bool) or not isinstance(context_bytes, int) or context_bytes < 0
+        or isinstance(wave, bool) or not isinstance(wave, int) or wave < 0
+    ):
+        raise MetricsInputError("numeric record scalar is invalid")
+    records = record["verification_records"]
+    if records != "unavailable" and not isinstance(records, list):
+        raise MetricsInputError("verification_records must be an array or unavailable")
+    concerns = record["concerns"]
+    if not isinstance(concerns, list) or not all(isinstance(item, str) for item in concerns):
+        raise MetricsInputError("concerns must be an array of strings")
+    if records == "unavailable":
+        records_json = "unavailable"
+        total_text = "unavailable"
+    else:
+        total = Decimal()
+        for verification in records:
+            if not isinstance(verification, dict) or set(verification) != {
+                "command", "scope", "reason", "elapsed_seconds", "status"
+            }:
+                raise MetricsInputError("verification record schema is invalid")
+            elapsed = verification.get("elapsed_seconds")
+            if not isinstance(elapsed, str):
+                raise MetricsInputError("verification record elapsed_seconds must be a string")
+            try:
+                total += _parse_decimal(elapsed, "verification record elapsed_seconds")
+            except MetricsFormatError as exc:
+                raise MetricsInputError(str(exc)) from exc
+        records_json = _canonical_json(records)
+        total_text = format(total, "f")
+    context_kind = {
+        "direct_acs": "declared_payload_bytes",
+        "semantic_view": "semantic_payload_bytes",
+    }.get(record["context_mode"])
+    if context_kind is None:
+        raise MetricsInputError("context_mode is invalid")
+    report_text = _read_text_at(
+        execution_fd,
+        _report_name(base_path, work_id, record["report_path"]),
+    )
+    assert report_text is not None
+    tokens: list[str]
+    if token_keys:
+        values = [record[name] for name in ("input_tokens", "output_tokens", "total_tokens")]
+        if any(isinstance(value, bool) or not isinstance(value, int) or value < 0 for value in values):
+            raise MetricsInputError("token values must be non-negative integers")
+        tokens = [str(value) for value in values]
+    else:
+        tokens = ["unavailable"] * 3
+    fields = (
+        str(record["role"]), str(task), str(record["model"]),
+        str(record["started_at"]), str(record["ended_at"]), str(record["elapsed_seconds"]),
+        str(record["context_mode"]), context_kind, str(context_bytes),
+        records_json, total_text,
+        str(len(report_text.encode("utf-8"))), str(record["status"]),
+        _canonical_json(concerns), str(wave), *tokens,
+    )
+    return sequence, fields
+
+
+def _invocation_block(sequence: int, fields: tuple[str, ...]) -> str:
+    lines = [f"## Invocation {sequence}"]
+    lines.extend(f"{name}: {value}" for name, value in zip(_INVOCATION_FIELDS, fields))
+    return "\n".join(lines) + "\n"
+
+
+def _validate_strict_role_sequence(
+    invocations: tuple[dict[str, Any], ...],
+    task_count: int,
+    *,
+    start_task: int = 1,
+    require_complete: bool = False,
+) -> None:
+    if start_task < 1 or start_task > task_count:
+        raise MetricsFormatError("role sequence start task is outside PLAN bounds")
+    task = start_task
+    expected_role = "implementer"
+    expected_wave = 0
+    blocked = False
+    complete = False
+    for invocation in invocations:
+        if blocked or complete:
+            raise MetricsFormatError("illegal role transition after terminal role status")
+        if (
+            invocation["role"] != expected_role
+            or invocation["task"] != ("final" if expected_role.startswith("final_") else task)
+            or invocation["fix_wave"] != expected_wave
+        ):
+            raise MetricsFormatError("illegal role transition")
+        status = invocation["status"]
+        if status == "blocked":
+            blocked = True
+            continue
+        if expected_role == "implementer":
+            expected_role = "task_reviewer"
+        elif expected_role == "task_reviewer":
+            if status == "approved":
+                if task == task_count:
+                    expected_role = "final_reviewer"
+                else:
+                    task += 1
+                    expected_role = "implementer"
+                expected_wave = 0
+            else:
+                expected_role = "fixer"
+                expected_wave = 1
+        elif expected_role == "fixer":
+            expected_role = "task_rereviewer"
+        elif expected_role == "task_rereviewer":
+            if status == "approved":
+                if task == task_count:
+                    expected_role = "final_reviewer"
+                else:
+                    task += 1
+                    expected_role = "implementer"
+                expected_wave = 0
+            else:
+                expected_role = "fixer"
+                expected_wave += 1
+        elif expected_role == "final_reviewer":
+            if status == "approved":
+                complete = True
+            else:
+                expected_role = "final_fixer"
+                expected_wave = 1
+        elif expected_role == "final_fixer":
+            expected_role = "final_rereviewer"
+        elif expected_role == "final_rereviewer":
+            if status == "approved":
+                complete = True
+            else:
+                expected_role = "final_fixer"
+                expected_wave += 1
+    if require_complete and not complete:
+        raise MetricsFormatError("role sequence is incomplete")
+
+
+def _metrics_identity(execution_fd: int) -> tuple[int, int]:
+    before = os.stat("metrics.md", dir_fd=execution_fd, follow_symlinks=False)
+    if not stat.S_ISREG(before.st_mode):
+        raise MetricsFormatError("unsafe non-regular file: metrics.md")
+    return before.st_dev, before.st_ino
+
+
+def _publish_metrics(
+    execution_fd: int,
+    previous_identity: tuple[int, int],
+    text: str,
+) -> ParsedMetrics:
+    current = os.stat("metrics.md", dir_fd=execution_fd, follow_symlinks=False)
+    if not stat.S_ISREG(current.st_mode) or (current.st_dev, current.st_ino) != previous_identity:
+        raise MetricsFormatError("metrics.md identity changed before publish")
+    _replace_text_at(execution_fd, "metrics.md", text)
+    committed = _read_text_at(execution_fd, "metrics.md")
+    assert committed is not None
+    if committed != text:
+        raise MetricsFormatError("committed metrics text does not match request")
+    return parse_metrics(committed)
+
+
+def read_metrics_status(base_path: Path, work_id: WorkId) -> dict[str, Any]:
+    """Return the canonical next metrics sequence without mutating metrics.md."""
+    repo_fd = workspace_fd = run_fd = execution_fd = None
+    logs_fd = lock_fd = None
+    try:
+        repo_fd, workspace_fd, run_fd, execution_fd, _, parsed, _ = _open_metrics_run(
+            Path(base_path), work_id
+        )
+        logs_fd, lock_fd = _open_lock_at(run_fd, "metrics.lock")
+        current = parse_metrics(_read_text_at(execution_fd, "metrics.md") or "")
+        progress = _read_text_at(execution_fd, "progress.md")
+        assert progress is not None
+        _validate_current_metrics(run_fd, work_id, current, progress)
+        return _status_result(current, "status")
+    finally:
+        if lock_fd is not None and logs_fd is not None:
+            _release_lock(logs_fd, lock_fd)
+        _close_fds(execution_fd, run_fd, workspace_fd, repo_fd)
+
+
+def append_metrics_invocation(
+    base_path: Path,
+    work_id: WorkId,
+    record: dict[str, Any],
+) -> dict[str, Any]:
+    """Validate, sequence, and atomically append one controller role record."""
+    repo_fd = workspace_fd = run_fd = execution_fd = None
+    logs_fd = lock_fd = None
+    try:
+        repo_fd, workspace_fd, run_fd, execution_fd, _, _, _ = _open_metrics_run(
+            Path(base_path), work_id
+        )
+        logs_fd, lock_fd = _open_lock_at(run_fd, "metrics.lock")
+        identity = _metrics_identity(execution_fd)
+        text = _read_text_at(execution_fd, "metrics.md")
+        assert text is not None
+        parsed = parse_metrics(text)
+        progress = _read_text_at(execution_fd, "progress.md")
+        assert progress is not None
+        _validate_current_metrics(run_fd, work_id, parsed, progress)
+        sequence, fields = _canonical_append_fields(
+            Path(base_path), work_id, execution_fd, record
+        )
+        block = _invocation_block(sequence, fields)
+        if sequence <= len(parsed.invocations):
+            header = _initial_metrics_text(
+                work_id, parsed.header["profile"], parsed.header["task_count"]
+            )
+            try:
+                normalized = parse_metrics(header + block).invocations[0]
+            except MetricsFormatError as exc:
+                raise MetricsInputError(str(exc)) from exc
+            if parsed.invocations[sequence - 1] != normalized:
+                raise MetricsFormatError("conflicting retry for existing sequence")
+            result = _status_result(parsed, "already_applied")
+        else:
+            if sequence != len(parsed.invocations) + 1:
+                raise MetricsFormatError("expected sequence skips the canonical next sequence")
+            if parsed.header["metrics_finalized"]:
+                raise MetricsFormatError("cannot append after metrics finalization")
+            candidate = text.rstrip("\n") + "\n\n" + block
+            try:
+                updated = parse_metrics(candidate)
+            except MetricsFormatError as exc:
+                raise MetricsInputError(str(exc)) from exc
+            start_task = 3 if (
+                updated.header["work_id"] == SELF_HOSTED_WORK_ID
+                and not updated.header["instrumentation_complete"]
+                and updated.header["bootstrap_gap"] == SELF_HOSTED_BOOTSTRAP_GAP
+            ) else 1
+            _validate_strict_role_sequence(
+                updated.invocations,
+                updated.header["task_count"],
+                start_task=start_task,
+            )
+            parsed = _publish_metrics(execution_fd, identity, candidate)
+            result = _status_result(parsed, "appended")
+        invocation = parsed.invocations[sequence - 1]
+        result.update({
+            "sequence": sequence,
+            "role": invocation["role"],
+            "task": invocation["task"],
+            "fix_wave": invocation["fix_wave"],
+        })
+        return result
+    finally:
+        if lock_fd is not None and logs_fd is not None:
+            _release_lock(logs_fd, lock_fd)
+        _close_fds(execution_fd, run_fd, workspace_fd, repo_fd)
+
+
+def _current_verdict(text: str) -> str | None:
+    value = None
+    semantic = strip_html_comments_outside_fences(text)
+    for line, _, _ in unfenced_markdown_lines(semantic):
+        stripped = line.strip()
+        if stripped[:8].lower() == "verdict:":
+            value = stripped[8:].strip().lower()
+    return value
+
+
+def _require_finalization_truth(
+    base_path: Path,
+    execution_fd: int,
+    parsed: ParsedMetrics,
+    progress: str,
+) -> bytes:
+    if (
+        not parsed.header["instrumentation_complete"]
+        or parsed.header["bootstrap_gap"] != "none"
+    ):
+        raise MetricsFormatError("metrics instrumentation is incomplete")
+    task_count = parsed.header["task_count"]
+    rows = re.findall(r"^- \[([ x])\] PLAN-TASK-(\d{3})\b", progress, re.MULTILINE)
+    if rows != [("x", f"{number:03d}") for number in range(1, task_count + 1)]:
+        raise MetricsFormatError("execution progress is incomplete")
+    for number in range(1, task_count + 1):
+        if _marker_for(progress, number) is None:
+            raise MetricsFormatError("execution progress lacks reviewed-complete task markers")
+    final_review = _read_text_at(execution_fd, "final-review.md")
+    assert final_review is not None
+    if _current_verdict(final_review) != "approved":
+        raise MetricsFormatError("final review is not Approved")
+    _validate_strict_role_sequence(
+        parsed.invocations, parsed.header["task_count"], require_complete=True
+    )
+    for invocation in parsed.invocations:
+        records = invocation["verification_records"]
+        if records == "unavailable" or any(item["status"] != "passed" for item in records):
+            raise MetricsFormatError("all role verification evidence must be measured and passed")
+        if invocation["status"] == "blocked":
+            raise MetricsFormatError("blocked role evidence cannot be finalized")
+    dirty = subprocess.run(
+        [
+            "git", "-C", str(base_path), "status", "--porcelain=v1",
+            "--untracked-files=all", "--", ".", ":(exclude).req-to-plan",
+        ],
+        capture_output=True,
+        check=False,
+    )
+    if dirty.returncode != 0 or dirty.stdout:
+        raise MetricsFormatError("code worktree outside .req-to-plan must be clean")
+    base_match = re.search(r"^Execution BASE: ([0-9a-f]{40})$", progress, re.MULTILINE)
+    if base_match is None:
+        raise MetricsFormatError("progress must record a full Execution BASE")
+    execution_base = base_match.group(1)
+    resolved = subprocess.run(
+        ["git", "-C", str(base_path), "rev-parse", "--verify", f"{execution_base}^{{commit}}"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if resolved.returncode != 0 or resolved.stdout.strip() != execution_base:
+        raise MetricsFormatError("Execution BASE does not resolve exactly")
+    diff = subprocess.run(
+        [
+            "git", "-C", str(base_path), "diff", "--name-status", "-z",
+            execution_base, "HEAD", "--", ".", ":(exclude).req-to-plan",
+        ],
+        capture_output=True,
+        check=False,
+    )
+    if diff.returncode != 0:
+        raise MetricsFormatError("git diff --name-status failed")
+    return diff.stdout
+
+
+def _finalized_metrics_text(text: str, change_shape: str) -> str:
+    lines = text.splitlines()
+    shape_index = 1 + _HEADER_FIELDS.index("change_shape")
+    finalized_index = 1 + _HEADER_FIELDS.index("metrics_finalized")
+    lines[shape_index] = f"change_shape: {change_shape}"
+    lines[finalized_index] = "metrics_finalized: true"
+    return "\n".join(lines) + "\n"
+
+
+def finalize_metrics(
+    base_path: Path,
+    work_id: WorkId,
+    expected_invocation_count: int,
+) -> dict[str, Any]:
+    """Atomically derive change shape and close a complete metrics ledger."""
+    if (
+        isinstance(expected_invocation_count, bool)
+        or not isinstance(expected_invocation_count, int)
+        or expected_invocation_count < 0
+    ):
+        raise MetricsFormatError("expected_invocation_count must be non-negative")
+    repo_fd = workspace_fd = run_fd = execution_fd = None
+    logs_fd = lock_fd = None
+    try:
+        repo_fd, workspace_fd, run_fd, execution_fd, _, _, progress = _open_metrics_run(
+            Path(base_path), work_id
+        )
+        logs_fd, lock_fd = _open_lock_at(run_fd, "metrics.lock")
+        identity = _metrics_identity(execution_fd)
+        text = _read_text_at(execution_fd, "metrics.md")
+        assert text is not None
+        parsed = parse_metrics(text)
+        progress = _read_text_at(execution_fd, "progress.md")
+        assert progress is not None
+        _validate_current_metrics(run_fd, work_id, parsed, progress)
+        if expected_invocation_count != len(parsed.invocations):
+            raise MetricsFormatError("expected invocation count is stale")
+        if parsed.header["metrics_finalized"]:
+            return _status_result(parsed, "already_finalized")
+        name_status = _require_finalization_truth(
+            Path(base_path), execution_fd, parsed, progress
+        )
+        try:
+            shape = classify_change_shape(name_status)
+        except ValueError as exc:
+            raise MetricsFormatError(str(exc)) from exc
+        finalized_text = _finalized_metrics_text(text, shape)
+        parsed = _publish_metrics(execution_fd, identity, finalized_text)
+        return _status_result(parsed, "finalized")
+    finally:
         if lock_fd is not None and logs_fd is not None:
             _release_lock(logs_fd, lock_fd)
         _close_fds(execution_fd, run_fd, workspace_fd, repo_fd)

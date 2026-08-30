@@ -912,6 +912,30 @@ class TestInstallService:
         assert not wrapper.exists(), "managed context-view wrapper must not be restored"
         assert not (manifest_root / "bin").exists()
 
+    def test_metrics_wrappers_are_manifest_owned_shared_and_restore_user_backup(self, tmp_path):
+        svc, manifest_root, _ = make_service(tmp_path)
+        names = ("r2p-metrics-status", "r2p-metrics-append", "r2p-metrics-finalize")
+        user_target = manifest_root / "bin" / "r2p-metrics-append"
+        user_target.parent.mkdir(parents=True)
+        user_bytes = b"#!/usr/bin/env bash\nprintf 'user metrics helper\\n'\n"
+        user_target.write_bytes(user_bytes)
+
+        claude = svc.install("claude")
+        codex = svc.install("codex")
+        for name in names:
+            target = manifest_root / "bin" / name
+            assert target.exists()
+            assert str(target) in claude["installed_paths"]
+            assert str(target) in codex["installed_paths"]
+        assert b"execution-metrics-append" in user_target.read_bytes()
+
+        svc.uninstall("claude")
+        assert all((manifest_root / "bin" / name).exists() for name in names)
+        svc.uninstall("codex")
+        assert user_target.read_bytes() == user_bytes
+        assert not (manifest_root / "bin" / "r2p-metrics-status").exists()
+        assert not (manifest_root / "bin" / "r2p-metrics-finalize").exists()
+
     def test_uninstall_restores_user_context_view_comment_script_byte_identically(self, tmp_path):
         svc, manifest_root, _ = make_service(tmp_path)
         wrapper = manifest_root / "bin" / "r2p-context-view"
@@ -1687,6 +1711,10 @@ class TestInstallOpencode:
             "semantic_view",
             "semantic_payload_bytes",
             "⚠️ DEFER",
+            "r2p-metrics-status",
+            "r2p-metrics-append",
+            "r2p-metrics-finalize",
+            "metrics_incomplete",
         ):
             assert token in content
 

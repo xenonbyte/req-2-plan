@@ -270,6 +270,17 @@ it stops and asks you rather than guessing.
 **Execution metrics (Phase 0).**
 
 Normal `run-execute-start` creates `execution/metrics.md` alongside progress.
+Controllers must treat that document as CLI-owned structural data: call
+`r2p-metrics-status --work-id <id>` at start/resume,
+`r2p-metrics-append --work-id <id> --record-json '<json>'` after every completed
+role report, and `r2p-metrics-finalize --work-id <id>` with
+`--expected-invocation-count <N>` after the approved final review. Append derives
+the canonical sequence, context byte kind, verification total, and report byte
+count; finalize derives `change_shape` from the Execution BASE diff and
+atomically sets `metrics_finalized: true`. Exact retries are idempotent. A
+metrics failure is reported as `metrics_incomplete`; metrics remain
+non-authoritative and do not add an archive gate.
+
 The controller owns this append-only observation ledger; it never participates
 in run state, completion, resume, final-review, or archive gates. It records a
 block for every role call with elapsed time, report bytes, verification records,

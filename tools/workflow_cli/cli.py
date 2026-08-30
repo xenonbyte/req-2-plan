@@ -7,6 +7,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import shutil
@@ -82,11 +83,15 @@ from tools.workflow_cli.markdown import (
 )
 from tools.workflow_cli.execution_metrics import (
     MetricsFormatError,
+    MetricsInputError,
     PrerequisiteError,
     RepresentativeSamplesError,
     _canonical_json,
+    append_metrics_invocation,
     bootstrap_self_hosted_metrics,
     check_prerequisite_v1,
+    finalize_metrics,
+    read_metrics_status,
     start_execution_transaction,
     validate_representative_samples,
 )
@@ -992,6 +997,70 @@ def _cmd_execution_metrics_bootstrap(args):
             message="metrics_bootstrapped",
         ),
         EXIT_OK,
+    )
+
+
+def _metrics_result_or_exit(operation, *values):
+    try:
+        result = operation(*values)
+    except MetricsInputError as exc:
+        print_and_exit(format_error(str(exc), exit_code=EXIT_CLI_ERR), EXIT_CLI_ERR)
+    except (MetricsFormatError, PrerequisiteError, OSError) as exc:
+        print_and_exit(format_error(str(exc), exit_code=EXIT_CONFLICT), EXIT_CONFLICT)
+    print_and_exit(format_success(result, message=result["result"]), EXIT_OK)
+
+
+def _cmd_execution_metrics_status(args):
+    _metrics_result_or_exit(
+        read_metrics_status,
+        args.base_path or Path.cwd(),
+        _validate_work_id(args.work_id),
+    )
+
+
+def _json_object_without_duplicate_keys(raw: str) -> dict:
+    def pairs_hook(pairs):
+        value = {}
+        for key, item in pairs:
+            if key in value:
+                raise ValueError(f"duplicate JSON key: {key}")
+            value[key] = item
+        return value
+
+    try:
+        parsed = json.loads(
+            raw,
+            object_pairs_hook=pairs_hook,
+            parse_constant=lambda value: (_ for _ in ()).throw(
+                ValueError(f"non-finite JSON value: {value}")
+            ),
+        )
+    except (json.JSONDecodeError, ValueError) as exc:
+        print_and_exit(format_error(str(exc), exit_code=EXIT_CLI_ERR), EXIT_CLI_ERR)
+    if not isinstance(parsed, dict):
+        print_and_exit(
+            format_error("--record-json must be one JSON object", exit_code=EXIT_CLI_ERR),
+            EXIT_CLI_ERR,
+        )
+    return parsed
+
+
+def _cmd_execution_metrics_append(args):
+    record = _json_object_without_duplicate_keys(args.record_json)
+    _metrics_result_or_exit(
+        append_metrics_invocation,
+        args.base_path or Path.cwd(),
+        _validate_work_id(args.work_id),
+        record,
+    )
+
+
+def _cmd_execution_metrics_finalize(args):
+    _metrics_result_or_exit(
+        finalize_metrics,
+        args.base_path or Path.cwd(),
+        _validate_work_id(args.work_id),
+        args.expected_invocation_count,
     )
 
 
@@ -1960,6 +2029,17 @@ def _positive_int(raw: str) -> int:
     return n
 
 
+def _nonnegative_int(raw: str) -> int:
+    """argparse type: non-negative integer; raises ArgumentTypeError -> exit 2."""
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("expected a non-negative integer") from exc
+    if value < 0:
+        raise argparse.ArgumentTypeError("expected a non-negative integer")
+    return value
+
+
 def _cmd_plan_task_brief(args):
     """Write a read-only task brief for one PLAN-TASK-NNN to logs/task-N-brief.md."""
     record, mgr, run_dir = _load_run(args.work_id, args.base_path)
@@ -2092,6 +2172,29 @@ def _register_run_commands(subparsers):
     p.add_argument("--profile", required=True, choices=["strict"])
     p.add_argument("--self-hosted-gap-through-task", required=True, type=_positive_int)
     p.set_defaults(func=_cmd_execution_metrics_bootstrap)
+
+    p = subparsers.add_parser(
+        "execution-metrics-status",
+        help="Read the canonical metrics append/finalization status",
+    )
+    p.add_argument("--work-id", required=True)
+    p.set_defaults(func=_cmd_execution_metrics_status)
+
+    p = subparsers.add_parser(
+        "execution-metrics-append",
+        help="Atomically append one structured role invocation",
+    )
+    p.add_argument("--work-id", required=True)
+    p.add_argument("--record-json", required=True)
+    p.set_defaults(func=_cmd_execution_metrics_append)
+
+    p = subparsers.add_parser(
+        "execution-metrics-finalize",
+        help="Atomically derive change shape and finalize metrics",
+    )
+    p.add_argument("--work-id", required=True)
+    p.add_argument("--expected-invocation-count", required=True, type=_nonnegative_int)
+    p.set_defaults(func=_cmd_execution_metrics_finalize)
 
     p = subparsers.add_parser(
         "execution-samples-validate",

@@ -4424,6 +4424,95 @@ class TestRunArchive:
 
 
 class TestExecutionPhaseZeroIntegration:
+    def test_structured_metrics_commands_format_stable_results_and_reject_duplicate_json_keys(
+        self, monkeypatch
+    ):
+        from tools.workflow_cli import cli
+
+        base_result = {
+            "work_id": "WF-20260101-exec",
+            "profile": "strict",
+            "instrumentation_schema": 1,
+            "result": "status",
+            "invocation_count": 0,
+            "next_sequence": 1,
+            "metrics_finalized": False,
+            "change_shape": "unavailable",
+        }
+        monkeypatch.setattr(cli, "read_metrics_status", lambda *args: base_result, raising=False)
+        monkeypatch.setattr(
+            cli,
+            "append_metrics_invocation",
+            lambda *args: dict(
+                base_result,
+                result="appended",
+                invocation_count=1,
+                next_sequence=2,
+                sequence=1,
+                role="implementer",
+                task=1,
+                fix_wave=0,
+            ),
+            raising=False,
+        )
+        monkeypatch.setattr(
+            cli,
+            "finalize_metrics",
+            lambda *args: dict(
+                base_result,
+                result="finalized",
+                metrics_finalized=True,
+                change_shape="single_module_code",
+            ),
+            raising=False,
+        )
+
+        commands = [
+            ["execution-metrics-status", "--work-id", "WF-20260101-exec"],
+            [
+                "execution-metrics-append", "--work-id", "WF-20260101-exec",
+                "--record-json", '{"expected_sequence":1}',
+            ],
+            [
+                "execution-metrics-finalize", "--work-id", "WF-20260101-exec",
+                "--expected-invocation-count", "1",
+            ],
+        ]
+        for command in commands:
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output), pytest.raises(SystemExit) as exc:
+                main(["--base-path", "/tmp/metrics", *command])
+            assert exc.value.code == 0
+            assert "work_id: WF-20260101-exec" in output.getvalue()
+            assert "next_sequence:" in output.getvalue()
+
+        with pytest.raises(SystemExit) as exc:
+            main([
+                "execution-metrics-append", "--work-id", "WF-20260101-exec",
+                "--record-json", '{"expected_sequence":1,"expected_sequence":2}',
+            ])
+        assert exc.value.code == 2
+
+        with pytest.raises(SystemExit) as exc:
+            main([
+                "execution-metrics-finalize", "--work-id", "WF-20260101-exec",
+                "--expected-invocation-count", "-1",
+            ])
+        assert exc.value.code == 2
+
+        from tools.workflow_cli.execution_metrics import MetricsInputError
+        monkeypatch.setattr(
+            cli,
+            "append_metrics_invocation",
+            lambda *args: (_ for _ in ()).throw(MetricsInputError("unknown record key")),
+        )
+        with pytest.raises(SystemExit) as exc:
+            main([
+                "execution-metrics-append", "--work-id", "WF-20260101-exec",
+                "--record-json", '{"surprise":true}',
+            ])
+        assert exc.value.code == 2
+
     def test_execute_start_defaults_to_strict_transaction_and_formats_human_result(self, monkeypatch):
         from tools.workflow_cli import cli
         from tools.workflow_cli.models import WorkId

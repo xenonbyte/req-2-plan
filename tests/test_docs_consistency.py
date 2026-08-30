@@ -545,6 +545,12 @@ class TestExecuteTemplateContent(unittest.TestCase):
             "⚠️ DEFER",
             "semantic_view",
             "semantic_payload_bytes",
+            "r2p-metrics-status",
+            "r2p-metrics-append",
+            "r2p-metrics-finalize",
+            "expected_sequence",
+            "already_applied",
+            "metrics_incomplete",
         )
         for surface in EXECUTE_SURFACES:
             text = (REPO_ROOT / surface).read_text(encoding="utf-8")
@@ -574,6 +580,10 @@ class TestExecuteTemplateContent(unittest.TestCase):
         self.assertNotIn("fast is opt-in", text)
         self.assertNotIn("preflight/eligibility handshake", text)
         self.assertIn("r2p-context-view", text)
+        self.assertIn("r2p-metrics-status", text)
+        self.assertIn("r2p-metrics-append", text)
+        self.assertIn("r2p-metrics-finalize", text)
+        self.assertIn("metrics_incomplete", text)
 
 
 if __name__ == "__main__":

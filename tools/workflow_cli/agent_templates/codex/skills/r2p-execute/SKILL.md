@@ -25,6 +25,40 @@ implementer, reviewer, fixer, re-reviewer, and final-role call. Record only
 measured values: unavailable model, timing, or Token values stay `unavailable`;
 do not estimate Token counts from bytes or elapsed time.
 
+### Structured metrics protocol
+
+The controller never hand-edits `execution/metrics.md` and never emits ad-hoc
+`## Role` prose. At start and on every resume, call
+`{{R2P_BIN_DIR}}/r2p-metrics-status --work-id <id>` and retain only
+`next_sequence` plus `metrics_finalized`. Before dispatching each role, capture
+its measured UTC start and monotonic start. After the role returns and its
+compact report exists, capture the measured end/duration, map the role result to
+the canonical status, and call
+`{{R2P_BIN_DIR}}/r2p-metrics-append --work-id <id> --record-json '<json>'`
+before dispatching another role or advancing a progress checkbox. The JSON
+record carries `expected_sequence`, role/task/model/times, context mode/bytes,
+ordered verification records, report path, status, concerns, fix wave, and only
+platform-measured Token values. The CLI derives the heading, byte kind,
+verification total, and report bytes.
+
+Canonical status mapping is exact: implementer/fixer/final-fixer DONE or
+DONE_WITH_CONCERNS maps to `complete`; task/final reviewer APPROVED maps to
+`approved`; CHANGES_REQUESTED maps to `changes_requested`; NEEDS_CONTEXT or
+BLOCKED maps to `blocked`. A blocked append is terminal for a validator-eligible
+strict metrics sequence: stop the execution loop and surface the blocker rather
+than dispatching a later role that the CLI must reject.
+
+On retry or resume, call status first and reuse the exact same record and
+`expected_sequence`; accept `already_applied`, never count headings or invent a
+new sequence. A busy/conflict result is retried only with that exact request.
+After the appended final reviewer or final re-reviewer is approved and the last
+unfenced final verdict is `Verdict: Approved`, call
+`{{R2P_BIN_DIR}}/r2p-metrics-finalize --work-id <id> --expected-invocation-count <N>`.
+The CLI alone derives `change_shape` and atomically closes finalization. Surface
+any metrics command failure as `metrics_incomplete`; do not rewrite progress or
+final-review truth. Metrics remain non-authoritative, so this does not add a new
+archive gate and the unchanged `r2p-archive` flow follows finalization.
+
 ## In-Place Execution (no branch)
 
 Work directly on the **current branch** — do NOT create a new branch, worktree, or protection boundary.
@@ -103,7 +137,7 @@ history, and prior task reports/reviews.
 
 ### Ledger Ownership and Sibling Escalation
 
-Default position/ownership derives from the ledger's `PLAN-TASK-NNN <title>` list (stay within the brief's Files/Steps; treat every other listed task ID as owned elsewhere). The full `07-plan.md` is not handed to subagents; whole-plan reasoning stays with the controller's Pre-flight read. An unclear sibling boundary → the subagent returns `NEEDS_CONTEXT` / `BLOCKED`; the controller resolves it or hands a specific `r2p-task-brief --task <M>` single-task brief and re-dispatches — never a whole-plan read or a guess from the title.
+Default position/ownership derives from the ledger's `PLAN-TASK-NNN <title>` list (stay within the brief's Files/Steps; treat every other listed task ID as owned elsewhere). The full `07-plan.md` is not handed to subagents; whole-plan reasoning stays with the controller's Pre-flight read. Resolve an unclear sibling boundary before dispatch, optionally by handing a specific `r2p-task-brief --task <M>` brief. If a dispatched role still returns `NEEDS_CONTEXT` / `BLOCKED`, append its terminal blocked record and stop — never re-dispatch, hand over the whole PLAN, or guess from the title.
 
 ### Path Delivery and Fail-Closed Preflight
 
@@ -175,7 +209,7 @@ The implementer must:
 ### 3. Handle implementer status
 
 - **DONE / DONE_WITH_CONCERNS**: proceed to review
-- **NEEDS_CONTEXT**: the implementer needs missing information — provide it and re-dispatch the fresh implementer subagent
+- **NEEDS_CONTEXT**: append the terminal blocked metrics record, stop, and surface the missing information
 - **BLOCKED**: assess the blocker; provide context, use a more capable model, or break the task into smaller pieces; escalate to the human if the plan itself is wrong
 
 ### 4. Ambiguity ladder
@@ -268,7 +302,7 @@ On resume, read `execution/progress.md` before the final review and reuse its `E
 | Condition | Action |
 |---|---|
 | Status not `closed_at_plan_checkpoint` or `executing` | Stop: `plan_not_ready` |
-| Implementer returns `NEEDS_CONTEXT` | Provide missing context, re-dispatch fresh implementer subagent |
+| Implementer returns `NEEDS_CONTEXT` | Append the terminal blocked metrics record, stop, and surface the missing information |
 | Upstream PLAN/SPEC/DESIGN defect found | Stop: ask the human to reopen/repair the upstream stage |
 | Platform lacks subagent capability | Fail explicitly (subagents are a hard prerequisite) |
 

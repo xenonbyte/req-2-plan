@@ -823,15 +823,16 @@ class InstallService:
             content = backup_path.read_text(encoding="utf-8")
         except UnicodeDecodeError:
             return False
-        if target.name == "r2p-context-view":
-            source = self.repo_root / "tools" / target.name
-            try:
+        source = self.repo_root / "tools" / target.name
+        try:
+            if source.is_file():
                 expected = _render_bin_script(
                     source.read_text(encoding="utf-8"), self.repo_root
                 )
-            except (OSError, UnicodeDecodeError):
-                return False
-            return content == expected
+                if content == expected:
+                    return True
+        except (OSError, UnicodeDecodeError):
+            return False
         return _looks_like_managed_bin_script(content)
 
     def _strip_path_from_manifest(self, manifest_path: Path, path_str: str) -> None:
