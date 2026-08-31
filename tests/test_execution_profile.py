@@ -255,6 +255,16 @@ _SAMPLE_RULES = (
 
 
 def _accepted_sample(number: int, *, task_count: int, change_shape: str) -> dict:
+    role_counts = {
+        "implementer": task_count,
+        "task_reviewer": task_count,
+        "fixer": 1,
+        "task_rereviewer": 1,
+        "final_reviewer": 1,
+        "final_fixer": 0,
+        "final_rereviewer": 0,
+    }
+    invocation_count = sum(role_counts.values())
     return {
         "path": f"/accepted/WF-20260831-sample-{number}",
         "work_id": f"WF-20260831-sample-{number}",
@@ -268,20 +278,20 @@ def _accepted_sample(number: int, *, task_count: int, change_shape: str) -> dict
         "metrics_finalized": True,
         "plan_complete": True,
         "final_verdict": "Approved",
-        "invocation_count": 9,
-        "role_counts": {role: 1 for role in _SAMPLE_ROLES},
+        "invocation_count": invocation_count,
+        "role_counts": role_counts,
         "role_elapsed_total_seconds": "1.000000",
         "verification_total_seconds": "1.000000",
         "report_bytes_total": 1,
         "full_suite": {"count": 1, "duration_seconds": "1.000000"},
         "context_totals": {
             "direct_acs": {
-                "invocation_count": 1,
+                "invocation_count": 0,
                 "context_bytes_kind": "declared_payload_bytes",
-                "context_bytes": 1,
+                "context_bytes": 0,
             },
             "semantic_view": {
-                "invocation_count": 1,
+                "invocation_count": invocation_count,
                 "context_bytes_kind": "semantic_payload_bytes",
                 "context_bytes": 1,
             },
@@ -398,8 +408,58 @@ def test_evidence_consumption_translates_unsafe_regular_file_failures(
     monkeypatch.setattr(
         execution_profile,
         "read_regular_text",
-        lambda _path: (_ for _ in ()).throw(UnsafeRegularFileError("identity changed")),
+        lambda _path: (_ for _ in ()).throw(UnsafeRegularFileError(unsafe_message)),
     )
 
     with pytest.raises(ExecutionProfileError, match="unreadable"):
+        consume_accepted_sample_evidence(path)
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    (
+        lambda evidence: evidence["samples"][0].__setitem__("instrumentation_schema", 0),
+        lambda evidence: evidence["samples"][0].__setitem__("change_shape", "invented"),
+        lambda evidence: evidence["samples"][1].__setitem__("path", evidence["samples"][0]["path"]),
+        lambda evidence: evidence["samples"][1].__setitem__("work_id", evidence["samples"][0]["work_id"]),
+        lambda evidence: evidence["samples"][0]["role_counts"].__setitem__("implementer", 0),
+        lambda evidence: evidence["samples"][0].__setitem__("invocation_count", 0),
+        lambda evidence: evidence["samples"][0]["full_suite"].__setitem__("count", 0),
+        lambda evidence: evidence["samples"][0].__setitem__("role_elapsed_total_seconds", "1.0"),
+        lambda evidence: evidence["samples"][0].__setitem__("verification_total_seconds", "0.999999"),
+        lambda evidence: evidence["samples"][0]["context_totals"]["semantic_view"].__setitem__(
+            "invocation_count", 2
+        ),
+        lambda evidence: evidence["samples"][0]["token_totals"].update(
+            {"status": "available", "input_tokens": 1, "output_tokens": 2, "total_tokens": 4}
+        ),
+    ),
+)
+def test_evidence_consumption_rejects_producer_impossible_values(tmp_path, mutate):
+    evidence = _accepted_evidence()
+    mutate(evidence)
+    path = tmp_path / "phase-3-sample-evidence.json"
+    path.write_text(json.dumps(evidence), encoding="utf-8")
+
+    with pytest.raises(ExecutionProfileError, match="incomplete"):
+        consume_accepted_sample_evidence(path)
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    (
+        lambda evidence: evidence.__setitem__("extra", "value"),
+        lambda evidence: evidence["samples"][0].__setitem__("extra", "value"),
+        lambda evidence: evidence["samples"][0]["role_counts"].__setitem__("extra", 1),
+        lambda evidence: evidence["samples"][0]["rules"][0].__setitem__("extra", "value"),
+        lambda evidence: evidence["aggregate"].__setitem__("extra", "value"),
+    ),
+)
+def test_evidence_consumption_requires_exact_canonical_result_shape(tmp_path, mutate):
+    evidence = _accepted_evidence()
+    mutate(evidence)
+    path = tmp_path / "phase-3-sample-evidence.json"
+    path.write_text(json.dumps(evidence), encoding="utf-8")
+
+    with pytest.raises(ExecutionProfileError):
         consume_accepted_sample_evidence(path)

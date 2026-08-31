@@ -9,8 +9,10 @@ run receives final approval.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 from enum import Enum
 import json
+import os
 from pathlib import Path
 import re
 from collections.abc import Callable
@@ -22,7 +24,7 @@ from tools.workflow_cli.markdown import (
     strip_nonsemantic_markdown,
     unfenced_markdown_lines,
 )
-from tools.workflow_cli.models import TierBase, TierEstimate
+from tools.workflow_cli.models import TierBase, TierEstimate, WorkId
 
 
 class ExecutionProfile(Enum):
@@ -109,6 +111,16 @@ _AGGREGATE_FIELDS = (
     "sample_count", "work_ids", "task_counts", "change_shapes",
     "task_count_diverse", "change_shape_diverse", "representative",
 )
+_EVIDENCE_FIELDS = ("status", "message", "samples", "aggregate")
+_FULL_SUITE_FIELDS = ("count", "duration_seconds")
+_CONTEXT_FIELDS = ("invocation_count", "context_bytes_kind", "context_bytes")
+_TOKEN_FIELDS = ("status", "input_tokens", "output_tokens", "total_tokens")
+_RULE_FIELDS = ("rule", "status", "details")
+_CHANGE_SHAPES = frozenset((
+    "migration", "single_module_code", "cross_module_code", "docs_only",
+    "config_only", "test_only", "mixed",
+))
+_DECIMAL_6_RE = re.compile(r"^(?:0|[1-9][0-9]*)\.[0-9]{6}$")
 
 
 def _expected_numbers(plan_task_ids: tuple[str, ...]) -> tuple[int, ...]:
@@ -288,8 +300,35 @@ def _has_fields(value: Any, fields: tuple[str, ...]) -> bool:
     return isinstance(value, dict) and all(field in value for field in fields)
 
 
+def _has_exact_fields(value: Any, fields: tuple[str, ...]) -> bool:
+    return isinstance(value, dict) and set(value) == set(fields)
+
+
+def _canonical_decimal(value: Any) -> Decimal | None:
+    if not isinstance(value, str) or _DECIMAL_6_RE.fullmatch(value) is None:
+        return None
+    try:
+        return Decimal(value)
+    except InvalidOperation:
+        return None
+
+
+def _canonical_sample_identity(path: Any, work_id: Any) -> bool:
+    if not isinstance(path, str) or not isinstance(work_id, str):
+        return False
+    try:
+        WorkId(work_id)
+    except ValueError:
+        return False
+    return (
+        os.path.isabs(path)
+        and str(Path(os.path.abspath(path))) == path
+        and Path(path).name == work_id
+    )
+
+
 def _canonical_sample(sample: Any) -> bool:
-    if not _has_fields(sample, _SAMPLE_FIELDS):
+    if not _has_exact_fields(sample, _SAMPLE_FIELDS):
         return False
     assert isinstance(sample, dict)
     if not all(isinstance(sample[field], str) and sample[field] for field in (
@@ -297,9 +336,17 @@ def _canonical_sample(sample: Any) -> bool:
         "role_elapsed_total_seconds", "verification_total_seconds",
     )):
         return False
-    if not all(_is_nonnegative_int(sample[field]) for field in (
-        "instrumentation_schema", "task_count", "invocation_count", "report_bytes_total",
-    )):
+    if not _canonical_sample_identity(sample["path"], sample["work_id"]):
+        return False
+    if (
+        sample["instrumentation_schema"] != 1
+        or not all(_is_nonnegative_int(sample[field]) for field in (
+            "task_count", "invocation_count", "report_bytes_total",
+        ))
+        or sample["task_count"] < 1
+        or sample["invocation_count"] < 1
+        or sample["change_shape"] not in _CHANGE_SHAPES
+    ):
         return False
     if (
         sample["profile"] != "strict"
@@ -312,39 +359,63 @@ def _canonical_sample(sample: Any) -> bool:
         return False
 
     role_counts = sample["role_counts"]
-    if not _has_fields(role_counts, _SAMPLE_ROLES) or not all(
+    if not _has_exact_fields(role_counts, _SAMPLE_ROLES) or not all(
         _is_nonnegative_int(role_counts[role]) for role in _SAMPLE_ROLES
     ):
         return False
+    if (
+        role_counts["implementer"] != sample["task_count"]
+        or role_counts["task_reviewer"] != sample["task_count"]
+        or role_counts["final_reviewer"] < 1
+        or role_counts["fixer"] != role_counts["task_rereviewer"]
+        or role_counts["final_fixer"] != role_counts["final_rereviewer"]
+        or sum(role_counts.values()) != sample["invocation_count"]
+    ):
+        return False
     full_suite = sample["full_suite"]
-    if not _has_fields(full_suite, ("count", "duration_seconds")) or not (
-        _is_nonnegative_int(full_suite["count"])
-        and isinstance(full_suite["duration_seconds"], str)
+    full_suite_duration = _canonical_decimal(
+        full_suite.get("duration_seconds") if isinstance(full_suite, dict) else None
+    )
+    verification_total = _canonical_decimal(sample["verification_total_seconds"])
+    if not (
+        _has_exact_fields(full_suite, _FULL_SUITE_FIELDS)
+        and isinstance(full_suite["count"], int)
+        and not isinstance(full_suite["count"], bool)
+        and full_suite["count"] > 0
+        and full_suite_duration is not None
+        and verification_total is not None
+        and full_suite_duration <= verification_total
+        and _canonical_decimal(sample["role_elapsed_total_seconds"]) is not None
     ):
         return False
     contexts = sample["context_totals"]
-    if not _has_fields(contexts, ("direct_acs", "semantic_view")):
+    if not _has_exact_fields(contexts, ("direct_acs", "semantic_view")):
         return False
+    context_invocations = 0
     for mode, bytes_kind in (
         ("direct_acs", "declared_payload_bytes"),
         ("semantic_view", "semantic_payload_bytes"),
     ):
         context = contexts[mode]
-        if not _has_fields(context, ("invocation_count", "context_bytes_kind", "context_bytes")):
+        if not _has_exact_fields(context, _CONTEXT_FIELDS):
             return False
         if (
             not _is_nonnegative_int(context["invocation_count"])
             or context["context_bytes_kind"] != bytes_kind
             or not _is_nonnegative_int(context["context_bytes"])
+            or (context["invocation_count"] == 0 and context["context_bytes"] != 0)
         ):
             return False
+        context_invocations += context["invocation_count"]
+    if context_invocations != sample["invocation_count"]:
+        return False
     tokens = sample["token_totals"]
-    if not _has_fields(tokens, ("status", "input_tokens", "output_tokens", "total_tokens")):
+    if not _has_exact_fields(tokens, _TOKEN_FIELDS):
         return False
     if tokens["status"] == "available":
         if not all(_is_nonnegative_int(tokens[field]) for field in (
             "input_tokens", "output_tokens", "total_tokens",
-        )):
+        )) or tokens["total_tokens"] != tokens["input_tokens"] + tokens["output_tokens"]:
             return False
     elif tokens["status"] == "unavailable":
         if any(tokens[field] != "unavailable" for field in (
@@ -356,18 +427,19 @@ def _canonical_sample(sample: Any) -> bool:
     rules = sample["rules"]
     return (
         isinstance(rules, list)
+        and len(rules) == len(_SAMPLE_RULES)
         and [item.get("rule") for item in rules if isinstance(item, dict)] == list(_SAMPLE_RULES)
         and all(
-            isinstance(item, dict)
+            _has_exact_fields(item, _RULE_FIELDS)
             and item.get("status") == "passed"
-            and isinstance(item.get("details"), list)
+            and item.get("details") == []
             for item in rules
         )
     )
 
 
 def _canonical_aggregate(aggregate: Any, samples: list[dict[str, Any]]) -> bool:
-    if not _has_fields(aggregate, _AGGREGATE_FIELDS):
+    if not _has_exact_fields(aggregate, _AGGREGATE_FIELDS):
         return False
     assert isinstance(aggregate, dict)
     task_counts = sorted({sample["task_count"] for sample in samples})
@@ -395,13 +467,21 @@ def consume_accepted_sample_evidence(path: str | Path) -> dict[str, Any]:
         payload = json.loads(text)
     except (OSError, UnsafeRegularFileError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ExecutionProfileError("representative metrics evidence is unreadable") from exc
-    if not isinstance(payload, dict) or payload.get("status") != "ok" or payload.get("message") != "representative_metrics_accepted":
+    if (
+        not _has_exact_fields(payload, _EVIDENCE_FIELDS)
+        or payload["status"] != "ok"
+        or payload["message"] != "representative_metrics_accepted"
+    ):
         raise ExecutionProfileError("representative metrics evidence was not accepted")
     samples = payload.get("samples")
     aggregate = payload.get("aggregate")
     if not isinstance(samples, list) or len(samples) != 3 or not isinstance(aggregate, dict):
         raise ExecutionProfileError("representative metrics evidence is incomplete")
     if not all(_canonical_sample(sample) for sample in samples):
+        raise ExecutionProfileError("representative metrics evidence is incomplete")
+    paths = [sample["path"] for sample in samples]
+    work_ids = [sample["work_id"] for sample in samples]
+    if len(set(paths)) != len(paths) or len(set(work_ids)) != len(work_ids):
         raise ExecutionProfileError("representative metrics evidence is incomplete")
     if not _canonical_aggregate(aggregate, samples):
         raise ExecutionProfileError("representative metrics evidence is incomplete")
