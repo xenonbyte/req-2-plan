@@ -4422,6 +4422,96 @@ class TestRunArchive:
             rec = RunStateManager(run_dir).load()
             assert rec.status.value == "closed_at_plan_checkpoint"
 
+    def test_closed_archive_rejects_execution_residue_without_force(self, capsys):
+        from tools.workflow_cli.state import RunStateManager
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            run_dir = self._closed_run(base, "WF-20260101-arch")
+            exec_dir = run_dir / "execution"
+            exec_dir.mkdir()
+            (exec_dir / "progress.md").write_text("# Execution Progress\n", encoding="utf-8")
+
+            with pytest.raises(SystemExit) as exc:
+                main(["--base-path", str(base), "run-archive", "--work-id", "WF-20260101-arch"])
+
+            assert exc.value.code == 6
+            out = capsys.readouterr().out
+            assert "execution residue" in out
+            assert "r2p-execute" in out
+            assert "--force" in out
+            assert run_dir.exists()
+            assert not (base / ".req-to-plan" / "archive" / "WF-20260101-arch").exists()
+            assert RunStateManager(run_dir).load().status.value == "closed_at_plan_checkpoint"
+
+    def test_closed_archive_rejects_empty_execution_directory_without_force(self, capsys):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            run_dir = self._closed_run(base, "WF-20260101-arch")
+            (run_dir / "execution").mkdir()
+
+            with pytest.raises(SystemExit) as exc:
+                main(["--base-path", str(base), "run-archive", "--work-id", "WF-20260101-arch"])
+
+            assert exc.value.code == 6
+            assert "execution residue" in capsys.readouterr().out
+            assert run_dir.exists()
+            assert not (base / ".req-to-plan" / "archive" / "WF-20260101-arch").exists()
+
+    def test_closed_archive_rejects_unsafe_execution_path_even_with_force(self, capsys):
+        from tools.workflow_cli.state import RunStateManager
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            run_dir = self._closed_run(base, "WF-20260101-arch")
+            outside = base / "outside-execution"
+            outside.mkdir()
+            (run_dir / "execution").symlink_to(outside, target_is_directory=True)
+
+            with pytest.raises(SystemExit) as exc:
+                main([
+                    "--base-path", str(base), "run-archive",
+                    "--work-id", "WF-20260101-arch", "--force",
+                ])
+
+            assert exc.value.code == 6
+            assert "unsafe execution residue" in capsys.readouterr().out.lower()
+            assert run_dir.exists()
+            assert (run_dir / "execution").is_symlink()
+            assert not (base / ".req-to-plan" / "archive" / "WF-20260101-arch").exists()
+            assert RunStateManager(run_dir).load().status.value == "closed_at_plan_checkpoint"
+
+    def test_closed_archive_rejects_non_directory_execution_path_even_with_force(self, capsys):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            run_dir = self._closed_run(base, "WF-20260101-arch")
+            (run_dir / "execution").write_text("not a directory\n", encoding="utf-8")
+
+            with pytest.raises(SystemExit) as exc:
+                main([
+                    "--base-path", str(base), "run-archive",
+                    "--work-id", "WF-20260101-arch", "--force",
+                ])
+
+            assert exc.value.code == 6
+            assert "unsafe execution residue" in capsys.readouterr().out.lower()
+            assert run_dir.exists()
+            assert not (base / ".req-to-plan" / "archive" / "WF-20260101-arch").exists()
+
+    def test_closed_archive_force_overrides_real_execution_residue(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            run_dir = self._closed_run(base, "WF-20260101-arch")
+            (run_dir / "execution").mkdir()
+
+            with pytest.raises(SystemExit) as exc:
+                main([
+                    "--base-path", str(base), "run-archive",
+                    "--work-id", "WF-20260101-arch", "--force",
+                ])
+
+            assert exc.value.code == 0
+            assert not run_dir.exists()
+            assert (base / ".req-to-plan" / "archive" / "WF-20260101-arch" / "execution").is_dir()
+
 
 class TestExecutionPhaseZeroIntegration:
     def test_structured_metrics_commands_format_stable_results_and_reject_duplicate_json_keys(

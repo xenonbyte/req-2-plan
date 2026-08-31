@@ -861,7 +861,41 @@ def _cmd_run_archive(args):
         )
     # 0. Completion gate: an executing run must show every PLAN-TASK done in its
     # ledger before it can be archived. --force overrides (abandoned/superseded run).
-    if record.status == RunStatus.EXECUTING and not args.force:
+    if record.status == RunStatus.CLOSED_AT_PLAN_CHECKPOINT:
+        execution_path = run_dir / "execution"
+        try:
+            execution_stat = execution_path.lstat()
+        except FileNotFoundError:
+            execution_stat = None
+        except OSError as exc:
+            print_and_exit(
+                format_error(
+                    f"Unsafe execution residue: cannot inspect {execution_path.name}: {exc}",
+                    exit_code=EXIT_CONFLICT,
+                ),
+                EXIT_CONFLICT,
+            )
+        if execution_stat is not None:
+            if not stat.S_ISDIR(execution_stat.st_mode):
+                print_and_exit(
+                    format_error(
+                        "Unsafe execution residue: execution is not a real directory. "
+                        "Resolve the unsafe path before archiving.",
+                        exit_code=EXIT_CONFLICT,
+                    ),
+                    EXIT_CONFLICT,
+                )
+            if not args.force:
+                print_and_exit(
+                    format_error(
+                        "Closed run has execution residue. Re-run r2p-execute to "
+                        "recover or resume it, or use --force only to archive an "
+                        "intentionally abandoned or superseded run.",
+                        exit_code=EXIT_CONFLICT,
+                    ),
+                    EXIT_CONFLICT,
+                )
+    elif record.status == RunStatus.EXECUTING and not args.force:
         gate = check_execution_complete(run_dir)
         if not gate.passed:
             detail = " ".join(gate.issues)
@@ -2145,7 +2179,10 @@ def _register_run_commands(subparsers):
     p.add_argument(
         "--force",
         action="store_true",
-        help="Archive an executing run even if its execution ledger is missing or has unfinished tasks",
+        help=(
+            "Archive an unfinished executing run, or a closed run with real "
+            "execution residue that is intentionally abandoned or superseded"
+        ),
     )
     p.set_defaults(func=_cmd_run_archive)
 

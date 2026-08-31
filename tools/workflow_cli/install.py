@@ -182,8 +182,8 @@ class InstallService:
             elif platform == "opencode":
                 # opencode custom commands use Markdown files with `description:`
                 # frontmatter and the filename as the command name. Reuse claude's
-                # command bodies, then inject opencode's argument placeholder so
-                # slash-command invocation args are not dropped.
+                # command bodies. Most commands preserve slash-command invocation
+                # args; r2p-execute is specialized below with a fixed preflight.
                 cmd_dir = self._opencode_command_source()
                 for src in sorted(cmd_dir.glob("r2p-*.md")):
                     dest = platform_home / "commands" / src.name
@@ -191,6 +191,7 @@ class InstallService:
                         src.read_text(),
                         R2P_VERSION,
                         str(bin_dir),
+                        src.name,
                     )
                     self._write_managed_file(
                         dest, content, backups, installed_paths, written, backup_dir
@@ -1013,9 +1014,26 @@ def _render(content: str, version: str, bin_dir: str) -> str:
     return content
 
 
-def _render_opencode_command(content: str, version: str, bin_dir: str) -> str:
-    """Render a Markdown command with opencode invocation arguments preserved."""
+def _render_opencode_command(content: str, version: str, bin_dir: str, command_name: str) -> str:
+    """Render a Markdown command for opencode."""
     rendered = _render(content, version, bin_dir)
+    if command_name == "r2p-execute.md":
+        wrapper = shlex.quote(str(Path(bin_dir) / "r2p-execute"))
+        preflight = (
+            "\n## Deterministic OpenCode preflight\n\n"
+            f"!`{wrapper} 2>&1; r2p_status=$?; "
+            'printf \'\\nR2P_PREFLIGHT_EXIT=%s\\n\' "$r2p_status"`\n\n'
+            "Treat `R2P_PREFLIGHT_EXIT != 0`, `blocked:`, `no_selected_run`, "
+            "or `plan_not_ready` in the preflight output as a hard stop before "
+            "any execution work. To execute a specific run, first run "
+            "`r2p-switch --work-id <id>` and invoke `/r2p-execute` again.\n"
+        )
+        if rendered.startswith("---\n"):
+            end = rendered.find("\n---\n", 4)
+            if end != -1:
+                insert_at = end + len("\n---\n")
+                return rendered[:insert_at] + preflight + rendered[insert_at:]
+        return preflight.lstrip() + "\n" + rendered
     if "$ARGUMENTS" in rendered:
         return rendered
     return (

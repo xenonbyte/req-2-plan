@@ -7,4 +7,6 @@ Usage: `{{R2P_BIN_DIR}}/r2p-archive [--work-id <work-id>]`
 
 The run must be `closed_at_plan_checkpoint` or `executing`. On success, it moves `.req-to-plan/<work-id>` to `.req-to-plan/archive/<work-id>` and clears the active selection for that run.
 
+For a `closed_at_plan_checkpoint` run, `execution/` must be absent for normal plan-only archive. If `execution/` exists, stop and re-run `r2p-execute` to recover/resume the run; use `--force` only when intentionally archiving an abandoned or superseded run. Symlinked or non-directory `execution` paths are unsafe and must not be forced.
+
 Use `{{R2P_BIN_DIR}}/r2p-status --all` afterward to inspect remaining active runs.

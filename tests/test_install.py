@@ -1720,6 +1720,29 @@ class TestInstallOpencode:
         ):
             assert token in content
 
+    def test_execute_command_runs_fixed_preflight_without_invocation_arguments(self, tmp_path):
+        svc, manifest_root, ph_root = make_service(tmp_path)
+        svc.install("opencode")
+        content = (ph_root / "opencode" / "commands" / "r2p-execute.md").read_text(encoding="utf-8")
+        expected = (
+            f"!`{manifest_root / 'bin' / 'r2p-execute'} 2>&1; "
+            'r2p_status=$?; printf \'\\nR2P_PREFLIGHT_EXIT=%s\\n\' "$r2p_status"`'
+        )
+
+        assert expected in content
+        assert "R2P_PREFLIGHT_EXIT != 0" in content
+        assert "blocked:" in content
+        assert "no_selected_run" in content
+        assert "plan_not_ready" in content
+        assert "r2p-switch --work-id <id>" in content
+        assert "$ARGUMENTS" not in content
+        shell_blocks = re.findall(r"^!`([^`]+)`", content, flags=re.MULTILINE)
+        assert shell_blocks == [
+            f"{manifest_root / 'bin' / 'r2p-execute'} 2>&1; "
+            'r2p_status=$?; printf \'\\nR2P_PREFLIGHT_EXIT=%s\\n\' "$r2p_status"'
+        ]
+        assert all("$1" not in block and "$2" not in block for block in shell_blocks)
+
     def test_continue_command_derives_phase_two_plan_author_protocol_from_claude(self, tmp_path):
         svc, _, ph_root = make_service(tmp_path)
         svc.install("opencode")

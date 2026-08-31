@@ -120,6 +120,11 @@ EXECUTE_SURFACES = [
     "tools/workflow_cli/agent_templates/codex/skills/r2p-execute/SKILL.md",
 ]
 
+ARCHIVE_SURFACES = [
+    "tools/workflow_cli/agent_templates/claude/commands/r2p-archive.md",
+    "tools/workflow_cli/agent_templates/codex/skills/r2p-archive/SKILL.md",
+]
+
 REQUIRED_TEMPLATE_HARDENING_TOKENS = [
     # EXE-1: final reviewer reads the full upstream context incl. 07-plan + per-task reports/reviews + Minor
     "the final reviewer is the one role that reads `07-plan.md`",
@@ -543,6 +548,22 @@ class TestExecuteTemplateContent(unittest.TestCase):
             final_fix_contracts[1],
             "Claude and Codex final-fix marker contracts must remain lockstep",
         )
+
+    def test_archive_surfaces_document_closed_execution_residue_force_semantics(self):
+        required = (
+            "closed_at_plan_checkpoint",
+            "execution/` must be absent",
+            "re-run `r2p-execute` to recover/resume",
+            "use `--force` only when intentionally archiving an abandoned or superseded run",
+            "Symlinked or non-directory `execution` paths are unsafe and must not be forced",
+        )
+        copies = []
+        for surface in ARCHIVE_SURFACES:
+            text = (REPO_ROOT / surface).read_text(encoding="utf-8")
+            for token in required:
+                self.assertIn(token, text, f"{surface}: missing archive residue token: {token!r}")
+            copies.append([line for line in text.splitlines() if "execution/" in line or "--force" in line])
+        self.assertEqual(copies[0], copies[1], "Claude and Codex archive residue guidance must match")
 
     def test_execute_surfaces_carry_phase_zero_role_and_metrics_protocol(self):
         required = (
