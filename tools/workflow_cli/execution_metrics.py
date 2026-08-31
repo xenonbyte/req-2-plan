@@ -958,7 +958,14 @@ def check_prerequisite_v1(base_path: Path, work_id: WorkId, task: int) -> dict[s
         raise PrerequisiteError("task is not the lowest unchecked task")
     head = _execution_base(Path(base_path))
     if task == 1:
-        if any(checked == "x" for checked, _ in rows) or complete_markers or profile_lines:
+        historical_self_host_profile = (
+            str(work_id) == SELF_HOSTED_WORK_ID and bool(profile_lines)
+        )
+        if (
+            any(checked == "x" for checked, _ in rows)
+            or complete_markers
+            or historical_self_host_profile
+        ):
             raise PrerequisiteError("Task 001 legacy preflight requires untouched ledger state")
         if base_match.group(1) != head:
             raise PrerequisiteError("Task 001 requires full Execution BASE to equal HEAD")

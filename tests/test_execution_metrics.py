@@ -1609,6 +1609,51 @@ def test_start_execution_transaction_rolls_back_owned_partial_and_retries(tmp_pa
     assert start_execution_transaction(tmp_path, work_id, "strict").status == RunStatus.EXECUTING
 
 
+def test_prerequisite_v1_accepts_task_one_after_real_explicit_strict_start(tmp_path):
+    work_id = WorkId("WF-20260830-prerequisite-v1-strict-start")
+    run_dir = tmp_path / ".req-to-plan" / str(work_id)
+    record = create_run_record(work_id)
+    record.status = RunStatus.CLOSED_AT_PLAN_CHECKPOINT
+    record.current_stage = Stage.CLOSED
+    RunStateManager(run_dir).save(record)
+    write_artifact(run_dir, Stage.PLAN, _plan(2), version=1, status="approved")
+    execution_base = _git_init(tmp_path)
+
+    started = start_execution_transaction(tmp_path, work_id, "strict")
+    result = check_prerequisite(tmp_path, work_id, 1, require_version=1)
+
+    assert started.status == RunStatus.EXECUTING
+    assert result == {
+        "work_id": str(work_id),
+        "task": 1,
+        "implementation_version": 2,
+        "semantics_version": 1,
+        "effective_profile": "strict",
+        "prerequisite": "none",
+        "satisfied": True,
+        "task_count": 2,
+        "execution_base": execution_base,
+    }
+
+
+def test_prerequisite_v1_keeps_historical_self_host_task_one_profileless(tmp_path):
+    work_id = WorkId("WF-20260829-r2p-execute-token-phase-r2p")
+    run_dir = tmp_path / ".req-to-plan" / str(work_id)
+    record = create_run_record(work_id)
+    record.status = RunStatus.CLOSED_AT_PLAN_CHECKPOINT
+    record.current_stage = Stage.CLOSED
+    RunStateManager(run_dir).save(record)
+    write_artifact(run_dir, Stage.PLAN, _plan(9), version=1, status="approved")
+    _git_init(tmp_path)
+    start_execution_transaction(tmp_path, work_id, "strict")
+
+    with pytest.raises(
+        PrerequisiteError,
+        match="Task 001 legacy preflight requires untouched ledger state",
+    ):
+        check_prerequisite(tmp_path, work_id, 1, require_version=1)
+
+
 def test_prerequisite_checker_version_matrix_preserves_v1_and_adds_v2_dispatch(
     tmp_path,
     monkeypatch,
