@@ -111,6 +111,20 @@ def test_profile_grammar_fails_closed(extra):
         )
 
 
+def test_profile_escalation_must_follow_explicit_initial_profile():
+    with pytest.raises(ExecutionProfileError, match="precede"):
+        parse_execution_ledger(
+            ledger(
+                "- [ ] PLAN-TASK-001 — first",
+                "- [ ] PLAN-TASK-002 — second",
+                "- [ ] PLAN-TASK-003 — third",
+                extras="""Profile Escalation: fast -> strict (reason: concern)
+Execution Profile: fast""",
+            ),
+            TASK_IDS,
+        )
+
+
 @pytest.mark.parametrize(
     "extra",
     (
@@ -320,6 +334,58 @@ Task 2: complete (commits 1234567..7654321, review clean)""",
         )
 
 
+def test_commit_chain_rejects_unrecorded_descendant_without_task_marker():
+    parsed = parse_execution_ledger(
+        ledger(
+            "- [ ] PLAN-TASK-001 — first",
+            "- [ ] PLAN-TASK-002 — second",
+            "- [ ] PLAN-TASK-003 — third",
+        ),
+        TASK_IDS,
+    )
+    descendant = "1" * 40
+
+    validate_ledger_commit_chain(
+        parsed,
+        current_head=BASE,
+        resolve_commit={BASE: BASE}.__getitem__,
+        is_ancestor=lambda older, newer: older == newer,
+    )
+    with pytest.raises(ExecutionProfileError, match="recorded ledger boundary"):
+        validate_ledger_commit_chain(
+            parsed,
+            current_head=descendant,
+            resolve_commit={BASE: BASE}.__getitem__,
+            is_ancestor=lambda older, newer: (older, newer) == (BASE, descendant),
+        )
+
+
+def test_commit_chain_rejects_unrecorded_descendant_after_task_marker():
+    parsed = parse_execution_ledger(
+        ledger(
+            "- [x] PLAN-TASK-001 — first",
+            "- [ ] PLAN-TASK-002 — second",
+            "- [ ] PLAN-TASK-003 — third",
+            extras="Task 1: complete (commits abcdef0..1234567, review clean)",
+        ),
+        TASK_IDS,
+    )
+    marker_head = "1" * 40
+    descendant = "2" * 40
+    commits = {BASE: BASE, "abcdef0": BASE, "1234567": marker_head}
+    ancestors = {(BASE, marker_head), (marker_head, descendant)}
+
+    with pytest.raises(ExecutionProfileError, match="recorded ledger boundary"):
+        validate_ledger_commit_chain(
+            parsed,
+            current_head=descendant,
+            resolve_commit=commits.__getitem__,
+            is_ancestor=lambda older, newer: (
+                older == newer or (older, newer) in ancestors
+            ),
+        )
+
+
 def test_final_fast_migration_replaces_all_markers_in_one_constructed_ledger():
     progress = ledger(
         "- [ ] PLAN-TASK-001 — first",
@@ -357,6 +423,29 @@ Task 1: implemented (commits abcdef0..1234567, verification recorded)
 Task 2: implemented (commits 1234567..7654321, verification recorded)
 Task 3: implemented (commits 7654321..0123456, verification recorded)
 {nonsemantic}""",
+    )
+
+    migrated = finalize_fast_ledger(progress, TASK_IDS)
+
+    assert nonsemantic in migrated
+    assert migrated.count("- [x] PLAN-TASK-") == 3
+    assert migrated.count("final review clean") == 3
+
+
+def test_final_fast_migration_preserves_seeded_readonly_block_byte_for_byte():
+    nonsemantic = """## Project Context (read-only)
+- [ ] PLAN-TASK-001 — seeded example
+Task 1: implemented (commits abcdef0..1234567, verification recorded)
+<!-- /r2p-read-only -->"""
+    progress = ledger(
+        "- [ ] PLAN-TASK-001 — first",
+        "- [ ] PLAN-TASK-002 — second",
+        "- [ ] PLAN-TASK-003 — third",
+        extras=f"""{nonsemantic}
+Execution Profile: fast
+Task 1: implemented (commits abcdef0..1234567, verification recorded)
+Task 2: implemented (commits 1234567..7654321, verification recorded)
+Task 3: implemented (commits 7654321..0123456, verification recorded)""",
     )
 
     migrated = finalize_fast_ledger(progress, TASK_IDS)

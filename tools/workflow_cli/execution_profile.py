@@ -21,7 +21,6 @@ from typing import Any
 from tools.workflow_cli.atomic import UnsafeRegularFileError, read_regular_text
 from tools.workflow_cli.markdown import (
     plan_task_anchors,
-    strip_html_comments_outside_fences,
     strip_nonsemantic_markdown,
     unfenced_markdown_lines,
 )
@@ -144,6 +143,22 @@ def _semantic_lines(text: str) -> list[str]:
     return [line.rstrip("\r\n") for line, _, _ in unfenced_markdown_lines(semantic)]
 
 
+def _semantic_source_lines(text: str):
+    """Yield semantic lines together with their offsets in the original text.
+
+    ``strip_nonsemantic_markdown`` removes read-only blocks but masks comments,
+    so offsets in its result are not source offsets. Applying that exact mask to
+    each source-line prefix preserves the source positions needed for an atomic
+    migration without reimplementing either non-semantic rule here.
+    """
+    for _line, start, end in unfenced_markdown_lines(text):
+        before = strip_nonsemantic_markdown(text[:start])
+        through = strip_nonsemantic_markdown(text[:end])
+        if not through.startswith(before):
+            raise ExecutionProfileError("non-semantic Markdown mask is inconsistent")
+        yield through[len(before):], start, end
+
+
 def parse_execution_ledger(
     text: str, plan_task_ids: tuple[str, ...]
 ) -> ParsedExecutionLedger:
@@ -151,18 +166,30 @@ def parse_execution_ledger(
     expected_numbers = _expected_numbers(plan_task_ids)
     lines = _semantic_lines(text)
 
-    profiles = [match.group(1) for line in lines if (match := _PROFILE_RE.match(line))]
+    profile_rows = [
+        (position, match.group(1))
+        for position, line in enumerate(lines)
+        if (match := _PROFILE_RE.match(line))
+    ]
+    profiles = [value for _position, value in profile_rows]
     profile_like = [line for line in lines if _PROFILE_LIKE_RE.match(line)]
     if len(profiles) != len(profile_like) or len(profiles) > 1:
         raise ExecutionProfileError("initial execution profile is malformed or duplicated")
     initial = ExecutionProfile(profiles[0]) if profiles else ExecutionProfile.STRICT
 
-    escalations = [match.group(1) for line in lines if (match := _ESCALATION_RE.match(line))]
+    escalation_rows = [
+        (position, match.group(1))
+        for position, line in enumerate(lines)
+        if (match := _ESCALATION_RE.match(line))
+    ]
+    escalations = [value for _position, value in escalation_rows]
     escalation_like = [line for line in lines if _ESCALATION_LIKE_RE.match(line)]
     if len(escalations) != len(escalation_like) or len(escalations) > 1:
         raise ExecutionProfileError("profile escalation is malformed or duplicated")
     if escalations and (initial is not ExecutionProfile.FAST or not escalations[0].strip()):
         raise ExecutionProfileError("only fast may escalate once to strict")
+    if escalation_rows and profile_rows and escalation_rows[0][0] < profile_rows[0][0]:
+        raise ExecutionProfileError("profile escalation cannot precede initial profile")
     effective = ExecutionProfile.STRICT if escalations else initial
 
     bases = [match.group(1) for line in lines if (match := _BASE_RE.match(line))]
@@ -316,6 +343,8 @@ def validate_ledger_commit_chain(
         raise ExecutionProfileError("ledger commit abbreviation is unresolved") from exc
     if not is_ancestor(previous_head, current_head):
         raise ExecutionProfileError("current HEAD diverges from the ledger chain")
+    if current_head != previous_head:
+        raise ExecutionProfileError("current HEAD is not the recorded ledger boundary")
 
 
 def _is_nonnegative_int(value: Any) -> bool:
@@ -527,9 +556,8 @@ def finalize_fast_ledger(text: str, plan_task_ids: tuple[str, ...]) -> str:
         raise ExecutionProfileError("only an unelevated fast ledger may be finalized")
     if parsed.untouched:
         raise ExecutionProfileError("fast final approval requires every task implemented")
-    semantic = strip_html_comments_outside_fences(text)
     replacements: list[tuple[int, int, str]] = []
-    for line, start, end in unfenced_markdown_lines(semantic):
+    for line, start, end in _semantic_source_lines(text):
         plain = line.rstrip("\r\n")
         checkbox = _CHECKBOX_RE.match(plain)
         implemented = _IMPLEMENTED_RE.match(plain)
