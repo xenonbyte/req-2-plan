@@ -303,8 +303,20 @@ and deferred item is preserved in both the persistent artifact and the role's
 inline concerns. Strict final review reads reports and reviews; fast primary
 final review reads every report and does not require nonexistent task reviews.
 
+`r2p-execute` defaults to `strict`. Explicit `--profile fast` first performs a
+read-only LIGHT/no-modifier structure preflight and returns
+`fast_profile_review`; the agent must review every PLAN task before confirming
+with `--confirm-fast-eligible` or rejecting with
+`--reject-fast-ineligible --reason <single-line>`. Fast records implemented
+markers without checking tasks complete, uses the final reviewer as the primary
+task-by-task reviewer, and escalates one-way to strict on any verification,
+file-boundary, concern, ambiguity, marker-chain, or shared/core risk. Final full
+suite, `Verdict: Approved`, checkbox completion, metrics finalization, and
+archive gates remain unchanged.
+
 The internal commands are intended for the controller and safe test tooling:
-`execution-prerequisite-check --work-id <id> --task <N> --require-version 1`,
+`execution-prerequisite-check --work-id <id> --task <N> --require-version 2`
+(with version 1 compatibility for already-generated PLANs),
 `execution-samples-validate` with exactly three absolute `--sample-dir` values,
 and the narrowly scoped self-host exception
 `execution-metrics-bootstrap --work-id WF-20260829-r2p-execute-token-phase-r2p --profile strict --self-hosted-gap-through-task 002`.

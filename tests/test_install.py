@@ -1717,6 +1717,15 @@ class TestInstallOpencode:
             "metrics_incomplete",
             "Final Fix Wave: <N>",
             "Final Fix Waves: none",
+            "fast_profile_review",
+            "--confirm-fast-eligible",
+            "--reject-fast-ineligible",
+            "Task N: implemented",
+            "Profile Escalation: fast -> strict",
+            "never synthesizes task-reviewer blocks",
+            "primary per-task review",
+            "atomic_write_text",
+            "--require-version 2",
         ):
             assert token in content
 
@@ -1753,8 +1762,8 @@ class TestInstallOpencode:
             "intermediate contract",
             "Prerequisite: none",
             "Prerequisite: PLAN-TASK-NNN",
-            "execution-prerequisite-check --work-id <id> --task <N> --require-version 1",
-            "strict-compatible",
+            "execution-prerequisite-check --work-id <id> --task <N> --require-version 2",
+            "profile-aware prerequisite semantics",
             "Dependencies:",
         ):
             assert token in content

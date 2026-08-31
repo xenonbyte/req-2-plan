@@ -5,17 +5,23 @@ description: Execute a closed run's PLAN in place on the current branch via the 
 
 # r2p-execute — SDD Execution Loop
 
-Execute each PLAN-TASK on the **current branch** using a fresh implementer subagent per task, a task-reviewer after each, and a whole-branch review at the end.
+Execute each PLAN-TASK on the **current branch**. `strict` is the default and uses a fresh implementer plus task reviewer per task; explicit opt-in `fast` uses fresh implementers and one primary final reviewer, with trigger-driven escalation to strict.
 
 **Subagents are a hard prerequisite.** If this platform cannot dispatch subagents, fail explicitly and let the human decide — never silently fall back to sequential execution.
 
 ## Precondition Gate
 
-Run `{{R2P_BIN_DIR}}/r2p-execute` and read its stop output. On a `closed_at_plan_checkpoint` run it transitions the run to `executing` (via the `run-execute-start` CLI command) and stops with `execute_plan`; on an already-`executing` run it stops with `resume_execution`; on any other status it stops with `plan_not_ready`.
+Run `{{R2P_BIN_DIR}}/r2p-execute` and read its stop output. Omitted profile means `strict`. On a `closed_at_plan_checkpoint` run it transitions the run to `executing` and stops with `execute_plan`; on an already-`executing` run it reuses the effective profile and stops with `resume_execution`; on any other status it stops with `plan_not_ready`.
 
 - If the run status is `closed_at_plan_checkpoint` (first execution): the command transitions it to `executing` and returns the plan path.
 - If the run status is already `executing` (resume after interruption): proceed directly to the plan path.
 - Any other status → `plan_not_ready`. Stop and tell the user.
+
+### Execution profile handshake
+
+Fast is explicit opt-in and fail closed. First call `r2p-execute --profile fast` without a decision flag. An eligible LIGHT/no-modifier structure returns `fast_profile_review` without mutating run state. Read the complete PLAN and confirm every task is local, mechanical, unambiguous, has explicit safe `Files`, avoids shared/core/security/migration/dependency/config work, and has directly executable deterministic `Verification`. If every check is true, call `r2p-execute --profile fast --confirm-fast-eligible`; otherwise call `r2p-execute --profile fast --reject-fast-ineligible --reason <single-line>`. Never auto-fall back to strict or claim semantic eligibility from the CLI structure gate.
+
+On resume, omitted profile reuses the effective profile; an explicit profile must match it. A fast→strict escalation is one-way. Decision flags on an executing run are conflicts. Legacy ledgers without a profile line are strict.
 
 `execution/progress.md` remains the only execution-state ledger. When a normal
 start succeeds it also creates controller-owned `execution/metrics.md`; that
@@ -45,8 +51,10 @@ Canonical status mapping is exact: implementer/fixer/final-fixer DONE or
 DONE_WITH_CONCERNS maps to `complete`; task/final reviewer APPROVED maps to
 `approved`; CHANGES_REQUESTED maps to `changes_requested`; NEEDS_CONTEXT or
 BLOCKED maps to `blocked`. A blocked append is terminal for a validator-eligible
-strict metrics sequence: stop the execution loop and surface the blocker rather
+profile-aware metrics sequence: stop the execution loop and surface the blocker rather
 than dispatching a later role that the CLI must reject.
+
+Metrics record every actual dispatch. Strict preserves `N implementers + N task reviewers + final reviewer`. Fast records exactly its `N implementers + primary final reviewer` minimum and never synthesizes task-reviewer blocks. Final fixer/re-reviewer waves and task recovery waves each get their truthful role/fix-wave blocks.
 
 On retry or resume, call status first and reuse the exact same record and
 `expected_sequence`; accept `already_applied`, never count headings or invent a
@@ -152,6 +160,8 @@ The controller derives `run_dir = parent(plan)` from the execute output and hand
 
 For each PLAN-TASK (in order):
 
+Before dispatch, run `execution-prerequisite-check --work-id <id> --task <N> --require-version 2`. Version 2 uses the effective profile, exact marker chain, Execution BASE, and first-actionable-task rules; a failure blocks dispatch.
+
 ### Role dispatch and verification cadence
 
 Every role call is a brand-new zero-history subagent invocation. Codex dispatch
@@ -220,7 +230,7 @@ The fresh implementer subagent verifies-then-removes ambiguity by evidence and T
 
 ### 5. Write diff and dispatch task-reviewer
 
-After the implementer reports DONE:
+After the implementer reports DONE, strict does the following:
 1. `mkdir -p .req-to-plan/<work-id>/logs` then `git diff -U10 <base-commit> HEAD > .req-to-plan/<work-id>/logs/task-N-diff.md`. Keep diff scratch under `logs/` (gitignored), never under `execution/`.
 2. Dispatch a task-reviewer subagent with:
    - **Run `{{R2P_BIN_DIR}}/r2p-context-view --work-id <id>` yourself before acting**: the reviewer checks `Spec References` IDs against the live semantic spec, not the IDs alone
@@ -254,6 +264,12 @@ The compact review report contains `Status`, `Commit Range`, `Changed Files`, `V
 - Only when the task-reviewer is clean (both spec ✅ and quality Approved, and `Verification` satisfied, and no open `Gap:` or `Unresolved:` entries), update the matching `execution/progress.md` checkbox from `- [ ] PLAN-TASK-NNN ...` to `- [x] PLAN-TASK-NNN ...` and append one line:
   `Task N: complete (commits <base7>..<head7>, review clean)`
 
+### Fast task completion and strict recovery
+
+In unelevated fast, after the implementer commit and verification are recorded, keep the checkbox `[ ]` and append exactly `Task N: implemented (commits <base7>..<head7>, verification recorded)`. Do not create an empty review or synthetic reviewer metrics block. Continue from the first untouched task using Task 1's full Execution BASE or the prior legal complete/implemented marker head—never `HEAD~1`.
+
+Escalate fast to strict by appending exactly one `Profile Escalation: fast -> strict (reason: <single-line>)` when verification fails, files are unexpected, a concern or unresolved `⚠️ DEFER` appears, the BASE/HEAD/marker chain is invalid, an upstream ambiguity appears, or work is shared/core/security/migration/dependency/config. Review every implemented range in task order, including real task reviewer/fixer/re-reviewer metrics, convert each clean range to `[x]` plus `review clean`, then continue the ordinary strict loop from the first untouched task. Never return to fast.
+
 **Continuous execution**: execute all PLAN-TASKs without pausing to ask "should I continue?" between tasks. Stop only on: unresolvable `BLOCKED`, upstream defect requiring repair, dirty-tree block, or all tasks complete. `Verification` requires fresh command output; "should pass" / "looks correct" is not evidence; do not report `DONE` without it.
 
 ## Final Whole-Branch Review
@@ -270,6 +286,8 @@ After all tasks complete, dispatch a final whole-branch review subagent on the *
 - Dispatch ONE fix subagent carrying the complete findings list by passing `execution/final-review-report.md`, not pasted findings (not one fixer per finding)
 - This whole-branch review is the merge gate
 
+For fast, this is the primary per-task review: check every task's Spec References, Files-vs-diff, commit range, verification records, and cross-task behavior using all task reports; do not require nonexistent task review files. The approved final reviewer or final re-reviewer must itself record a fresh passing `scope=full_suite` verification.
+
 After the review settles, write `execution/final-review.md` recording the reviewed range, a one-line summary, and the verdict:
 - If no final repair cycle occurred, record the exact unfenced marker `Final Fix Waves: none`.
 - After each completed final repair cycle, append one exact unfenced `Final Fix Wave: <N>` marker. Only this marker backs `final_fixer` / `final_rereviewer` metrics evidence; ordinary task-level `fix wave` prose is not a substitute.
@@ -279,6 +297,8 @@ After the review settles, write `execution/final-review.md` recording the review
 - Repeat until the post-fix reviewer is clean; only then append `Verdict: Approved` as the final unfenced verdict (the gate reads the last one)
 
 Note: `r2p-archive` refuses to archive an executing run unless this file's current verdict is `Verdict: Approved`.
+
+After clean fast approval, revalidate the full Execution BASE→HEAD marker chain and task count, build the complete migrated ledger in memory, replace every implemented marker with `Task N: complete (commits <base7>..<head7>, final review clean)`, set every corresponding checkbox to `[x]`, and perform one atomic full-file `atomic_write_text` of `execution/progress.md`. Never write task completion piecemeal. Then finalize metrics, write the final Approved verdict, and archive through the unchanged gates.
 
 ## Auto-Archive on Completion
 

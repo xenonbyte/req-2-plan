@@ -24,8 +24,8 @@ _PLAN_GRANULARITY_NOTE = (
     "the group's final integration/adoption task runs Phase acceptance. -->\n"
     "<!-- Steps contract: the first semantic line is exactly `Prerequisite: none` or `Prerequisite: PLAN-TASK-NNN`. "
     "Declare only direct predecessors inside this task group; cross-Phase order remains PLAN order and prior Phase acceptance. "
-    "Each generated v1 PLAN Verification first runs `execution-prerequisite-check --work-id <id> --task <N> --require-version 1`; "
-    "it requires strict-compatible state and fails closed on fast-only state. -->\n"
+    "Each generated v2 PLAN Verification first runs `execution-prerequisite-check --work-id <id> --task <N> --require-version 2`; "
+    "it uses profile-aware prerequisite semantics and fails closed on malformed, discontinuous, or non-actionable state. -->\n"
     "<!-- Rollback: derive declared dependents only from this group's prerequisite lines. Roll back one task only after its group's "
     "declared dependents; roll back a whole group in reverse topological order without touching another Phase. Do not add a dependency field. -->\n"
 )  # PLN-5, seeded under "## Tasks" (an HTML comment carries no gate-scanned placeholder token)

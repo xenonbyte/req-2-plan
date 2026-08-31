@@ -72,7 +72,7 @@ class TestAgentTemplateCheckpointGuidance(unittest.TestCase):
             + ", ".join(missing),
         )
 
-    def test_plan_author_surfaces_carry_v1_cohesive_slice_protocol(self):
+    def test_plan_author_surfaces_carry_v2_cohesive_slice_protocol(self):
         """SPEC-GRANULARITY-004 / SPEC-PARITY-008 stay synchronized."""
         surfaces = [
             "tools/workflow_cli/agent_templates/claude/SKILL.md",
@@ -86,8 +86,8 @@ class TestAgentTemplateCheckpointGuidance(unittest.TestCase):
             "intermediate contract",
             "Prerequisite: none",
             "Prerequisite: PLAN-TASK-NNN",
-            "execution-prerequisite-check --work-id <id> --task <N> --require-version 1",
-            "strict-compatible",
+            "execution-prerequisite-check --work-id <id> --task <N> --require-version 2",
+            "profile-aware prerequisite semantics",
             "Dependencies:",
         )
         missing = []
@@ -585,6 +585,17 @@ class TestExecuteTemplateContent(unittest.TestCase):
             "expected_sequence",
             "already_applied",
             "metrics_incomplete",
+            "fast_profile_review",
+            "--confirm-fast-eligible",
+            "--reject-fast-ineligible",
+            "N implementers + primary final reviewer",
+            "Task N: implemented",
+            "Profile Escalation: fast -> strict",
+            "never synthesizes task-reviewer blocks",
+            "primary per-task review",
+            "atomic_write_text",
+            "final review clean",
+            "--require-version 2",
         )
         for surface in EXECUTE_SURFACES:
             text = (REPO_ROOT / surface).read_text(encoding="utf-8")
@@ -610,9 +621,10 @@ class TestExecuteTemplateContent(unittest.TestCase):
         self.assertIn("current branch", text)
         self.assertIn("zero-history", text)
         self.assertIn("fail closed", text)
-        self.assertIn("Strict is the only current execution profile", text)
-        self.assertNotIn("fast is opt-in", text)
-        self.assertNotIn("preflight/eligibility handshake", text)
+        self.assertIn("Strict is the default", text)
+        self.assertIn("fast is explicit opt-in", text)
+        self.assertIn("preflight/eligibility handshake", text)
+        self.assertIn("primary final task-by-task review", text)
         self.assertIn("r2p-context-view", text)
         self.assertIn("r2p-metrics-status", text)
         self.assertIn("r2p-metrics-append", text)

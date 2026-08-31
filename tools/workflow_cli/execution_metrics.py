@@ -23,6 +23,14 @@ from typing import Any
 
 from tools.workflow_cli.artifact import _parse_frontmatter, read_artifact
 from tools.workflow_cli.atomic import UnsafeRegularFileError, read_regular_text
+from tools.workflow_cli.execution_profile import (
+    ExecutionProfile,
+    ExecutionProfileError,
+    ParsedExecutionLedger,
+    check_prerequisite_v2,
+    parse_execution_ledger,
+    validate_ledger_commit_chain,
+)
 from tools.workflow_cli.markdown import (
     plan_task_anchors,
     strip_html_comments_outside_fences,
@@ -41,7 +49,7 @@ from tools.workflow_cli.version import R2P_VERSION
 
 
 INSTRUMENTATION_SCHEMA = 1
-PREREQUISITE_IMPLEMENTATION_VERSION = 1
+PREREQUISITE_IMPLEMENTATION_VERSION = 2
 SELF_HOSTED_WORK_ID = "WF-20260829-r2p-execute-token-phase-r2p"
 SELF_HOSTED_BOOTSTRAP_GAP = "execution_start_through_task_002_reviewed_complete"
 _HEADER_FIELDS = (
@@ -656,6 +664,34 @@ def _resolve_commit(base_path: Path, abbreviation: str) -> str:
     return value
 
 
+def _resolve_commit_or_full(base_path: Path, value: str) -> str:
+    if not (_SHA7.fullmatch(value) or re.fullmatch(r"[0-9a-f]{40}", value)):
+        raise PrerequisiteError("commit identifier is not canonical")
+    result = subprocess.run(
+        ["git", "-C", str(base_path), "rev-parse", "--verify", f"{value}^{{commit}}"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    resolved = result.stdout.strip()
+    if result.returncode != 0 or not re.fullmatch(r"[0-9a-f]{40}", resolved):
+        raise PrerequisiteError("commit identifier is missing or ambiguous")
+    return resolved
+
+
+def _is_ancestor(base_path: Path, ancestor: str, descendant: str) -> bool:
+    result = subprocess.run(
+        ["git", "-C", str(base_path), "merge-base", "--is-ancestor", ancestor, descendant],
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode == 0:
+        return True
+    if result.returncode == 1:
+        return False
+    raise PrerequisiteError("cannot verify ledger commit ancestry")
+
+
 def _initial_metrics_text(work_id: WorkId, profile: str, task_count: int) -> str:
     return "\n".join((
         "# Execution Metrics", f"work_id: {work_id}", f"r2p_version: {R2P_VERSION}",
@@ -715,9 +751,27 @@ def start_execution_transaction(base_path: Path, work_id: WorkId, profile: str) 
                     or metrics.header["task_count"] != len(anchors)
                 ):
                     raise MetricsFormatError("executing run metrics work_id/profile/task count conflicts")
-                base_match = re.search(r"^Execution BASE: ([0-9a-f]{40})$", progress, re.MULTILINE)
-                profile_lines = re.findall(r"^Execution Profile: (strict|fast)$", progress, re.MULTILINE)
-                rows = re.findall(r"^- \[[ x]\] (PLAN-TASK-\d{3})\b", progress, re.MULTILINE)
+                semantic_progress = "\n".join(
+                    line
+                    for line, _, _ in unfenced_markdown_lines(
+                        strip_nonsemantic_markdown(progress)
+                    )
+                )
+                base_match = re.search(
+                    r"^Execution BASE: ([0-9a-f]{40})$",
+                    semantic_progress,
+                    re.MULTILINE,
+                )
+                profile_lines = re.findall(
+                    r"^Execution Profile: (strict|fast)$",
+                    semantic_progress,
+                    re.MULTILINE,
+                )
+                rows = re.findall(
+                    r"^- \[[ x]\] (PLAN-TASK-\d{3})\b",
+                    semantic_progress,
+                    re.MULTILINE,
+                )
                 if (
                     base_match is None
                     or profile_lines != [profile]
@@ -931,6 +985,50 @@ def check_prerequisite_v1(base_path: Path, work_id: WorkId, task: int) -> dict[s
         "satisfied": True,
         "task_count": len(anchors),
         "execution_base": base_match.group(1),
+    }
+
+
+def check_prerequisite(
+    base_path: Path,
+    work_id: WorkId,
+    task: int,
+    *,
+    require_version: int,
+) -> dict[str, Any]:
+    """Dispatch the requested compatible prerequisite semantics version."""
+    if require_version < 1 or require_version > PREREQUISITE_IMPLEMENTATION_VERSION:
+        raise PrerequisiteError("requested prerequisite semantics version is unsupported")
+    if require_version == 1:
+        return check_prerequisite_v1(base_path, work_id, task)
+
+    run_dir = Path(base_path) / ".req-to-plan" / str(work_id)
+    record = RunStateManager(run_dir).load()
+    if record.status != RunStatus.EXECUTING:
+        raise PrerequisiteError("run must be EXECUTING")
+    try:
+        plan = read_artifact(run_dir, Stage.PLAN)
+        progress = _read_progress(run_dir)
+        result = check_prerequisite_v2(progress, plan, task)
+        task_ids = tuple(
+            task_id
+            for task_id, _ in plan_task_anchors(strip_nonsemantic_markdown(plan))
+        )
+        parsed = parse_execution_ledger(progress, task_ids)
+        current_head = _execution_base(Path(base_path))
+        validate_ledger_commit_chain(
+            parsed,
+            current_head=current_head,
+            resolve_commit=lambda value: _resolve_commit_or_full(Path(base_path), value),
+            is_ancestor=lambda ancestor, descendant: _is_ancestor(
+                Path(base_path), ancestor, descendant
+            ),
+        )
+    except (ExecutionProfileError, UnsafeRegularFileError, OSError) as exc:
+        raise PrerequisiteError(str(exc)) from exc
+    return {
+        "work_id": str(work_id),
+        "implementation_version": PREREQUISITE_IMPLEMENTATION_VERSION,
+        **result,
     }
 
 
@@ -1155,16 +1253,7 @@ def _open_metrics_run(
         progress = _read_text_at(execution_fd, "progress.md")
         assert metrics_text is not None and progress is not None
         parsed = parse_metrics(metrics_text)
-        profiles = re.findall(r"^Execution Profile: (strict|fast)$", progress, re.MULTILINE)
-        if not profiles:
-            profiles = ["strict"]
-        if (
-            parsed.header["work_id"] != str(work_id)
-            or parsed.header["instrumentation_schema"] != INSTRUMENTATION_SCHEMA
-            or parsed.header["task_count"] != len(anchors)
-            or profiles != [parsed.header["profile"]]
-        ):
-            raise MetricsFormatError("metrics header identity does not match the run")
+        _validate_current_metrics(run_fd, work_id, parsed, progress)
         return repo_fd, workspace_fd, run_fd, execution_fd, record, parsed, progress
     except Exception:
         _close_fds(execution_fd, run_fd, workspace_fd, repo_fd)
@@ -1176,19 +1265,51 @@ def _validate_current_metrics(
     work_id: WorkId,
     parsed: ParsedMetrics,
     progress: str,
-) -> None:
+) -> ParsedExecutionLedger | None:
     anchors = plan_task_anchors(strip_nonsemantic_markdown(_plan_at(run_fd)))
-    profiles = re.findall(r"^Execution Profile: (strict|fast)$", progress, re.MULTILINE)
+    semantic_progress = "\n".join(
+        line
+        for line, _, _ in unfenced_markdown_lines(
+            strip_nonsemantic_markdown(progress)
+        )
+    )
+    profiles = re.findall(
+        r"^Execution Profile: (strict|fast)$", semantic_progress, re.MULTILINE
+    )
     if not profiles:
         profiles = ["strict"]
+    profile_like = re.findall(
+        r"^\s*Execution\s+Profile[A-Za-z0-9_-]*\s*:.*$",
+        semantic_progress,
+        re.MULTILINE,
+    )
     if (
         not anchors
         or parsed.header["work_id"] != str(work_id)
         or parsed.header["instrumentation_schema"] != INSTRUMENTATION_SCHEMA
         or parsed.header["task_count"] != len(anchors)
         or profiles != [parsed.header["profile"]]
+        or (profile_like and len(profile_like) != len(profiles))
     ):
         raise MetricsFormatError("metrics header identity does not match the run")
+    if parsed.header["profile"] == "strict":
+        if re.search(
+            r"^(?:\s*Profile\s+Escalation[A-Za-z0-9_-]*\s*:|\s*Task\s+[0-9]+\s*:\s*implemented\b)",
+            semantic_progress,
+            re.MULTILINE,
+        ):
+            raise MetricsFormatError(
+                "strict metrics reject fast-only execution progress state"
+            )
+        return None
+    task_ids = tuple(task_id for task_id, _ in anchors)
+    try:
+        ledger = parse_execution_ledger(progress, task_ids)
+    except ExecutionProfileError as exc:
+        raise MetricsFormatError(f"execution progress is invalid: {exc}") from exc
+    if ledger.initial_profile.value != parsed.header["profile"]:
+        raise MetricsFormatError("metrics header profile does not match execution ledger")
+    return ledger
 
 
 def _is_self_host_partial(parsed: ParsedMetrics) -> bool:
@@ -1393,6 +1514,176 @@ def _validate_strict_role_sequence(
         raise MetricsFormatError("role sequence is incomplete")
 
 
+def _validate_fast_role_sequence(
+    invocations: tuple[dict[str, Any], ...],
+    task_count: int,
+    *,
+    require_complete: bool = False,
+) -> None:
+    task = 1
+    expected_role = "implementer"
+    expected_wave = 0
+    blocked = False
+    complete = False
+    for invocation in invocations:
+        if blocked or complete:
+            raise MetricsFormatError("illegal role transition after terminal role status")
+        expected_task: int | str = (
+            "final" if expected_role.startswith("final_") else task
+        )
+        if (
+            invocation["role"] != expected_role
+            or invocation["task"] != expected_task
+            or invocation["fix_wave"] != expected_wave
+        ):
+            raise MetricsFormatError("illegal role transition")
+        status = invocation["status"]
+        if status == "blocked":
+            blocked = True
+            continue
+        if expected_role == "implementer":
+            if task == task_count:
+                expected_role = "final_reviewer"
+            else:
+                task += 1
+        elif expected_role == "final_reviewer":
+            if status == "approved":
+                complete = True
+            else:
+                expected_role = "final_fixer"
+                expected_wave = 1
+        elif expected_role == "final_fixer":
+            expected_role = "final_rereviewer"
+        elif expected_role == "final_rereviewer":
+            if status == "approved":
+                complete = True
+            else:
+                expected_role = "final_fixer"
+                expected_wave += 1
+    if require_complete and not complete:
+        raise MetricsFormatError("role sequence is incomplete")
+
+
+def _validate_escalated_fast_role_sequence(
+    invocations: tuple[dict[str, Any], ...],
+    task_count: int,
+    *,
+    require_complete: bool = False,
+) -> None:
+    recovery_tasks = 0
+    for invocation in invocations:
+        if (
+            invocation["role"] == "implementer"
+            and invocation["task"] == recovery_tasks + 1
+            and invocation["fix_wave"] == 0
+        ):
+            recovery_tasks += 1
+            if invocation["status"] == "blocked":
+                if recovery_tasks != len(invocations):
+                    raise MetricsFormatError(
+                        "illegal role transition after terminal role status"
+                    )
+                if require_complete:
+                    raise MetricsFormatError("role sequence is incomplete")
+                return
+            continue
+        break
+
+    remaining = invocations[recovery_tasks:]
+    if recovery_tasks:
+        task = 1
+        expected_role = "task_reviewer"
+    else:
+        task = 1
+        expected_role = "implementer"
+    expected_wave = 0
+    blocked = False
+    complete = False
+    for invocation in remaining:
+        if blocked or complete:
+            raise MetricsFormatError("illegal role transition after terminal role status")
+        expected_task: int | str = (
+            "final" if expected_role.startswith("final_") else task
+        )
+        if (
+            invocation["role"] != expected_role
+            or invocation["task"] != expected_task
+            or invocation["fix_wave"] != expected_wave
+        ):
+            raise MetricsFormatError("illegal role transition")
+        status = invocation["status"]
+        if status == "blocked":
+            blocked = True
+            continue
+        if expected_role == "implementer":
+            expected_role = "task_reviewer"
+        elif expected_role == "task_reviewer":
+            if status == "approved":
+                if task == task_count:
+                    expected_role = "final_reviewer"
+                else:
+                    task += 1
+                    expected_role = (
+                        "task_reviewer" if task <= recovery_tasks else "implementer"
+                    )
+                expected_wave = 0
+            else:
+                expected_role = "fixer"
+                expected_wave = 1
+        elif expected_role == "fixer":
+            expected_role = "task_rereviewer"
+        elif expected_role == "task_rereviewer":
+            if status == "approved":
+                if task == task_count:
+                    expected_role = "final_reviewer"
+                else:
+                    task += 1
+                    expected_role = (
+                        "task_reviewer" if task <= recovery_tasks else "implementer"
+                    )
+                expected_wave = 0
+            else:
+                expected_role = "fixer"
+                expected_wave += 1
+        elif expected_role == "final_reviewer":
+            if status == "approved":
+                complete = True
+            else:
+                expected_role = "final_fixer"
+                expected_wave = 1
+        elif expected_role == "final_fixer":
+            expected_role = "final_rereviewer"
+        elif expected_role == "final_rereviewer":
+            if status == "approved":
+                complete = True
+            else:
+                expected_role = "final_fixer"
+                expected_wave += 1
+    if require_complete and not complete:
+        raise MetricsFormatError("role sequence is incomplete")
+
+
+def validate_role_sequence(
+    invocations: tuple[dict[str, Any], ...],
+    *,
+    profile: str,
+    task_count: int,
+    require_complete: bool = False,
+) -> None:
+    """Validate the truthful role topology for an initial execution profile."""
+    if profile == "strict":
+        _validate_strict_role_sequence(
+            invocations, task_count, require_complete=require_complete
+        )
+        return
+    if profile == "fast":
+        _validate_fast_role_sequence(
+            invocations, task_count, require_complete=require_complete
+        )
+        return
+    raise MetricsFormatError("profile must be strict or fast")
+
+
 def _metrics_identity(execution_fd: int) -> tuple[int, int]:
     before = os.stat("metrics.md", dir_fd=execution_fd, follow_symlinks=False)
     if not stat.S_ISREG(before.st_mode):
@@ -1455,7 +1746,9 @@ def append_metrics_invocation(
         parsed = parse_metrics(text)
         progress = _read_text_at(execution_fd, "progress.md")
         assert progress is not None
-        _validate_current_metrics(run_fd, work_id, parsed, progress)
+        execution_ledger = _validate_current_metrics(
+            run_fd, work_id, parsed, progress
+        )
         sequence, fields = _canonical_append_fields(
             Path(base_path), work_id, execution_fd, record
         )
@@ -1495,10 +1788,21 @@ def append_metrics_invocation(
                         "self-host partial metrics cannot append pre-bootstrap Task 003 evidence"
                     )
             else:
-                _validate_strict_role_sequence(
-                    updated.invocations,
-                    updated.header["task_count"],
-                )
+                if (
+                    execution_ledger is not None
+                    and execution_ledger.initial_profile is ExecutionProfile.FAST
+                    and execution_ledger.effective_profile is ExecutionProfile.STRICT
+                ):
+                    _validate_escalated_fast_role_sequence(
+                        updated.invocations,
+                        updated.header["task_count"],
+                    )
+                else:
+                    validate_role_sequence(
+                        updated.invocations,
+                        profile=updated.header["profile"],
+                        task_count=updated.header["task_count"],
+                    )
             parsed = _publish_metrics(execution_fd, identity, candidate)
             result = _status_result(parsed, "appended")
         invocation = parsed.invocations[sequence - 1]
@@ -1530,6 +1834,7 @@ def _require_finalization_truth(
     execution_fd: int,
     parsed: ParsedMetrics,
     progress: str,
+    execution_ledger: Any,
 ) -> bytes:
     self_host_partial = _is_self_host_partial(parsed)
     if not self_host_partial and (
@@ -1563,9 +1868,37 @@ def _require_finalization_truth(
     if _current_verdict(final_review) != "approved":
         raise MetricsFormatError("final review is not Approved")
     if not self_host_partial:
-        _validate_strict_role_sequence(
-            parsed.invocations, parsed.header["task_count"], require_complete=True
-        )
+        if (
+            execution_ledger is not None
+            and execution_ledger.initial_profile is ExecutionProfile.FAST
+            and execution_ledger.effective_profile is ExecutionProfile.STRICT
+        ):
+            _validate_escalated_fast_role_sequence(
+                parsed.invocations,
+                parsed.header["task_count"],
+                require_complete=True,
+            )
+        else:
+            validate_role_sequence(
+                parsed.invocations,
+                profile=parsed.header["profile"],
+                task_count=parsed.header["task_count"],
+                require_complete=True,
+            )
+        final_role = parsed.invocations[-1]
+        final_records = final_role["verification_records"]
+        if (
+            final_role["role"] not in {"final_reviewer", "final_rereviewer"}
+            or final_role["status"] != "approved"
+            or final_records == "unavailable"
+            or not any(
+                record["scope"] == "full_suite" and record["status"] == "passed"
+                for record in final_records
+            )
+        ):
+            raise MetricsFormatError(
+                "approved final role requires passed full-suite verification evidence"
+            )
     for invocation in parsed.invocations:
         if not self_host_partial:
             records = invocation["verification_records"]
@@ -1644,13 +1977,15 @@ def finalize_metrics(
         parsed = parse_metrics(text)
         progress = _read_text_at(execution_fd, "progress.md")
         assert progress is not None
-        _validate_current_metrics(run_fd, work_id, parsed, progress)
+        execution_ledger = _validate_current_metrics(
+            run_fd, work_id, parsed, progress
+        )
         if expected_invocation_count != len(parsed.invocations):
             raise MetricsFormatError("expected invocation count is stale")
         if parsed.header["metrics_finalized"]:
             return _status_result(parsed, "already_finalized")
         name_status = _require_finalization_truth(
-            Path(base_path), execution_fd, parsed, progress
+            Path(base_path), execution_fd, parsed, progress, execution_ledger
         )
         try:
             shape = classify_change_shape(name_status)

@@ -4640,37 +4640,52 @@ class TestExecutionPhaseZeroIntegration:
         assert payload["status"] == "executing"
         assert payload["profile"] == "strict"
 
-    def test_execution_prerequisite_check_v1_formats_result_and_rejects_v2(self, monkeypatch):
-        from tools.workflow_cli import cli
-
-        expected = {
-            "work_id": "WF-20260101-exec",
-            "task": 3,
-            "implementation_version": 1,
-            "semantics_version": 1,
-            "effective_profile": "strict",
-            "prerequisite": "PLAN-TASK-002",
-            "satisfied": True,
-        }
-        monkeypatch.setattr(cli, "check_prerequisite_v1", lambda *args: expected, raising=False)
-
         output = io.StringIO()
         with contextlib.redirect_stdout(output), pytest.raises(SystemExit) as exc:
             main([
-                "--base-path", "/tmp/phase-zero", "execution-prerequisite-check",
-                "--work-id", "WF-20260101-exec", "--task", "3", "--require-version", "1",
+                "--base-path", "/tmp/phase-zero", "run-execute-start",
+                "--work-id", "WF-20260101-exec", "--profile", "fast",
             ])
         assert exc.value.code == 0
-        assert "prerequisite_satisfied" in output.getvalue()
-        assert "implementation_version: 1" in output.getvalue()
-        assert "semantics_version: 1" in output.getvalue()
+        assert calls[-1] == (
+            Path("/tmp/phase-zero").resolve(),
+            WorkId("WF-20260101-exec"),
+            "fast",
+        )
 
-        with pytest.raises(SystemExit) as exc:
-            main([
-                "--base-path", "/tmp/phase-zero", "execution-prerequisite-check",
-                "--work-id", "WF-20260101-exec", "--task", "3", "--require-version", "2",
-            ])
-        assert exc.value.code == 6
+    def test_execution_prerequisite_check_dispatches_requested_compatible_version(self, monkeypatch):
+        from tools.workflow_cli import cli
+
+        calls = []
+
+        def prerequisite(base_path, work_id, task, *, require_version):
+            calls.append((base_path, work_id, task, require_version))
+            return {
+                "work_id": str(work_id),
+                "task": task,
+                "implementation_version": 2,
+                "semantics_version": require_version,
+                "effective_profile": "fast" if require_version == 2 else "strict",
+                "prerequisite": "PLAN-TASK-002",
+                "satisfied": True,
+            }
+
+        monkeypatch.setattr(cli, "check_prerequisite", prerequisite, raising=False)
+
+        for requested in (1, 2):
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output), pytest.raises(SystemExit) as exc:
+                main([
+                    "--base-path", "/tmp/phase-zero", "execution-prerequisite-check",
+                    "--work-id", "WF-20260101-exec", "--task", "3",
+                    "--require-version", str(requested),
+                ])
+            assert exc.value.code == 0
+            assert "prerequisite_satisfied" in output.getvalue()
+            assert "implementation_version: 2" in output.getvalue()
+            assert f"semantics_version: {requested}" in output.getvalue()
+
+        assert [call[-1] for call in calls] == [1, 2]
 
     def test_bootstrap_and_samples_commands_preserve_core_result_shapes(self, monkeypatch):
         from tools.workflow_cli import cli

@@ -89,7 +89,7 @@ from tools.workflow_cli.execution_metrics import (
     _canonical_json,
     append_metrics_invocation,
     bootstrap_self_hosted_metrics,
-    check_prerequisite_v1,
+    check_prerequisite,
     finalize_metrics,
     read_metrics_status,
     start_execution_transaction,
@@ -985,17 +985,12 @@ def _cmd_run_execute_start(args):
 
 
 def _cmd_execution_prerequisite_check(args):
-    if args.require_version != 1:
-        print_and_exit(
-            format_error(
-                "requested prerequisite semantics version is unsupported",
-                exit_code=EXIT_CONFLICT,
-            ),
-            EXIT_CONFLICT,
-        )
     try:
-        result = check_prerequisite_v1(
-            args.base_path or Path.cwd(), _validate_work_id(args.work_id), args.task
+        result = check_prerequisite(
+            args.base_path or Path.cwd(),
+            _validate_work_id(args.work_id),
+            args.task,
+            require_version=args.require_version,
         )
     except (MetricsFormatError, PrerequisiteError) as exc:
         print_and_exit(format_error(str(exc), exit_code=EXIT_CONFLICT), EXIT_CONFLICT)
@@ -2189,12 +2184,12 @@ def _register_run_commands(subparsers):
     # run-execute-start
     p = subparsers.add_parser("run-execute-start", help="Begin executing a closed run's PLAN in place")
     p.add_argument("--work-id", required=True)
-    p.add_argument("--profile", choices=["strict"], default="strict")
+    p.add_argument("--profile", choices=["strict", "fast"], default="strict")
     p.set_defaults(func=_cmd_run_execute_start)
 
     p = subparsers.add_parser(
         "execution-prerequisite-check",
-        help="Read-only strict prerequisite check for an execution task",
+        help="Read-only profile-aware prerequisite check for an execution task",
     )
     p.add_argument("--work-id", required=True)
     p.add_argument("--task", required=True, type=_positive_int)

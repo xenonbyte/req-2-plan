@@ -24,6 +24,12 @@ from tools.workflow_cli.atomic import (
 )
 from tools.workflow_cli.models import RunStatus, WorkId
 from tools.workflow_cli.output import EXIT_CONFLICT, EXIT_REVIEW_REQ, is_json_mode
+from tools.workflow_cli.execution_profile import (
+    ExecutionProfileError,
+    fast_structure_eligible,
+    parse_execution_ledger,
+)
+from tools.workflow_cli.markdown import plan_task_anchors, strip_nonsemantic_markdown
 from tools.workflow_cli.workspace import ensure_workspace_gitignore
 
 ACTIVE_POINTER_FILE = ".workflow-active"
@@ -1032,6 +1038,26 @@ def _cmd_archive(ns: argparse.Namespace, base_path: Path) -> None:
 
 
 def _cmd_execute(ns: argparse.Namespace, base_path: Path) -> None:
+    requested_profile = getattr(ns, "profile", None)
+    confirm_fast = bool(getattr(ns, "confirm_fast_eligible", False))
+    reject_fast = bool(getattr(ns, "reject_fast_ineligible", False))
+    reason = getattr(ns, "reason", None)
+    invalid_args = (
+        requested_profile not in {None, "strict", "fast"}
+        or (confirm_fast and reject_fast)
+        or ((confirm_fast or reject_fast) and requested_profile != "fast")
+        or (reason is not None and not reject_fast)
+        or (reject_fast and (
+            not isinstance(reason, str)
+            or not reason.strip()
+            or "\n" in reason
+            or "\r" in reason
+        ))
+    )
+    if invalid_args:
+        print("blocked: invalid_execute_profile_arguments\n")
+        sys.exit(2)
+
     work_id = ns.work_id
     if not work_id:
         pointer = read_active_pointer(base_path)
@@ -1054,16 +1080,86 @@ def _cmd_execute(ns: argparse.Namespace, base_path: Path) -> None:
     ledger = run_dir / "execution" / "progress.md"
 
     if record.status == RunStatus.CLOSED_AT_PLAN_CHECKPOINT:
+        profile = requested_profile or "strict"
+        if profile == "fast":
+            if reject_fast:
+                if is_json_mode():
+                    print(json.dumps({
+                        "status": "error",
+                        "reason": "fast_profile_ineligible",
+                        "exit_code": EXIT_CONFLICT,
+                        "work_id": work_id,
+                        "message": reason.strip(),
+                    }, indent=2))
+                else:
+                    print(
+                        "blocked: fast_profile_ineligible\n"
+                        f"work_id: {work_id}\n"
+                        f"reason: {reason.strip()}\n"
+                    )
+                sys.exit(EXIT_CONFLICT)
+            if not fast_structure_eligible(record.tier_locked):
+                if is_json_mode():
+                    print(json.dumps({
+                        "status": "error",
+                        "reason": "fast_profile_ineligible",
+                        "exit_code": EXIT_CONFLICT,
+                        "work_id": work_id,
+                        "message": "fast requires locked LIGHT tier with no modifiers",
+                    }, indent=2))
+                else:
+                    print(
+                        "blocked: fast_profile_ineligible\n"
+                        f"work_id: {work_id}\n"
+                        "reason: fast requires locked LIGHT tier with no modifiers\n"
+                    )
+                sys.exit(EXIT_CONFLICT)
+            if not confirm_fast:
+                assert record.tier_locked is not None
+                tier = record.tier_locked.base.value
+                modifiers = sorted(item.value for item in record.tier_locked.modifiers)
+                next_step = (
+                    "review every PLAN task for local mechanical behavior, explicit safe Files, "
+                    "no ambiguity or shared/core/security/migration/dependency/config risk, and "
+                    "deterministic Verification; then confirm or reject fast eligibility"
+                )
+                if is_json_mode():
+                    print(json.dumps({
+                        "status": "stop",
+                        "reason": "fast_profile_review",
+                        "work_id": work_id,
+                        "run_status": record.status.value,
+                        "plan": str(plan),
+                        "tier": tier,
+                        "modifiers": modifiers,
+                        "next": next_step,
+                    }, indent=2))
+                else:
+                    print(
+                        "stop: fast_profile_review\n"
+                        f"work_id: {work_id}\n"
+                        f"plan: {plan}\n"
+                        f"tier: {tier}\n"
+                        f"modifiers: {','.join(modifiers) if modifiers else 'none'}\n"
+                        f"next: {next_step}\n"
+                    )
+                sys.exit(0)
         _ensure_workspace_gitignore_or_exit(base_path, work_id)
         json_mode = is_json_mode()
         cli_output = ""
         if json_mode:
             output = io.StringIO()
             with contextlib.redirect_stdout(output):
-                code = _run_cli(["run-execute-start", "--work-id", work_id], base_path)
+                code = _run_cli(
+                    ["run-execute-start", "--work-id", work_id, "--profile", profile],
+                    base_path,
+                )
             cli_output = output.getvalue()
         else:
-            code = _run_cli(["run-execute-start", "--work-id", work_id], base_path)
+            code = _run_cli(
+                ["run-execute-start", "--work-id", work_id, "--profile", profile],
+                base_path,
+            )
         if code != 0:
             if json_mode and cli_output:
                 print(cli_output, end="" if cli_output.endswith("\n") else "\n")
@@ -1084,6 +1180,7 @@ def _cmd_execute(ns: argparse.Namespace, base_path: Path) -> None:
                     "work_id": work_id,
                     "plan": str(plan),
                     "ledger": str(ledger),
+                    "effective_profile": profile,
                     "next": next_step,
                 }
             )
@@ -1096,11 +1193,46 @@ def _cmd_execute(ns: argparse.Namespace, base_path: Path) -> None:
             f"work_id: {work_id}\n"
             f"plan: {plan}\n"
             f"ledger: {ledger}\n"
+            f"effective_profile: {profile}\n"
             f"next: {next_step}\n"
         )
         sys.exit(0)
 
     if record.status == RunStatus.EXECUTING:
+        if confirm_fast or reject_fast:
+            print(
+                "blocked: profile_decision_on_executing_run\n"
+                f"work_id: {work_id}\n"
+            )
+            sys.exit(EXIT_CONFLICT)
+        try:
+            progress = read_regular_text(ledger)
+            plan_text = read_regular_text(plan)
+            if progress is None or plan_text is None:
+                raise ExecutionProfileError("execution profile inputs are missing")
+            task_ids = tuple(
+                task_id
+                for task_id, _ in plan_task_anchors(
+                    strip_nonsemantic_markdown(plan_text)
+                )
+            )
+            parsed_profile = parse_execution_ledger(progress, task_ids)
+        except (OSError, UnsafeRegularFileError, ExecutionProfileError) as exc:
+            print(
+                "blocked: invalid_execution_profile_ledger\n"
+                f"work_id: {work_id}\n"
+                f"reason: {exc}\n"
+            )
+            sys.exit(EXIT_CONFLICT)
+        effective_profile = parsed_profile.effective_profile.value
+        if requested_profile is not None and requested_profile != effective_profile:
+            print(
+                "blocked: execution_profile_conflict\n"
+                f"work_id: {work_id}\n"
+                f"effective_profile: {effective_profile}\n"
+                f"requested_profile: {requested_profile}\n"
+            )
+            sys.exit(EXIT_CONFLICT)
         _ensure_workspace_gitignore_or_exit(base_path, work_id)
         write_active_pointer(base_path, work_id, reason="execute_resume")
         next_step = (
@@ -1117,6 +1249,7 @@ def _cmd_execute(ns: argparse.Namespace, base_path: Path) -> None:
                         "run_status": record.status.value,
                         "plan": str(plan),
                         "ledger": str(ledger),
+                        "effective_profile": effective_profile,
                         "next": next_step,
                     },
                     indent=2,
@@ -1128,6 +1261,7 @@ def _cmd_execute(ns: argparse.Namespace, base_path: Path) -> None:
             f"work_id: {work_id}\n"
             f"plan: {plan}\n"
             f"ledger: {ledger}\n"
+            f"effective_profile: {effective_profile}\n"
             f"next: {next_step}\n"
         )
         sys.exit(0)
@@ -1268,6 +1402,11 @@ def _build_parser() -> argparse.ArgumentParser:
 
     p_execute = sub.add_parser("execute")
     p_execute.add_argument("--work-id", dest="work_id", default=None)
+    p_execute.add_argument("--profile", choices=["strict", "fast"], default=None)
+    decision = p_execute.add_mutually_exclusive_group()
+    decision.add_argument("--confirm-fast-eligible", action="store_true")
+    decision.add_argument("--reject-fast-ineligible", action="store_true")
+    p_execute.add_argument("--reason", default=None)
 
     return parser
 

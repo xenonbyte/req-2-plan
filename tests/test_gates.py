@@ -3731,6 +3731,22 @@ class TestExecutionCommentSemantics(unittest.TestCase):
 
         self.assertTrue(result.passed, result.issues)
 
+    def test_fast_implemented_marker_never_satisfies_completion_gate(self):
+        from tools.workflow_cli.gates import check_execution_complete
+
+        plan = "## Tasks\n### PLAN-TASK-001 real task\n"
+        ledger = (
+            "# Execution Progress\n\n"
+            "Execution Profile: fast\n\n"
+            "- [ ] PLAN-TASK-001 real task\n\n"
+            "Task 1: implemented (commits abcdef0..1234567, verification recorded)\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            result = check_execution_complete(self._run_dir(tmp, plan, ledger))
+
+        self.assertFalse(result.passed)
+        self.assertTrue(any("PLAN-TASK-001" in issue for issue in result.issues))
+
 
 class TestCheckFinalReviewRecorded(unittest.TestCase):
     """Tests for check_final_review_recorded (SPEC-GATE-001).

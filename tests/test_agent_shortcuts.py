@@ -4,6 +4,7 @@ Tests for tools/workflow_cli/agent_shortcuts.py
 from __future__ import annotations
 
 import contextlib
+import argparse
 import io
 import json
 import os
@@ -2115,6 +2116,29 @@ class TestExecuteShortcutAndRouting(unittest.TestCase):
         rec.current_stage = Stage.CLOSED if status != RunStatus.ACTIVE_STAGE_DRAFT else Stage.RAW_REQUIREMENT
         write_artifact(run_dir, Stage.PLAN, "# Plan\n\n## Tasks\n### PLAN-TASK-001: t\n", version=1, status="approved")
         RunStateManager(run_dir).save(rec)
+        if status == RunStatus.EXECUTING:
+            execution = run_dir / "execution"
+            execution.mkdir()
+            execution_base = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=base,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+            (execution / "progress.md").write_text(
+                "\n".join((
+                    "# Execution Progress",
+                    "",
+                    f"work_id: {wid_str}",
+                    "",
+                    f"Execution BASE: {execution_base}",
+                    "",
+                    "- [ ] PLAN-TASK-001 t",
+                    "",
+                )),
+                encoding="utf-8",
+            )
         from tools.workflow_cli import agent_shortcuts as ash
         ash.write_active_pointer(base, wid_str, reason="test")
         return run_dir
@@ -2126,6 +2150,210 @@ class TestExecuteShortcutAndRouting(unittest.TestCase):
             with self.assertRaises(SystemExit) as cm:
                 fn(*a)
         return buf.getvalue(), cm.exception.code
+
+    @staticmethod
+    def _execute_args(
+        work_id,
+        *,
+        profile=None,
+        confirm=False,
+        reject=False,
+        reason=None,
+    ):
+        return argparse.Namespace(
+            work_id=work_id,
+            profile=profile,
+            confirm_fast_eligible=confirm,
+            reject_fast_ineligible=reject,
+            reason=reason,
+        )
+
+    @staticmethod
+    def _lock_light_tier(run_dir):
+        from tools.workflow_cli.models import TierBase, TierEstimate
+        from tools.workflow_cli.state import RunStateManager
+
+        manager = RunStateManager(run_dir)
+        record = manager.load()
+        record.tier_locked = TierEstimate(base=TierBase.LIGHT, modifiers=frozenset())
+        manager.save(record)
+
+    def test_execute_fast_closed_handshake_reviews_then_confirms_without_implicit_mutation(self):
+        import tempfile
+        from pathlib import Path
+        from tools.workflow_cli import agent_shortcuts as ash
+        from tools.workflow_cli.models import RunStatus
+        from tools.workflow_cli.state import RunStateManager
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            run_dir = self._run(
+                base, "WF-20260101-fast", RunStatus.CLOSED_AT_PLAN_CHECKPOINT
+            )
+            self._lock_light_tier(run_dir)
+
+            out, code = self._capture(
+                ash._cmd_execute,
+                self._execute_args("WF-20260101-fast", profile="fast"),
+                base,
+            )
+            self.assertEqual(code, 0)
+            self.assertIn("stop: fast_profile_review", out)
+            self.assertIn("tier: light", out)
+            self.assertIn("modifiers: none", out)
+            self.assertEqual(
+                RunStateManager(run_dir).load().status,
+                RunStatus.CLOSED_AT_PLAN_CHECKPOINT,
+            )
+            self.assertFalse((run_dir / "execution").exists())
+
+            out, code = self._capture(
+                ash._cmd_execute,
+                self._execute_args(
+                    "WF-20260101-fast", profile="fast", confirm=True
+                ),
+                base,
+            )
+            self.assertEqual(code, 0)
+            self.assertIn("stop: execute_plan", out)
+            self.assertIn(
+                "Execution Profile: fast",
+                (run_dir / "execution" / "progress.md").read_text(encoding="utf-8"),
+            )
+
+    def test_execute_fast_reject_and_structure_ineligible_are_zero_mutation(self):
+        import tempfile
+        from pathlib import Path
+        from tools.workflow_cli import agent_shortcuts as ash
+        from tools.workflow_cli.models import RunStatus
+        from tools.workflow_cli.output import EXIT_CONFLICT
+        from tools.workflow_cli.state import RunStateManager
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            run_dir = self._run(
+                base, "WF-20260101-fast", RunStatus.CLOSED_AT_PLAN_CHECKPOINT
+            )
+            out, code = self._capture(
+                ash._cmd_execute,
+                self._execute_args("WF-20260101-fast", profile="fast"),
+                base,
+            )
+            self.assertEqual(code, EXIT_CONFLICT)
+            self.assertIn("fast_profile_ineligible", out)
+            self.assertEqual(
+                RunStateManager(run_dir).load().status,
+                RunStatus.CLOSED_AT_PLAN_CHECKPOINT,
+            )
+            self.assertFalse((run_dir / "execution").exists())
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            run_dir = self._run(
+                base, "WF-20260101-fast", RunStatus.CLOSED_AT_PLAN_CHECKPOINT
+            )
+            self._lock_light_tier(run_dir)
+            out, code = self._capture(
+                ash._cmd_execute,
+                self._execute_args(
+                    "WF-20260101-fast",
+                    profile="fast",
+                    reject=True,
+                    reason="shared core change",
+                ),
+                base,
+            )
+            self.assertEqual(code, EXIT_CONFLICT)
+            self.assertIn("fast_profile_ineligible", out)
+            self.assertIn("shared core change", out)
+            self.assertEqual(
+                RunStateManager(run_dir).load().status,
+                RunStatus.CLOSED_AT_PLAN_CHECKPOINT,
+            )
+            self.assertFalse((run_dir / "execution").exists())
+
+    def test_execute_profile_resume_reuses_effective_profile_and_rejects_conflicts(self):
+        import tempfile
+        from pathlib import Path
+        from tools.workflow_cli import agent_shortcuts as ash
+        from tools.workflow_cli.models import RunStatus
+        from tools.workflow_cli.output import EXIT_CONFLICT
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            run_dir = self._run(
+                base, "WF-20260101-fast", RunStatus.CLOSED_AT_PLAN_CHECKPOINT
+            )
+            self._lock_light_tier(run_dir)
+            self._capture(
+                ash._cmd_execute,
+                self._execute_args(
+                    "WF-20260101-fast", profile="fast", confirm=True
+                ),
+                base,
+            )
+            for profile in (None, "fast"):
+                out, code = self._capture(
+                    ash._cmd_execute,
+                    self._execute_args("WF-20260101-fast", profile=profile),
+                    base,
+                )
+                self.assertEqual(code, 0)
+                self.assertIn("stop: resume_execution", out)
+                self.assertIn("effective_profile: fast", out)
+
+            out, code = self._capture(
+                ash._cmd_execute,
+                self._execute_args("WF-20260101-fast", profile="strict"),
+                base,
+            )
+            self.assertEqual(code, EXIT_CONFLICT)
+            self.assertIn("execution_profile_conflict", out)
+
+            out, code = self._capture(
+                ash._cmd_execute,
+                self._execute_args(
+                    "WF-20260101-fast", profile="fast", confirm=True
+                ),
+                base,
+            )
+            self.assertEqual(code, EXIT_CONFLICT)
+            self.assertIn("profile_decision_on_executing_run", out)
+
+    def test_execute_profile_invalid_argument_combinations_fail_before_mutation(self):
+        import tempfile
+        from pathlib import Path
+        from tools.workflow_cli import agent_shortcuts as ash
+        from tools.workflow_cli.models import RunStatus
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            run_dir = self._run(
+                base, "WF-20260101-fast", RunStatus.CLOSED_AT_PLAN_CHECKPOINT
+            )
+            self._lock_light_tier(run_dir)
+            invalid = (
+                self._execute_args(
+                    "WF-20260101-fast", profile="fast", confirm=True, reject=True
+                ),
+                self._execute_args(
+                    "WF-20260101-fast", profile="fast", reject=True
+                ),
+                self._execute_args(
+                    "WF-20260101-fast", profile="strict", confirm=True
+                ),
+                self._execute_args(
+                    "WF-20260101-fast",
+                    profile="fast",
+                    reject=True,
+                    reason="line one\nline two",
+                ),
+            )
+            for args in invalid:
+                out, code = self._capture(ash._cmd_execute, args, base)
+                self.assertEqual(code, 2)
+                self.assertIn("invalid_execute_profile_arguments", out)
+                self.assertFalse((run_dir / "execution").exists())
 
     def test_execute_on_closed_starts_and_prints_execute_plan(self):
         import tempfile, argparse

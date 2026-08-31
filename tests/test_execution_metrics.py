@@ -20,6 +20,7 @@ from tools.workflow_cli.execution_metrics import (
     RepresentativeSamplesError,
     append_metrics_invocation,
     bootstrap_self_hosted_metrics,
+    check_prerequisite,
     check_prerequisite_v1,
     classify_change_shape,
     parse_metrics,
@@ -27,6 +28,7 @@ from tools.workflow_cli.execution_metrics import (
     read_metrics_status,
     finalize_metrics,
     start_execution_transaction,
+    validate_role_sequence,
     validate_representative_samples,
 )
 from tools.workflow_cli.gates import check_execution_complete, check_final_review_recorded
@@ -118,6 +120,7 @@ def _structured_record(
     else:
         report = execution / f"task-{task}-report.md"
     report.write_text("report\n", encoding="utf-8")
+    verification_scope = "full_suite" if task == "final" else "targeted"
     return {
         "expected_sequence": expected_sequence,
         "role": role,
@@ -130,7 +133,7 @@ def _structured_record(
         "context_bytes": 123,
         "verification_records": [{
             "command": "pytest -q",
-            "scope": "targeted",
+            "scope": verification_scope,
             "reason": "direct contract",
             "elapsed_seconds": "0.125000",
             "status": "passed",
@@ -142,7 +145,12 @@ def _structured_record(
     }
 
 
-def _started_metrics_run(tmp_path: Path, *, task_count: int = 1) -> tuple[WorkId, Path, Path, str]:
+def _started_metrics_run(
+    tmp_path: Path,
+    *,
+    task_count: int = 1,
+    profile: str = "strict",
+) -> tuple[WorkId, Path, Path, str]:
     work_id = WorkId("WF-20260831-structured-metrics")
     run_dir = tmp_path / ".req-to-plan" / str(work_id)
     record = create_run_record(work_id)
@@ -151,7 +159,7 @@ def _started_metrics_run(tmp_path: Path, *, task_count: int = 1) -> tuple[WorkId
     RunStateManager(run_dir).save(record)
     write_artifact(run_dir, Stage.PLAN, _plan(task_count), version=1, status="approved")
     base = _git_init(tmp_path)
-    start_execution_transaction(tmp_path, work_id, "strict")
+    start_execution_transaction(tmp_path, work_id, profile)
     return work_id, run_dir, run_dir / "execution", base
 
 
@@ -201,11 +209,12 @@ def _record_authoritative_completion(
     *,
     checked_row: str = "- [x] PLAN-TASK-001 — task 1",
     verdict: str = "Approved",
+    review_kind: str = "review clean",
 ) -> None:
     progress_path = execution / "progress.md"
     progress = progress_path.read_text(encoding="utf-8")
     progress = re.sub(r"^- \[ \] PLAN-TASK-001.*$", checked_row, progress, flags=re.MULTILINE)
-    progress += f"\nTask 1: complete (commits {base[:7]}..{head[:7]}, review clean)\n"
+    progress += f"\nTask 1: complete (commits {base[:7]}..{head[:7]}, {review_kind})\n"
     progress_path.write_text(progress, encoding="utf-8")
     (execution / "final-review.md").write_text(
         f"Verdict: {verdict}\n", encoding="utf-8"
@@ -237,6 +246,203 @@ def test_structured_metrics_status_append_and_exact_retry(tmp_path):
     assert invocation["context_bytes_kind"] == "semantic_payload_bytes"
     assert invocation["verification_total_seconds"] == "0.125000"
     assert invocation["report_bytes"] == len("report\n".encode())
+
+
+def test_role_sequence_dispatch_preserves_strict_and_accepts_fast_primary_final():
+    strict = (
+        {"role": "implementer", "task": 1, "status": "complete", "fix_wave": 0},
+        {"role": "task_reviewer", "task": 1, "status": "approved", "fix_wave": 0},
+        {"role": "implementer", "task": 2, "status": "complete", "fix_wave": 0},
+        {"role": "task_reviewer", "task": 2, "status": "approved", "fix_wave": 0},
+        {"role": "final_reviewer", "task": "final", "status": "approved", "fix_wave": 0},
+    )
+    fast = (
+        {"role": "implementer", "task": 1, "status": "complete", "fix_wave": 0},
+        {"role": "implementer", "task": 2, "status": "complete", "fix_wave": 0},
+        {"role": "final_reviewer", "task": "final", "status": "approved", "fix_wave": 0},
+    )
+
+    validate_role_sequence(strict, profile="strict", task_count=2, require_complete=True)
+    validate_role_sequence(fast, profile="fast", task_count=2, require_complete=True)
+
+
+@pytest.mark.parametrize(
+    "sequence",
+    (
+        (
+            {"role": "implementer", "task": 1, "status": "complete", "fix_wave": 0},
+            {"role": "task_reviewer", "task": 1, "status": "approved", "fix_wave": 0},
+        ),
+        (
+            {"role": "implementer", "task": 2, "status": "complete", "fix_wave": 0},
+        ),
+        (
+            {"role": "implementer", "task": 1, "status": "blocked", "fix_wave": 0},
+            {"role": "implementer", "task": 2, "status": "complete", "fix_wave": 0},
+        ),
+        (
+            {"role": "implementer", "task": 1, "status": "complete", "fix_wave": 0},
+            {"role": "implementer", "task": 1, "status": "complete", "fix_wave": 0},
+        ),
+    ),
+)
+def test_fast_role_sequence_rejects_task_reviewers_ordering_duplicates_and_blocked_continuation(sequence):
+    with pytest.raises(MetricsFormatError):
+        validate_role_sequence(sequence, profile="fast", task_count=2)
+
+
+def test_fast_role_sequence_accepts_only_paired_final_repair_waves():
+    sequence = (
+        {"role": "implementer", "task": 1, "status": "complete", "fix_wave": 0},
+        {"role": "final_reviewer", "task": "final", "status": "changes_requested", "fix_wave": 0},
+        {"role": "final_fixer", "task": "final", "status": "complete", "fix_wave": 1},
+        {"role": "final_rereviewer", "task": "final", "status": "changes_requested", "fix_wave": 1},
+        {"role": "final_fixer", "task": "final", "status": "complete", "fix_wave": 2},
+        {"role": "final_rereviewer", "task": "final", "status": "approved", "fix_wave": 2},
+    )
+
+    validate_role_sequence(sequence, profile="fast", task_count=1, require_complete=True)
+    with pytest.raises(MetricsFormatError):
+        validate_role_sequence(sequence[:-1], profile="fast", task_count=1, require_complete=True)
+
+
+def test_fast_metrics_append_uses_profile_sequence_without_synthetic_task_reviewer(tmp_path):
+    work_id, _, execution, _ = _started_metrics_run(tmp_path, profile="fast")
+    for sequence, role, task, status in (
+        (1, "implementer", 1, "complete"),
+        (2, "final_reviewer", "final", "approved"),
+    ):
+        append_metrics_invocation(
+            tmp_path,
+            work_id,
+            _structured_record(
+                execution,
+                expected_sequence=sequence,
+                role=role,
+                task=task,
+                status=status,
+            ),
+        )
+
+    parsed = parse_metrics((execution / "metrics.md").read_text(encoding="utf-8"))
+    assert [item["role"] for item in parsed.invocations] == [
+        "implementer",
+        "final_reviewer",
+    ]
+
+
+def test_fast_metrics_append_rejects_task_reviewer_and_terminal_continuation(tmp_path):
+    work_id, _, execution, _ = _started_metrics_run(tmp_path, profile="fast")
+    append_metrics_invocation(
+        tmp_path,
+        work_id,
+        _structured_record(
+            execution,
+            expected_sequence=1,
+            role="implementer",
+            task=1,
+            status="complete",
+        ),
+    )
+    with pytest.raises(MetricsFormatError, match="role transition"):
+        append_metrics_invocation(
+            tmp_path,
+            work_id,
+            _structured_record(
+                execution,
+                expected_sequence=2,
+                role="task_reviewer",
+                task=1,
+                status="approved",
+            ),
+        )
+
+    blocked_root = tmp_path / "blocked"
+    work_id, _, execution, _ = _started_metrics_run(blocked_root, profile="fast")
+    append_metrics_invocation(
+        blocked_root,
+        work_id,
+        _structured_record(
+            execution,
+            expected_sequence=1,
+            role="implementer",
+            task=1,
+            status="blocked",
+        ),
+    )
+    with pytest.raises(MetricsFormatError, match="terminal"):
+        append_metrics_invocation(
+            blocked_root,
+            work_id,
+            _structured_record(
+                execution,
+                expected_sequence=2,
+                role="final_reviewer",
+                task="final",
+                status="approved",
+            ),
+        )
+
+
+def test_escalated_fast_metrics_records_real_task_reviews_then_strict_final(tmp_path):
+    work_id, _, execution, base = _started_metrics_run(
+        tmp_path, task_count=2, profile="fast"
+    )
+    for sequence, task in ((1, 1), (2, 2)):
+        append_metrics_invocation(
+            tmp_path,
+            work_id,
+            _structured_record(
+                execution,
+                expected_sequence=sequence,
+                role="implementer",
+                task=task,
+                status="complete",
+            ),
+        )
+    progress_path = execution / "progress.md"
+    progress_path.write_text(
+        progress_path.read_text(encoding="utf-8")
+        + "\nProfile Escalation: fast -> strict (reason: concern found)\n"
+        + f"Task 1: implemented (commits {base[:7]}..{base[:7]}, verification recorded)\n"
+        + f"Task 2: implemented (commits {base[:7]}..{base[:7]}, verification recorded)\n",
+        encoding="utf-8",
+    )
+    for sequence, role, task, status in (
+        (3, "task_reviewer", 1, "changes_requested"),
+        (4, "fixer", 1, "complete"),
+        (5, "task_rereviewer", 1, "approved"),
+        (6, "task_reviewer", 2, "approved"),
+        (7, "final_reviewer", "final", "approved"),
+    ):
+        fix_wave = 1 if role in {"fixer", "task_rereviewer"} else 0
+        append_metrics_invocation(
+            tmp_path,
+            work_id,
+            _structured_record(
+                execution,
+                expected_sequence=sequence,
+                role=role,
+                task=task,
+                status=status,
+                fix_wave=fix_wave,
+            ),
+        )
+
+    assert [
+        item["role"]
+        for item in parse_metrics(
+            (execution / "metrics.md").read_text(encoding="utf-8")
+        ).invocations
+    ] == [
+        "implementer",
+        "implementer",
+        "task_reviewer",
+        "fixer",
+        "task_rereviewer",
+        "task_reviewer",
+        "final_reviewer",
+    ]
 
 
 def test_structured_metrics_rejects_record_schema_errors_as_input_errors(tmp_path):
@@ -679,6 +885,83 @@ def test_finalize_metrics_derives_change_shape_closes_header_and_is_idempotent(t
     parsed = parse_metrics((execution / "metrics.md").read_text(encoding="utf-8"))
     assert parsed.header["change_shape"] == "single_module_code"
     assert parsed.header["metrics_finalized"] is True
+
+
+def test_finalize_fast_metrics_requires_primary_final_full_suite_and_final_review_markers(tmp_path):
+    work_id, _, execution, base = _started_metrics_run(tmp_path, profile="fast")
+    append_metrics_invocation(
+        tmp_path,
+        work_id,
+        _structured_record(
+            execution,
+            expected_sequence=1,
+            role="implementer",
+            task=1,
+            status="complete",
+        ),
+    )
+    append_metrics_invocation(
+        tmp_path,
+        work_id,
+        _structured_record(
+            execution,
+            expected_sequence=2,
+            role="final_reviewer",
+            task="final",
+            status="approved",
+        ),
+    )
+    head = _commit(tmp_path, "fast-change")
+    _record_authoritative_completion(
+        execution,
+        base,
+        head,
+        review_kind="final review clean",
+    )
+
+    result = finalize_metrics(tmp_path, work_id, 2)
+
+    assert result["result"] == "finalized"
+    parsed = parse_metrics((execution / "metrics.md").read_text(encoding="utf-8"))
+    assert parsed.header["profile"] == "fast"
+    assert parsed.header["metrics_finalized"] is True
+
+
+def test_finalize_rejects_approved_final_role_without_full_suite_evidence(tmp_path):
+    work_id, _, execution, base = _started_metrics_run(tmp_path, profile="fast")
+    append_metrics_invocation(
+        tmp_path,
+        work_id,
+        _structured_record(
+            execution,
+            expected_sequence=1,
+            role="implementer",
+            task=1,
+            status="complete",
+        ),
+    )
+    final_record = _structured_record(
+        execution,
+        expected_sequence=2,
+        role="final_reviewer",
+        task="final",
+        status="approved",
+    )
+    final_record["verification_records"][0]["scope"] = "targeted"
+    append_metrics_invocation(tmp_path, work_id, final_record)
+    head = _commit(tmp_path, "fast-change")
+    _record_authoritative_completion(
+        execution,
+        base,
+        head,
+        review_kind="final review clean",
+    )
+    before = (execution / "metrics.md").read_bytes()
+
+    with pytest.raises(MetricsFormatError, match="full-suite"):
+        finalize_metrics(tmp_path, work_id, 2)
+
+    assert (execution / "metrics.md").read_bytes() == before
 
 
 def test_finalize_metrics_rejects_incomplete_authoritative_state_without_rewriting(tmp_path):
@@ -1326,7 +1609,12 @@ def test_start_execution_transaction_rolls_back_owned_partial_and_retries(tmp_pa
     assert start_execution_transaction(tmp_path, work_id, "strict").status == RunStatus.EXECUTING
 
 
-def test_prerequisite_v1_supports_later_strict_tasks(tmp_path):
+def test_prerequisite_checker_version_matrix_preserves_v1_and_adds_v2_dispatch(
+    tmp_path,
+    monkeypatch,
+):
+    import tools.workflow_cli.execution_metrics as metrics_module
+
     work_id = WorkId("WF-20260830-prerequisite-v1")
     run_dir = tmp_path / ".req-to-plan" / str(work_id)
     record = create_run_record(work_id)
@@ -1349,12 +1637,56 @@ def test_prerequisite_v1_supports_later_strict_tasks(tmp_path):
     ])
     (execution / "progress.md").write_text(progress, encoding="utf-8")
 
-    result = check_prerequisite_v1(tmp_path, work_id, 3)
+    monkeypatch.setattr(metrics_module, "PREREQUISITE_IMPLEMENTATION_VERSION", 1)
+    legacy = check_prerequisite(
+        tmp_path, work_id, 3, require_version=1
+    )
+    with pytest.raises(PrerequisiteError, match="unsupported"):
+        check_prerequisite(tmp_path, work_id, 3, require_version=2)
 
-    assert result["implementation_version"] == 1
+    monkeypatch.setattr(metrics_module, "PREREQUISITE_IMPLEMENTATION_VERSION", 2)
+    result = check_prerequisite(tmp_path, work_id, 3, require_version=1)
+
+    assert legacy["implementation_version"] == 1
+    assert legacy["semantics_version"] == 1
+    assert result["implementation_version"] == 2
     assert result["semantics_version"] == 1
     assert result["effective_profile"] == "strict"
     assert result["prerequisite"] == "PLAN-TASK-002"
+    assert result["satisfied"] is True
+
+
+def test_prerequisite_v2_accepts_fast_first_actionable_task(tmp_path):
+    work_id = WorkId("WF-20260830-prerequisite-v2-fast")
+    run_dir = tmp_path / ".req-to-plan" / str(work_id)
+    record = create_run_record(work_id)
+    record.status = RunStatus.CLOSED_AT_PLAN_CHECKPOINT
+    record.current_stage = Stage.CLOSED
+    RunStateManager(run_dir).save(record)
+    plan = """### PLAN-TASK-001 — first
+Steps:
+Prerequisite: none
+- [ ] implement first
+Verification:
+1. verify first
+
+### PLAN-TASK-002 — second
+Steps:
+Prerequisite: PLAN-TASK-001
+- [ ] implement second
+Verification:
+1. verify second
+"""
+    write_artifact(run_dir, Stage.PLAN, plan, version=1, status="approved")
+    _git_init(tmp_path)
+    start_execution_transaction(tmp_path, work_id, "fast")
+
+    result = check_prerequisite(tmp_path, work_id, 1, require_version=2)
+
+    assert result["implementation_version"] == 2
+    assert result["semantics_version"] == 2
+    assert result["effective_profile"] == "fast"
+    assert result["prerequisite"] == "none"
     assert result["satisfied"] is True
 
 
