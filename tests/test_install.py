@@ -1715,6 +1715,8 @@ class TestInstallOpencode:
             "r2p-metrics-append",
             "r2p-metrics-finalize",
             "metrics_incomplete",
+            "Final Fix Wave: <N>",
+            "Final Fix Waves: none",
         ):
             assert token in content
 

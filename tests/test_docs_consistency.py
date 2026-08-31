@@ -136,6 +136,8 @@ REQUIRED_TEMPLATE_HARDENING_TOKENS = [
     "Verification Records",
     "Concerns",
     "⚠️ DEFER",
+    "`Final Fix Wave: <N>`",
+    "`Final Fix Waves: none`",
 ]
 
 
@@ -521,15 +523,26 @@ class TestExecuteTemplateContent(unittest.TestCase):
 
     def test_execute_surfaces_carry_template_hardening_tokens(self):
         """SPEC-GUARD-001: EXE-1..EXE-5 distinctive tokens on both r2p-execute surfaces."""
+        final_fix_contracts = []
         for surface in EXECUTE_SURFACES:
             text = (REPO_ROOT / surface).read_text(encoding="utf-8")
             for tok in REQUIRED_TEMPLATE_HARDENING_TOKENS:
                 self.assertIn(tok, text, f"{surface}: missing token: {tok!r}")
+            final_fix_contracts.append([
+                line
+                for line in text.splitlines()
+                if "`Final Fix Wave: <N>`" in line or "`Final Fix Waves: none`" in line
+            ])
             self.assertNotIn(
                 "`r2p-gap-open`",
                 text,
                 f"{surface}: execution runs are closed; must not reference r2p-gap-open",
             )
+        self.assertEqual(
+            final_fix_contracts[0],
+            final_fix_contracts[1],
+            "Claude and Codex final-fix marker contracts must remain lockstep",
+        )
 
     def test_execute_surfaces_carry_phase_zero_role_and_metrics_protocol(self):
         required = (

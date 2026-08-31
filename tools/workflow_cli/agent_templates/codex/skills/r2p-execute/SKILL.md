@@ -271,6 +271,8 @@ After all tasks complete, dispatch a final whole-branch review subagent on the *
 - This whole-branch review is the merge gate
 
 After the review settles, write `execution/final-review.md` recording the reviewed range, a one-line summary, and the verdict:
+- If no final repair cycle occurred, record the exact unfenced marker `Final Fix Waves: none`.
+- After each completed final repair cycle, append one exact unfenced `Final Fix Wave: <N>` marker. Only this marker backs `final_fixer` / `final_rereviewer` metrics evidence; ordinary task-level `fix wave` prose is not a substitute.
 - `Verdict: Approved` when the review is clean
 - `Verdict: Changes Requested` while findings remain
 - After any final-review fix wave, regenerate `.req-to-plan/<work-id>/logs/final-diff.md` from the same `<execution-base-commit>` to current `HEAD`, re-run the full verification suite, and re-dispatch the final whole-branch reviewer with the refreshed diff and output

@@ -1697,8 +1697,19 @@ def _six(value: Decimal) -> str:
 def _fix_waves(text: str) -> set[int]:
     semantic = strip_nonsemantic_markdown(text)
     return {
-        int(match)
-        for match in re.findall(r"(?i)\bfix[ -]wave\s+([1-9][0-9]*)\b", semantic)
+        int(match.group(1))
+        for line, _, _ in unfenced_markdown_lines(semantic)
+        for match in re.finditer(r"(?i)\bfix[ -]wave\s+([1-9][0-9]*)\b", line)
+    }
+
+
+def _final_fix_waves(text: str) -> set[int]:
+    semantic = strip_nonsemantic_markdown(text)
+    marker = re.compile(r"^[ \t]*Final Fix Wave:[ \t]*([1-9][0-9]*)[ \t]*$")
+    return {
+        int(match.group(1))
+        for line, _, _ in unfenced_markdown_lines(semantic)
+        if (match := marker.fullmatch(line.rstrip("\r\n")))
     }
 
 
@@ -1716,7 +1727,7 @@ def _sample_role_evidence(
             task_fixers.update((task, wave) for wave in _fix_waves(report))
         if review is not None:
             task_rereviewers.update((task, wave) for wave in _fix_waves(review))
-    final_waves = _fix_waves(final_review)
+    final_waves = _final_fix_waves(final_review)
     return {
         "fixer": task_fixers,
         "task_rereviewer": task_rereviewers,
@@ -1823,8 +1834,7 @@ def _summarize_sample(
     if not plan_ok:
         failures.append(_sample_failure(canonical, str(work_id), "plan_complete", "PLAN task count or progress completion is inconsistent"))
 
-    verdicts = re.findall(r"^Verdict:\s*(.+?)\s*$", strip_nonsemantic_markdown(final_review), re.MULTILINE)
-    if not verdicts or verdicts[-1] != "Approved":
+    if _current_verdict(final_review) != "approved":
         failures.append(_sample_failure(canonical, str(work_id), "final_review_approved", "last final-review verdict is not Approved"))
 
     role_counts = {role: 0 for role in _ROLE_ORDER}

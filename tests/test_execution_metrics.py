@@ -29,7 +29,7 @@ from tools.workflow_cli.execution_metrics import (
     start_execution_transaction,
     validate_representative_samples,
 )
-from tools.workflow_cli.gates import check_execution_complete
+from tools.workflow_cli.gates import check_execution_complete, check_final_review_recorded
 from tools.workflow_cli.artifact import write_artifact
 from tools.workflow_cli.models import RunStatus, Stage, WorkId
 from tools.workflow_cli.state import RunStateManager, create_run_record
@@ -1815,6 +1815,221 @@ def test_sample_validator_accepts_matching_report_review_fix_wave_blocks(tmp_pat
 
     assert result["samples"][0]["role_counts"]["fixer"] == 1
     assert result["samples"][0]["role_counts"]["task_rereviewer"] == 1
+
+
+@pytest.mark.parametrize(
+    ("final_review", "approved"),
+    [
+        ("Verdict: Approved\n", True),
+        ("Verdict: approved\n", True),
+        ("Verdict: APPROVED\n", True),
+        ("Verdict: aPpRoVeD\n", True),
+        ("```text\nVerdict: Approved\n```\n", False),
+        ("<!-- Verdict: Approved -->\n", False),
+        ("Verdict: Approved\nVerdict: Changes Requested\n", False),
+        ("Verdict: Changes Requested\nVerdict: approved\n", True),
+    ],
+    ids=(
+        "title-case",
+        "lower-case",
+        "upper-case",
+        "mixed-case",
+        "fenced-only",
+        "commented-only",
+        "last-unfenced-rejects",
+        "last-unfenced-approves",
+    ),
+)
+def test_sample_verdict_matches_finalization_and_archive_semantics(
+    tmp_path,
+    final_review,
+    approved,
+):
+    one = _archived_sample(tmp_path, "WF-20260831-verdict-one", 1, "single_module_code")
+    two = _archived_sample(tmp_path, "WF-20260831-verdict-two", 2, "single_module_code")
+    three = _archived_sample(tmp_path, "WF-20260831-verdict-three", 1, "docs_only")
+    (one / "execution" / "final-review.md").write_text(final_review, encoding="utf-8")
+
+    assert check_final_review_recorded(one).passed is approved
+    if approved:
+        result = validate_representative_samples((one, two, three))
+        assert result["samples"][0]["final_verdict"] == "Approved"
+    else:
+        with pytest.raises(RepresentativeSamplesError) as sample_error:
+            validate_representative_samples((one, two, three))
+        assert sample_error.value.result["details"] == [{
+            "sample_dir": str(one),
+            "work_id": "WF-20260831-verdict-one",
+            "rule": "final_review_approved",
+            "message": "last final-review verdict is not Approved",
+        }]
+
+    live = tmp_path / "live"
+    live.mkdir()
+    work_id, _, execution, base = _started_metrics_run(live)
+    _append_complete_metrics_sequence(live, work_id, execution)
+    head = _commit_paths(live, ("src/verdict-parity.py",))
+    _record_authoritative_completion(execution, base, head)
+    (execution / "final-review.md").write_text(final_review, encoding="utf-8")
+    if approved:
+        assert finalize_metrics(live, work_id, 3)["result"] == "finalized"
+    else:
+        with pytest.raises(MetricsFormatError, match="final review"):
+            finalize_metrics(live, work_id, 3)
+
+
+def _replace_one_task_final_role_chain(
+    execution: Path,
+    role_specs: tuple[tuple[str, int, str], ...],
+) -> None:
+    metrics_path = execution / "metrics.md"
+    prefix = metrics_path.read_text(encoding="utf-8").split("## Invocation 3", 1)[0]
+    blocks = []
+    for sequence, (role, wave, status_value) in enumerate(role_specs, start=3):
+        block = _invocation(
+            role,
+            "final",
+            sequence,
+            context_mode="semantic_view",
+            fix_wave=wave,
+        )
+        automatic_status = "approved" if "reviewer" in role else "complete"
+        blocks.append(
+            block.replace(f"status: {automatic_status}", f"status: {status_value}")
+        )
+    metrics_path.write_text(prefix + "\n".join(blocks), encoding="utf-8")
+
+
+def test_sample_final_summary_task_fix_wave_does_not_require_final_roles(tmp_path):
+    one = _archived_sample(tmp_path, "WF-20260831-final-summary-one", 1, "single_module_code")
+    two = _archived_sample(tmp_path, "WF-20260831-final-summary-two", 2, "single_module_code")
+    three = _archived_sample(tmp_path, "WF-20260831-final-summary-three", 1, "docs_only")
+    (one / "execution" / "final-review.md").write_text(
+        "Reviewed PLAN-TASK-001..005 + fix wave 1.\nVerdict: Approved\n",
+        encoding="utf-8",
+    )
+
+    result = validate_representative_samples((one, two, three))
+
+    assert result["samples"][0]["role_counts"]["final_fixer"] == 0
+    assert result["samples"][0]["role_counts"]["final_rereviewer"] == 0
+
+
+def test_sample_explicit_final_fix_wave_requires_matching_final_roles(tmp_path):
+    one = _archived_sample(tmp_path, "WF-20260831-final-wave-one", 1, "single_module_code")
+    two = _archived_sample(tmp_path, "WF-20260831-final-wave-two", 2, "single_module_code")
+    three = _archived_sample(tmp_path, "WF-20260831-final-wave-three", 1, "docs_only")
+    (one / "execution" / "final-review.md").write_text(
+        "Final Fix Wave: 1\nVerdict: Approved\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(RepresentativeSamplesError) as error:
+        validate_representative_samples((one, two, three))
+
+    assert error.value.result["details"] == [{
+        "sample_dir": str(one),
+        "work_id": "WF-20260831-final-wave-one",
+        "rule": "role_coverage",
+        "message": "persistent role/fix-wave evidence is missing matching metrics blocks",
+    }]
+
+
+def test_sample_explicit_final_fix_wave_accepts_matching_final_roles(tmp_path):
+    one = _archived_sample(tmp_path, "WF-20260831-final-pair-one", 1, "single_module_code")
+    two = _archived_sample(tmp_path, "WF-20260831-final-pair-two", 2, "single_module_code")
+    three = _archived_sample(tmp_path, "WF-20260831-final-pair-three", 1, "docs_only")
+    execution = one / "execution"
+    (execution / "final-review.md").write_text(
+        "Final Fix Wave: 1\nVerdict: Approved\n",
+        encoding="utf-8",
+    )
+    _replace_one_task_final_role_chain(execution, (
+        ("final_reviewer", 0, "changes_requested"),
+        ("final_fixer", 1, "complete"),
+        ("final_rereviewer", 1, "approved"),
+    ))
+
+    result = validate_representative_samples((one, two, three))
+
+    assert result["samples"][0]["role_counts"]["final_fixer"] == 1
+    assert result["samples"][0]["role_counts"]["final_rereviewer"] == 1
+
+
+@pytest.mark.parametrize(
+    "non_evidence",
+    (
+        "Final Fix Waves: none\n",
+        "Summary: task fix wave 1 completed.\n",
+        "Summary: final fix wave 1 completed.\n",
+        "```text\nFinal Fix Wave: 1\n```\n",
+        "<!-- Final Fix Wave: 1 -->\n",
+    ),
+)
+def test_sample_ignores_noncanonical_final_fix_wave_evidence(tmp_path, non_evidence):
+    one = _archived_sample(tmp_path, "WF-20260831-final-none-one", 1, "single_module_code")
+    two = _archived_sample(tmp_path, "WF-20260831-final-none-two", 2, "single_module_code")
+    three = _archived_sample(tmp_path, "WF-20260831-final-none-three", 1, "docs_only")
+    (one / "execution" / "final-review.md").write_text(
+        non_evidence + "Verdict: Approved\n",
+        encoding="utf-8",
+    )
+
+    assert validate_representative_samples((one, two, three))["status"] == "ok"
+
+
+@pytest.mark.parametrize("covered_waves", ((1,), (1, 2)))
+def test_sample_multiple_explicit_final_fix_waves_require_exact_coverage(
+    tmp_path,
+    covered_waves,
+):
+    one = _archived_sample(tmp_path, "WF-20260831-final-multi-one", 1, "single_module_code")
+    two = _archived_sample(tmp_path, "WF-20260831-final-multi-two", 2, "single_module_code")
+    three = _archived_sample(tmp_path, "WF-20260831-final-multi-three", 1, "docs_only")
+    execution = one / "execution"
+    (execution / "final-review.md").write_text(
+        "Final Fix Wave: 1\nFinal Fix Wave: 2\nVerdict: Approved\n",
+        encoding="utf-8",
+    )
+    role_specs = [("final_reviewer", 0, "changes_requested")]
+    for index, wave in enumerate(covered_waves):
+        role_specs.extend((
+            ("final_fixer", wave, "complete"),
+            (
+                "final_rereviewer",
+                wave,
+                "approved" if index == len(covered_waves) - 1 else "changes_requested",
+            ),
+        ))
+    _replace_one_task_final_role_chain(execution, tuple(role_specs))
+
+    if covered_waves == (1, 2):
+        assert validate_representative_samples((one, two, three))["status"] == "ok"
+    else:
+        with pytest.raises(RepresentativeSamplesError) as error:
+            validate_representative_samples((one, two, three))
+        assert error.value.result["details"][0]["rule"] == "role_coverage"
+
+
+@pytest.mark.parametrize(
+    "wrapped_evidence",
+    (
+        "```text\nFix Wave 1\n```\n",
+        "<!-- Fix Wave 1 -->\n",
+    ),
+)
+@pytest.mark.parametrize("artifact_name", ("task-1-report.md", "task-1-review.md"))
+def test_sample_ignores_fenced_or_commented_task_fix_wave_evidence(
+    tmp_path,
+    artifact_name,
+    wrapped_evidence,
+):
+    one = _archived_sample(tmp_path, "WF-20260831-task-wrap-one", 1, "single_module_code")
+    two = _archived_sample(tmp_path, "WF-20260831-task-wrap-two", 2, "single_module_code")
+    three = _archived_sample(tmp_path, "WF-20260831-task-wrap-three", 1, "docs_only")
+    (one / "execution" / artifact_name).write_text(wrapped_evidence, encoding="utf-8")
+
+    assert validate_representative_samples((one, two, three))["status"] == "ok"
 
 
 @pytest.mark.parametrize("unsafe_kind", ["symlink", "fifo"])
