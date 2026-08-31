@@ -16,6 +16,7 @@ import re
 from collections.abc import Callable
 from typing import Any
 
+from tools.workflow_cli.atomic import UnsafeRegularFileError, read_regular_text
 from tools.workflow_cli.markdown import (
     plan_task_anchors,
     strip_nonsemantic_markdown,
@@ -77,6 +78,37 @@ _COMPLETE_RE = re.compile(
 _MARKER_LIKE_RE = re.compile(r"^Task [0-9]+: (?:implemented|complete).*$")
 _CHECKBOX_RE = re.compile(r"^- \[([ x])\] (PLAN-TASK-[0-9]{3})\b")
 _BASE_RE = re.compile(r"^Execution BASE: ([0-9a-f]{40})$")
+_SAMPLE_ROLES = (
+    "implementer",
+    "task_reviewer",
+    "fixer",
+    "task_rereviewer",
+    "final_reviewer",
+    "final_fixer",
+    "final_rereviewer",
+)
+_SAMPLE_RULES = (
+    "path_safety",
+    "identity_unique",
+    "archived_strict",
+    "instrumentation_complete",
+    "plan_complete",
+    "final_review_approved",
+    "role_coverage",
+    "measured_fields_complete",
+    "metrics_totals_consistent",
+)
+_SAMPLE_FIELDS = (
+    "path", "work_id", "r2p_version", "instrumentation_schema", "profile",
+    "task_count", "change_shape", "instrumentation_complete", "bootstrap_gap",
+    "metrics_finalized", "plan_complete", "final_verdict", "invocation_count",
+    "role_counts", "role_elapsed_total_seconds", "verification_total_seconds",
+    "report_bytes_total", "full_suite", "context_totals", "token_totals", "rules",
+)
+_AGGREGATE_FIELDS = (
+    "sample_count", "work_ids", "task_counts", "change_shapes",
+    "task_count_diverse", "change_shape_diverse", "representative",
+)
 
 
 def _expected_numbers(plan_task_ids: tuple[str, ...]) -> tuple[int, ...]:
@@ -248,11 +280,120 @@ def validate_ledger_commit_chain(
         raise ExecutionProfileError("current HEAD diverges from the ledger chain")
 
 
+def _is_nonnegative_int(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def _has_fields(value: Any, fields: tuple[str, ...]) -> bool:
+    return isinstance(value, dict) and all(field in value for field in fields)
+
+
+def _canonical_sample(sample: Any) -> bool:
+    if not _has_fields(sample, _SAMPLE_FIELDS):
+        return False
+    assert isinstance(sample, dict)
+    if not all(isinstance(sample[field], str) and sample[field] for field in (
+        "path", "work_id", "r2p_version", "change_shape",
+        "role_elapsed_total_seconds", "verification_total_seconds",
+    )):
+        return False
+    if not all(_is_nonnegative_int(sample[field]) for field in (
+        "instrumentation_schema", "task_count", "invocation_count", "report_bytes_total",
+    )):
+        return False
+    if (
+        sample["profile"] != "strict"
+        or sample["instrumentation_complete"] is not True
+        or sample["bootstrap_gap"] != "none"
+        or sample["metrics_finalized"] is not True
+        or sample["plan_complete"] is not True
+        or sample["final_verdict"] != "Approved"
+    ):
+        return False
+
+    role_counts = sample["role_counts"]
+    if not _has_fields(role_counts, _SAMPLE_ROLES) or not all(
+        _is_nonnegative_int(role_counts[role]) for role in _SAMPLE_ROLES
+    ):
+        return False
+    full_suite = sample["full_suite"]
+    if not _has_fields(full_suite, ("count", "duration_seconds")) or not (
+        _is_nonnegative_int(full_suite["count"])
+        and isinstance(full_suite["duration_seconds"], str)
+    ):
+        return False
+    contexts = sample["context_totals"]
+    if not _has_fields(contexts, ("direct_acs", "semantic_view")):
+        return False
+    for mode, bytes_kind in (
+        ("direct_acs", "declared_payload_bytes"),
+        ("semantic_view", "semantic_payload_bytes"),
+    ):
+        context = contexts[mode]
+        if not _has_fields(context, ("invocation_count", "context_bytes_kind", "context_bytes")):
+            return False
+        if (
+            not _is_nonnegative_int(context["invocation_count"])
+            or context["context_bytes_kind"] != bytes_kind
+            or not _is_nonnegative_int(context["context_bytes"])
+        ):
+            return False
+    tokens = sample["token_totals"]
+    if not _has_fields(tokens, ("status", "input_tokens", "output_tokens", "total_tokens")):
+        return False
+    if tokens["status"] == "available":
+        if not all(_is_nonnegative_int(tokens[field]) for field in (
+            "input_tokens", "output_tokens", "total_tokens",
+        )):
+            return False
+    elif tokens["status"] == "unavailable":
+        if any(tokens[field] != "unavailable" for field in (
+            "input_tokens", "output_tokens", "total_tokens",
+        )):
+            return False
+    else:
+        return False
+    rules = sample["rules"]
+    return (
+        isinstance(rules, list)
+        and [item.get("rule") for item in rules if isinstance(item, dict)] == list(_SAMPLE_RULES)
+        and all(
+            isinstance(item, dict)
+            and item.get("status") == "passed"
+            and isinstance(item.get("details"), list)
+            for item in rules
+        )
+    )
+
+
+def _canonical_aggregate(aggregate: Any, samples: list[dict[str, Any]]) -> bool:
+    if not _has_fields(aggregate, _AGGREGATE_FIELDS):
+        return False
+    assert isinstance(aggregate, dict)
+    task_counts = sorted({sample["task_count"] for sample in samples})
+    change_shapes = sorted({sample["change_shape"] for sample in samples})
+    task_count_diverse = len(task_counts) >= 2
+    change_shape_diverse = len(change_shapes) >= 2
+    return (
+        aggregate["sample_count"] == 3
+        and aggregate["work_ids"] == [sample["work_id"] for sample in samples]
+        and aggregate["task_counts"] == task_counts
+        and aggregate["change_shapes"] == change_shapes
+        and aggregate["task_count_diverse"] is task_count_diverse
+        and aggregate["change_shape_diverse"] is change_shape_diverse
+        and aggregate["representative"] is True
+        and (task_count_diverse or change_shape_diverse)
+    )
+
+
 def consume_accepted_sample_evidence(path: str | Path) -> dict[str, Any]:
-    """Read only the saved validator evidence; never discover sample directories."""
+    """Read only a complete saved validator result; never discover sample directories."""
     try:
-        payload = json.loads(Path(path).read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+        text = read_regular_text(Path(path))
+        if text is None:
+            raise UnsafeRegularFileError("evidence is missing")
+        payload = json.loads(text)
+    except (OSError, UnsafeRegularFileError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ExecutionProfileError("representative metrics evidence is unreadable") from exc
     if not isinstance(payload, dict) or payload.get("status") != "ok" or payload.get("message") != "representative_metrics_accepted":
         raise ExecutionProfileError("representative metrics evidence was not accepted")
@@ -260,10 +401,10 @@ def consume_accepted_sample_evidence(path: str | Path) -> dict[str, Any]:
     aggregate = payload.get("aggregate")
     if not isinstance(samples, list) or len(samples) != 3 or not isinstance(aggregate, dict):
         raise ExecutionProfileError("representative metrics evidence is incomplete")
-    if aggregate.get("representative") is not True or aggregate.get("sample_count") != 3:
-        raise ExecutionProfileError("representative metrics evidence is not diverse")
-    if any(not isinstance(sample, dict) or not isinstance(sample.get("work_id"), str) for sample in samples):
-        raise ExecutionProfileError("representative metrics evidence has invalid sample identity")
+    if not all(_canonical_sample(sample) for sample in samples):
+        raise ExecutionProfileError("representative metrics evidence is incomplete")
+    if not _canonical_aggregate(aggregate, samples):
+        raise ExecutionProfileError("representative metrics evidence is incomplete")
     return payload
 
 

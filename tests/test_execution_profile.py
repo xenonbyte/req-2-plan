@@ -2,6 +2,8 @@ import json
 
 import pytest
 
+import tools.workflow_cli.execution_profile as execution_profile
+from tools.workflow_cli.atomic import UnsafeRegularFileError
 from tools.workflow_cli.execution_profile import (
     ExecutionProfile,
     ExecutionProfileError,
@@ -230,29 +232,174 @@ Task 3: implemented (commits 7654321..0123456, verification recorded)""",
     assert parse_execution_ledger(migrated, TASK_IDS).reviewed_complete == (1, 2, 3)
 
 
-def test_evidence_consumption_reads_only_saved_validator_result(tmp_path):
-    evidence = {
+_SAMPLE_ROLES = (
+    "implementer",
+    "task_reviewer",
+    "fixer",
+    "task_rereviewer",
+    "final_reviewer",
+    "final_fixer",
+    "final_rereviewer",
+)
+_SAMPLE_RULES = (
+    "path_safety",
+    "identity_unique",
+    "archived_strict",
+    "instrumentation_complete",
+    "plan_complete",
+    "final_review_approved",
+    "role_coverage",
+    "measured_fields_complete",
+    "metrics_totals_consistent",
+)
+
+
+def _accepted_sample(number: int, *, task_count: int, change_shape: str) -> dict:
+    return {
+        "path": f"/accepted/WF-20260831-sample-{number}",
+        "work_id": f"WF-20260831-sample-{number}",
+        "r2p_version": "0.0.0-test",
+        "instrumentation_schema": 1,
+        "profile": "strict",
+        "task_count": task_count,
+        "change_shape": change_shape,
+        "instrumentation_complete": True,
+        "bootstrap_gap": "none",
+        "metrics_finalized": True,
+        "plan_complete": True,
+        "final_verdict": "Approved",
+        "invocation_count": 9,
+        "role_counts": {role: 1 for role in _SAMPLE_ROLES},
+        "role_elapsed_total_seconds": "1.000000",
+        "verification_total_seconds": "1.000000",
+        "report_bytes_total": 1,
+        "full_suite": {"count": 1, "duration_seconds": "1.000000"},
+        "context_totals": {
+            "direct_acs": {
+                "invocation_count": 1,
+                "context_bytes_kind": "declared_payload_bytes",
+                "context_bytes": 1,
+            },
+            "semantic_view": {
+                "invocation_count": 1,
+                "context_bytes_kind": "semantic_payload_bytes",
+                "context_bytes": 1,
+            },
+        },
+        "token_totals": {
+            "status": "unavailable",
+            "input_tokens": "unavailable",
+            "output_tokens": "unavailable",
+            "total_tokens": "unavailable",
+        },
+        "rules": [
+            {"rule": rule, "status": "passed", "details": []}
+            for rule in _SAMPLE_RULES
+        ],
+    }
+
+
+def _accepted_evidence() -> dict:
+    samples = [
+        _accepted_sample(1, task_count=1, change_shape="single_module_code"),
+        _accepted_sample(2, task_count=2, change_shape="cross_module_code"),
+        _accepted_sample(3, task_count=2, change_shape="cross_module_code"),
+    ]
+    return {
         "status": "ok",
         "message": "representative_metrics_accepted",
-        "samples": [{"work_id": f"WF-20260831-sample-{number}"} for number in range(1, 4)],
-        "aggregate": {"sample_count": 3, "representative": True},
+        "samples": samples,
+        "aggregate": {
+            "sample_count": 3,
+            "work_ids": [sample["work_id"] for sample in samples],
+            "task_counts": [1, 2],
+            "change_shapes": ["cross_module_code", "single_module_code"],
+            "task_count_diverse": True,
+            "change_shape_diverse": True,
+            "representative": True,
+        },
     }
+
+
+def _remove_path(payload: dict, path: tuple[str, ...]) -> None:
+    current = payload
+    for part in path[:-1]:
+        current = current[part]
+    del current[path[-1]]
+
+
+_REQUIRED_SAMPLE_PATHS = (
+    "path", "work_id", "r2p_version", "instrumentation_schema", "profile",
+    "task_count", "change_shape", "instrumentation_complete", "bootstrap_gap",
+    "metrics_finalized", "plan_complete", "final_verdict", "invocation_count",
+    "role_elapsed_total_seconds", "verification_total_seconds", "report_bytes_total",
+    "role_counts", "full_suite", "context_totals", "token_totals", "rules",
+    *(f"role_counts.{role}" for role in _SAMPLE_ROLES),
+    "full_suite.count", "full_suite.duration_seconds",
+    *(f"context_totals.{mode}.{field}" for mode in ("direct_acs", "semantic_view")
+      for field in ("invocation_count", "context_bytes_kind", "context_bytes")),
+    *(f"token_totals.{field}" for field in ("status", "input_tokens", "output_tokens", "total_tokens")),
+)
+_REQUIRED_AGGREGATE_PATHS = (
+    "sample_count", "work_ids", "task_counts", "change_shapes",
+    "task_count_diverse", "change_shape_diverse", "representative",
+)
+
+
+def test_evidence_consumption_reads_only_saved_canonical_validator_result(tmp_path):
+    evidence = _accepted_evidence()
     path = tmp_path / "phase-3-sample-evidence.json"
     path.write_text(json.dumps(evidence), encoding="utf-8")
 
     assert consume_accepted_sample_evidence(path) == evidence
 
 
-@pytest.mark.parametrize(
-    "evidence",
-    (
-        {"status": "error", "message": "BLOCKED: representative_metrics_missing"},
-        {"status": "ok", "message": "representative_metrics_accepted", "samples": [], "aggregate": {}},
-    ),
-)
-def test_evidence_consumption_rejects_incomplete_or_unsuccessful_result(tmp_path, evidence):
+@pytest.mark.parametrize("field", _REQUIRED_SAMPLE_PATHS)
+def test_evidence_consumption_rejects_each_omitted_canonical_sample_field(tmp_path, field):
+    evidence = _accepted_evidence()
+    _remove_path(evidence["samples"][0], tuple(field.split(".")))
     path = tmp_path / "phase-3-sample-evidence.json"
     path.write_text(json.dumps(evidence), encoding="utf-8")
 
-    with pytest.raises(ExecutionProfileError):
+    with pytest.raises(ExecutionProfileError, match="incomplete"):
+        consume_accepted_sample_evidence(path)
+
+
+@pytest.mark.parametrize("field", _REQUIRED_AGGREGATE_PATHS)
+def test_evidence_consumption_rejects_each_omitted_canonical_aggregate_field(tmp_path, field):
+    evidence = _accepted_evidence()
+    del evidence["aggregate"][field]
+    path = tmp_path / "phase-3-sample-evidence.json"
+    path.write_text(json.dumps(evidence), encoding="utf-8")
+
+    with pytest.raises(ExecutionProfileError, match="incomplete"):
+        consume_accepted_sample_evidence(path)
+
+
+@pytest.mark.parametrize("mode", ("symlink", "directory"))
+def test_evidence_consumption_rejects_non_regular_evidence_paths(tmp_path, mode):
+    path = tmp_path / "phase-3-sample-evidence.json"
+    if mode == "symlink":
+        external = tmp_path / "external-evidence.json"
+        external.write_text(json.dumps(_accepted_evidence()), encoding="utf-8")
+        path.symlink_to(external)
+    elif mode == "directory":
+        path.mkdir()
+    with pytest.raises(ExecutionProfileError, match="unreadable"):
+        consume_accepted_sample_evidence(path)
+
+
+@pytest.mark.parametrize("unsafe_message", ("not a regular file", "identity changed"))
+def test_evidence_consumption_translates_unsafe_regular_file_failures(
+    tmp_path, monkeypatch, unsafe_message,
+):
+    path = tmp_path / "phase-3-sample-evidence.json"
+    path.write_text(json.dumps(_accepted_evidence()), encoding="utf-8")
+    monkeypatch.setattr(
+        execution_profile,
+        "read_regular_text",
+        lambda _path: (_ for _ in ()).throw(UnsafeRegularFileError("identity changed")),
+    )
+
+    with pytest.raises(ExecutionProfileError, match="unreadable"):
         consume_accepted_sample_evidence(path)
