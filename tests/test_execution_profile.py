@@ -35,8 +35,23 @@ def ledger(*rows: str, extras: str = "") -> str:
     ))
 
 
-def plan() -> str:
-    return "\n".join(f"### {task_id} — task" for task_id in TASK_IDS)
+def plan(*steps: str) -> str:
+    if not steps:
+        steps = (
+            "Prerequisite: none\n- [ ] first step",
+            "Prerequisite: PLAN-TASK-001\n- [ ] second step",
+            "Prerequisite: PLAN-TASK-002\n- [ ] third step",
+        )
+    assert len(steps) == len(TASK_IDS)
+    return "\n\n".join(
+        f"""### {task_id} — task
+Steps:
+{task_steps}
+Verification:
+1. Verify the task.
+"""
+        for task_id, task_steps in zip(TASK_IDS, steps)
+    )
 
 
 def test_legacy_strict_ledger_parses_reviewed_complete_prefix():
@@ -283,6 +298,106 @@ Task 1: implemented (commits abcdef0..1234567, verification recorded)""",
     assert result["prerequisite"] == "PLAN-TASK-001"
     with pytest.raises(ExecutionProfileError, match="first actionable"):
         check_prerequisite_v2(progress, plan(), 1)
+
+
+def test_v2_prerequisite_accepts_declared_group_root_none():
+    progress = ledger(
+        "- [x] PLAN-TASK-001 — first",
+        "- [x] PLAN-TASK-002 — second",
+        "- [ ] PLAN-TASK-003 — third",
+        extras="""Task 1: complete (commits abcdef0..1234567, review clean)
+Task 2: complete (commits 1234567..7654321, review clean)""",
+    )
+
+    result = check_prerequisite_v2(
+        progress,
+        plan(
+            "Prerequisite: none\n- [ ] first step",
+            "Prerequisite: PLAN-TASK-001\n- [ ] second step",
+            "Prerequisite: none\n- [ ] third step",
+        ),
+        3,
+    )
+
+    assert result["prerequisite"] == "none"
+    assert result["satisfied"] is True
+
+
+def test_v2_prerequisite_uses_declared_reviewed_predecessor_marker():
+    progress = ledger(
+        "- [x] PLAN-TASK-001 — first",
+        "- [ ] PLAN-TASK-002 — second",
+        "- [ ] PLAN-TASK-003 — third",
+        extras="Task 1: complete (commits abcdef0..1234567, review clean)",
+    )
+
+    result = check_prerequisite_v2(progress, plan(), 2)
+
+    assert result["prerequisite"] == "PLAN-TASK-001"
+    assert result["satisfied"] is True
+
+
+@pytest.mark.parametrize(
+    ("task_steps", "message"),
+    (
+        ("- [ ] no declaration", "missing"),
+        (
+            "Prerequisite: none\nPrerequisite: PLAN-TASK-001\n- [ ] duplicate",
+            "duplicated",
+        ),
+        ("Prerequisite: PLAN-TASK-1\n- [ ] malformed", "malformed"),
+        ("- [ ] not first\nPrerequisite: none", "first Steps line"),
+    ),
+)
+def test_v2_prerequisite_rejects_missing_duplicate_or_malformed_declarations(
+    task_steps, message
+):
+    progress = ledger(
+        "- [ ] PLAN-TASK-001 — first",
+        "- [ ] PLAN-TASK-002 — second",
+        "- [ ] PLAN-TASK-003 — third",
+    )
+
+    with pytest.raises(ExecutionProfileError, match=message):
+        check_prerequisite_v2(
+            progress,
+            plan(
+                task_steps,
+                "Prerequisite: PLAN-TASK-001\n- [ ] second step",
+                "Prerequisite: PLAN-TASK-002\n- [ ] third step",
+            ),
+            1,
+        )
+
+
+@pytest.mark.parametrize(
+    ("declared", "message"),
+    (
+        ("PLAN-TASK-002", "itself"),
+        ("PLAN-TASK-003", "forward"),
+        ("PLAN-TASK-999", "outside PLAN"),
+    ),
+)
+def test_v2_prerequisite_rejects_self_forward_and_foreign_references(
+    declared, message
+):
+    progress = ledger(
+        "- [x] PLAN-TASK-001 — first",
+        "- [ ] PLAN-TASK-002 — second",
+        "- [ ] PLAN-TASK-003 — third",
+        extras="Task 1: complete (commits abcdef0..1234567, review clean)",
+    )
+
+    with pytest.raises(ExecutionProfileError, match=message):
+        check_prerequisite_v2(
+            progress,
+            plan(
+                "Prerequisite: none\n- [ ] first step",
+                f"Prerequisite: {declared}\n- [ ] second step",
+                "Prerequisite: PLAN-TASK-002\n- [ ] third step",
+            ),
+            2,
+        )
 
 
 def test_fast_structure_uses_authoritative_locked_tier_boundary(tmp_path):

@@ -20,11 +20,14 @@ from typing import Any
 
 from tools.workflow_cli.atomic import UnsafeRegularFileError, read_regular_text
 from tools.workflow_cli.markdown import (
+    PLAN_TASK_ANCHOR_RE,
+    heading_bounded_bodies,
     plan_task_anchors,
     strip_nonsemantic_markdown,
     unfenced_markdown_lines,
 )
 from tools.workflow_cli.models import TierBase, TierEstimate, WorkId
+from tools.workflow_cli.stage_schema import PLAN_TASK_FIELD_RE
 
 
 class ExecutionProfile(Enum):
@@ -85,6 +88,7 @@ _MARKER_LIKE_RE = re.compile(
 )
 _CHECKBOX_RE = re.compile(r"^- \[([ x])\] (PLAN-TASK-[0-9]{3})\b")
 _BASE_RE = re.compile(r"^Execution BASE: ([0-9a-f]{40})$")
+_PREREQUISITE_RE = re.compile(r"^Prerequisite: (none|PLAN-TASK-[0-9]{3})$")
 _SAMPLE_ROLES = (
     "implementer",
     "task_reviewer",
@@ -281,22 +285,93 @@ def parse_execution_ledger(
     )
 
 
+def _declared_prerequisite(
+    semantic_plan: str, plan_task_ids: tuple[str, ...], task: int
+) -> str:
+    bodies = tuple(
+        heading_bounded_bodies(semantic_plan, PLAN_TASK_ANCHOR_RE.match)
+    )
+    if len(bodies) != len(plan_task_ids):
+        raise ExecutionProfileError("PLAN task bodies do not match task anchors")
+    body = bodies[task - 1]
+    lines = tuple(unfenced_markdown_lines(body))
+    steps = [
+        (start, end)
+        for line, start, end in lines
+        if line.rstrip("\r\n") == "Steps:"
+    ]
+    if len(steps) != 1:
+        raise ExecutionProfileError("task Steps field is missing or duplicated")
+
+    _, steps_start = steps[0]
+    steps_end = next(
+        (
+            start
+            for line, start, _ in lines
+            if start >= steps_start and PLAN_TASK_FIELD_RE.match(line)
+        ),
+        len(body),
+    )
+    step_lines = [
+        line.rstrip("\r\n")
+        for line, start, _ in lines
+        if steps_start <= start < steps_end and line.strip()
+    ]
+    prerequisite_like = [
+        line for line in step_lines if line.lstrip().startswith("Prerequisite")
+    ]
+    if not prerequisite_like:
+        raise ExecutionProfileError("prerequisite declaration is missing")
+    if len(prerequisite_like) != 1:
+        raise ExecutionProfileError("prerequisite declaration is duplicated")
+    if step_lines[0] != prerequisite_like[0]:
+        raise ExecutionProfileError(
+            "prerequisite declaration must be the first Steps line"
+        )
+    match = _PREREQUISITE_RE.fullmatch(prerequisite_like[0])
+    if match is None:
+        raise ExecutionProfileError("prerequisite declaration is malformed")
+    return match.group(1)
+
+
 def check_prerequisite_v2(progress: str, plan: str, task: int) -> dict[str, Any]:
     """Validate profile-aware pre-dispatch ordering without mutating a run."""
-    ids = tuple(task_id for task_id, _ in plan_task_anchors(strip_nonsemantic_markdown(plan)))
+    semantic_plan = strip_nonsemantic_markdown(plan)
+    ids = tuple(task_id for task_id, _ in plan_task_anchors(semantic_plan))
     parsed = parse_execution_ledger(progress, ids)
     if task not in range(1, len(ids) + 1):
         raise ExecutionProfileError("task is outside PLAN bounds")
     actionable = parsed.first_actionable_task()
     if actionable != task:
         raise ExecutionProfileError("task is not the first actionable task")
-    prerequisite = "none" if task == 1 else f"PLAN-TASK-{task - 1:03d}"
+    prerequisite = _declared_prerequisite(semantic_plan, ids, task)
+    satisfied = prerequisite == "none"
+    if prerequisite != "none":
+        if prerequisite not in ids:
+            raise ExecutionProfileError("declared prerequisite is outside PLAN")
+        predecessor = ids.index(prerequisite) + 1
+        if predecessor == task:
+            raise ExecutionProfileError("task cannot declare itself as prerequisite")
+        if predecessor > task:
+            raise ExecutionProfileError("task cannot declare a forward prerequisite")
+        marker = parsed.marker_for(predecessor)
+        satisfied = marker is not None and (
+            marker.kind == "complete"
+            or (
+                parsed.effective_profile is ExecutionProfile.FAST
+                and marker.kind == "implemented"
+            )
+        )
+        if not satisfied:
+            raise ExecutionProfileError(
+                "declared prerequisite does not have a valid completion marker"
+            )
     return {
         "task": task,
         "semantics_version": 2,
         "effective_profile": parsed.effective_profile.value,
         "prerequisite": prerequisite,
-        "satisfied": True,
+        "satisfied": satisfied,
         "task_count": len(ids),
         "execution_base": parsed.execution_base,
     }
