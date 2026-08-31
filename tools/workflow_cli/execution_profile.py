@@ -71,13 +71,17 @@ _FULL_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _SHORT_SHA_RE = r"[0-9a-f]{7}"
 _PROFILE_RE = re.compile(r"^Execution Profile: (strict|fast)$")
 _ESCALATION_RE = re.compile(r"^Profile Escalation: fast -> strict \(reason: ([^\r\n]+)\)$")
+_PROFILE_LIKE_RE = re.compile(r"^\s*Execution\s+Profile[A-Za-z0-9_-]*\s*:")
+_ESCALATION_LIKE_RE = re.compile(r"^\s*Profile\s+Escalation[A-Za-z0-9_-]*\s*:")
 _IMPLEMENTED_RE = re.compile(
     rf"^Task ([1-9][0-9]*): implemented \(commits ({_SHORT_SHA_RE})\.\.({_SHORT_SHA_RE}), verification recorded\)$"
 )
 _COMPLETE_RE = re.compile(
     rf"^Task ([1-9][0-9]*): complete \(commits ({_SHORT_SHA_RE})\.\.({_SHORT_SHA_RE}), (review|final review) clean\)$"
 )
-_MARKER_LIKE_RE = re.compile(r"^Task [0-9]+: (?:implemented|complete).*$")
+_MARKER_LIKE_RE = re.compile(
+    r"^\s*Task\s*[0-9]+\s*:?\s*(?:implemented|complete).*$"
+)
 _CHECKBOX_RE = re.compile(r"^- \[([ x])\] (PLAN-TASK-[0-9]{3})\b")
 _BASE_RE = re.compile(r"^Execution BASE: ([0-9a-f]{40})$")
 _SAMPLE_ROLES = (
@@ -146,13 +150,13 @@ def parse_execution_ledger(
     lines = _semantic_lines(text)
 
     profiles = [match.group(1) for line in lines if (match := _PROFILE_RE.match(line))]
-    profile_like = [line for line in lines if line.startswith("Execution Profile:")]
+    profile_like = [line for line in lines if _PROFILE_LIKE_RE.match(line)]
     if len(profiles) != len(profile_like) or len(profiles) > 1:
         raise ExecutionProfileError("initial execution profile is malformed or duplicated")
     initial = ExecutionProfile(profiles[0]) if profiles else ExecutionProfile.STRICT
 
     escalations = [match.group(1) for line in lines if (match := _ESCALATION_RE.match(line))]
-    escalation_like = [line for line in lines if line.startswith("Profile Escalation:")]
+    escalation_like = [line for line in lines if _ESCALATION_LIKE_RE.match(line)]
     if len(escalations) != len(escalation_like) or len(escalations) > 1:
         raise ExecutionProfileError("profile escalation is malformed or duplicated")
     if escalations and (initial is not ExecutionProfile.FAST or not escalations[0].strip()):
@@ -214,6 +218,15 @@ def parse_execution_ledger(
         raise ExecutionProfileError("task states must be complete, implemented, then untouched")
     if effective is ExecutionProfile.STRICT and initial is ExecutionProfile.STRICT and "implemented" in states:
         raise ExecutionProfileError("strict ledger cannot retain implemented state")
+    if (
+        initial is ExecutionProfile.FAST
+        and effective is ExecutionProfile.FAST
+        and "complete" in states
+        and any(state != "complete" for state in states)
+    ):
+        raise ExecutionProfileError(
+            "unelevated fast ledger cannot retain a reviewed-complete prefix"
+        )
 
     return ParsedExecutionLedger(
         initial_profile=initial,
@@ -248,13 +261,12 @@ def check_prerequisite_v2(progress: str, plan: str, task: int) -> dict[str, Any]
     }
 
 
-def fast_structure_eligible(tier: TierEstimate) -> bool:
+def fast_structure_eligible(tier_locked: TierEstimate | None) -> bool:
     """Fast may only be considered for a locked LIGHT tier without modifiers."""
     return (
-        isinstance(tier, TierEstimate)
-        and tier.base is TierBase.LIGHT
-        and not tier.modifiers
-        and tier._floor_base is not None
+        isinstance(tier_locked, TierEstimate)
+        and tier_locked.base is TierBase.LIGHT
+        and not tier_locked.modifiers
     )
 
 

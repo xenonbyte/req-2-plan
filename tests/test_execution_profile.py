@@ -14,7 +14,8 @@ from tools.workflow_cli.execution_profile import (
     parse_execution_ledger,
     validate_ledger_commit_chain,
 )
-from tools.workflow_cli.models import TierBase, TierEstimate, TierModifier
+from tools.workflow_cli.models import TierBase, TierEstimate, TierModifier, WorkId
+from tools.workflow_cli.state import RunStateManager, create_run_record
 
 
 TASK_IDS = ("PLAN-TASK-001", "PLAN-TASK-002", "PLAN-TASK-003")
@@ -83,8 +84,17 @@ Task 1: implemented (commits abcdef0..1234567, verification recorded)
     (
         "Execution Profile: fast\nExecution Profile: fast",
         "Execution Profile: standard",
+        " Execution Profile: fast",
+        "Execution Profile : fast",
+        "Execution Profilex: fast",
         "Profile Escalation: strict -> fast (reason: no)",
+        " Profile Escalation: fast -> strict (reason: concern)",
+        "Profile Escalation : fast -> strict (reason: concern)",
+        "Profile Escalationx: fast -> strict (reason: concern)",
         "Task 1: implemented (commits ABCDEF0..1234567, verification recorded)",
+        " Task 1: implemented (commits abcdef0..1234567, verification recorded)",
+        "Task1: implemented (commits abcdef0..1234567, verification recorded)",
+        "Task 1 : implemented (commits abcdef0..1234567, verification recorded)",
         "Task 1: completebogus",
     ),
 )
@@ -101,13 +111,68 @@ def test_profile_grammar_fails_closed(extra):
         )
 
 
+@pytest.mark.parametrize(
+    "extra",
+    (
+        "Execution Profile documentation remains unchanged.",
+        "Profile Escalation is discussed in the operator guide.",
+        "Task execution completed after verification.",
+    ),
+)
+def test_ordinary_unrelated_prose_is_not_a_ledger_lookalike(extra):
+    parsed = parse_execution_ledger(
+        ledger(
+            "- [ ] PLAN-TASK-001 — first",
+            "- [ ] PLAN-TASK-002 — second",
+            "- [ ] PLAN-TASK-003 — third",
+            extras=extra,
+        ),
+        TASK_IDS,
+    )
+
+    assert parsed.untouched == (1, 2, 3)
+
+
 def test_fast_state_segments_and_resume_selector():
+    parsed = parse_execution_ledger(
+        ledger(
+            "- [ ] PLAN-TASK-001 — first",
+            "- [ ] PLAN-TASK-002 — second",
+            "- [ ] PLAN-TASK-003 — third",
+            extras="""Execution Profile: fast
+Task 1: implemented (commits abcdef0..1234567, verification recorded)""",
+        ),
+        TASK_IDS,
+    )
+
+    assert parsed.reviewed_complete == ()
+    assert parsed.implemented == (1,)
+    assert parsed.untouched == (2, 3)
+    assert parsed.first_actionable_task() == 2
+
+
+def test_unelevated_fast_rejects_reviewed_complete_prefix():
+    with pytest.raises(ExecutionProfileError, match="unelevated fast"):
+        parse_execution_ledger(
+            ledger(
+                "- [x] PLAN-TASK-001 — first",
+                "- [ ] PLAN-TASK-002 — second",
+                "- [ ] PLAN-TASK-003 — third",
+                extras="""Execution Profile: fast
+Task 1: complete (commits abcdef0..1234567, final review clean)""",
+            ),
+            TASK_IDS,
+        )
+
+
+def test_escalated_fast_retains_reviewed_prefix_for_strict_recovery():
     parsed = parse_execution_ledger(
         ledger(
             "- [x] PLAN-TASK-001 — first",
             "- [ ] PLAN-TASK-002 — second",
             "- [ ] PLAN-TASK-003 — third",
             extras="""Execution Profile: fast
+Profile Escalation: fast -> strict (reason: concern found)
 Task 1: complete (commits abcdef0..1234567, review clean)
 Task 2: implemented (commits 1234567..7654321, verification recorded)""",
         ),
@@ -116,8 +181,7 @@ Task 2: implemented (commits 1234567..7654321, verification recorded)""",
 
     assert parsed.reviewed_complete == (1,)
     assert parsed.implemented == (2,)
-    assert parsed.untouched == (3,)
-    assert parsed.first_actionable_task() == 3
+    assert parsed.first_actionable_task() == 2
 
 
 def test_escalated_fast_must_review_implemented_segment_before_untouched():
@@ -173,12 +237,21 @@ Task 1: implemented (commits abcdef0..1234567, verification recorded)""",
         check_prerequisite_v2(progress, plan(), 1)
 
 
-def test_fast_structure_requires_locked_light_without_modifiers():
-    assert fast_structure_eligible(TierEstimate(TierBase.LIGHT).lock(TierBase.LIGHT, frozenset()))
-    assert not fast_structure_eligible(TierEstimate(TierBase.LIGHT))
-    assert not fast_structure_eligible(TierEstimate(TierBase.STANDARD).lock(TierBase.STANDARD, frozenset()))
-    with_modifier = TierEstimate(TierBase.LIGHT, frozenset({TierModifier.MIGRATION}))
-    assert not fast_structure_eligible(with_modifier.lock(TierBase.LIGHT, with_modifier.modifiers))
+def test_fast_structure_uses_authoritative_locked_tier_boundary(tmp_path):
+    record = create_run_record(WorkId("WF-20260831-profile-test"))
+    record.tier_locked = TierEstimate(TierBase.LIGHT)
+    manager = RunStateManager(tmp_path / ".req-to-plan" / str(record.work_id))
+    manager.save(record)
+
+    loaded = manager.load()
+
+    assert loaded.tier_locked == TierEstimate(TierBase.LIGHT)
+    assert fast_structure_eligible(loaded.tier_locked)
+    assert not fast_structure_eligible(None)
+    assert not fast_structure_eligible(TierEstimate(TierBase.STANDARD))
+    assert not fast_structure_eligible(
+        TierEstimate(TierBase.LIGHT, frozenset({TierModifier.MIGRATION}))
+    )
 
 
 def test_commit_chain_requires_each_marker_base_and_head_to_be_ordered_ancestors():
