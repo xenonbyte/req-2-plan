@@ -518,6 +518,16 @@ def test_evidence_consumption_rejects_producer_impossible_values(tmp_path, mutat
         consume_accepted_sample_evidence(path)
 
 
+def test_evidence_consumption_rejects_boolean_instrumentation_schema(tmp_path):
+    evidence = _accepted_evidence()
+    evidence["samples"][0]["instrumentation_schema"] = True
+    path = tmp_path / "phase-3-sample-evidence.json"
+    path.write_text(json.dumps(evidence), encoding="utf-8")
+
+    with pytest.raises(ExecutionProfileError, match="incomplete"):
+        consume_accepted_sample_evidence(path)
+
+
 @pytest.mark.parametrize(
     "mutate",
     (

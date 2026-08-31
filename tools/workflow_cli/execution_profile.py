@@ -350,8 +350,11 @@ def _canonical_sample(sample: Any) -> bool:
         return False
     if not _canonical_sample_identity(sample["path"], sample["work_id"]):
         return False
+    instrumentation_schema = sample["instrumentation_schema"]
     if (
-        sample["instrumentation_schema"] != 1
+        not isinstance(instrumentation_schema, int)
+        or isinstance(instrumentation_schema, bool)
+        or instrumentation_schema != 1
         or not all(_is_nonnegative_int(sample[field]) for field in (
             "task_count", "invocation_count", "report_bytes_total",
         ))
