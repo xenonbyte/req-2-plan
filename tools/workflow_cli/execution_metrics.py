@@ -1191,6 +1191,15 @@ def _validate_current_metrics(
         raise MetricsFormatError("metrics header identity does not match the run")
 
 
+def _is_self_host_partial(parsed: ParsedMetrics) -> bool:
+    """Return whether this is the one non-representative self-host observation."""
+    return (
+        parsed.header["work_id"] == SELF_HOSTED_WORK_ID
+        and not parsed.header["instrumentation_complete"]
+        and parsed.header["bootstrap_gap"] == SELF_HOSTED_BOOTSTRAP_GAP
+    )
+
+
 def _report_name(base_path: Path, work_id: WorkId, value: str) -> str:
     if not isinstance(value, str) or not value:
         raise MetricsFormatError("report_path must be a non-empty string")
@@ -1477,16 +1486,19 @@ def append_metrics_invocation(
                 updated = parse_metrics(candidate)
             except MetricsFormatError as exc:
                 raise MetricsInputError(str(exc)) from exc
-            start_task = 3 if (
-                updated.header["work_id"] == SELF_HOSTED_WORK_ID
-                and not updated.header["instrumentation_complete"]
-                and updated.header["bootstrap_gap"] == SELF_HOSTED_BOOTSTRAP_GAP
-            ) else 1
-            _validate_strict_role_sequence(
-                updated.invocations,
-                updated.header["task_count"],
-                start_task=start_task,
-            )
+            if _is_self_host_partial(updated):
+                if any(
+                    invocation["task"] != "final" and invocation["task"] < 3
+                    for invocation in updated.invocations
+                ):
+                    raise MetricsFormatError(
+                        "self-host partial metrics cannot append pre-bootstrap Task 003 evidence"
+                    )
+            else:
+                _validate_strict_role_sequence(
+                    updated.invocations,
+                    updated.header["task_count"],
+                )
             parsed = _publish_metrics(execution_fd, identity, candidate)
             result = _status_result(parsed, "appended")
         invocation = parsed.invocations[sequence - 1]
@@ -1519,7 +1531,8 @@ def _require_finalization_truth(
     parsed: ParsedMetrics,
     progress: str,
 ) -> bytes:
-    if (
+    self_host_partial = _is_self_host_partial(parsed)
+    if not self_host_partial and (
         not parsed.header["instrumentation_complete"]
         or parsed.header["bootstrap_gap"] != "none"
     ):
@@ -1549,13 +1562,15 @@ def _require_finalization_truth(
     assert final_review is not None
     if _current_verdict(final_review) != "approved":
         raise MetricsFormatError("final review is not Approved")
-    _validate_strict_role_sequence(
-        parsed.invocations, parsed.header["task_count"], require_complete=True
-    )
+    if not self_host_partial:
+        _validate_strict_role_sequence(
+            parsed.invocations, parsed.header["task_count"], require_complete=True
+        )
     for invocation in parsed.invocations:
-        records = invocation["verification_records"]
-        if records == "unavailable" or any(item["status"] != "passed" for item in records):
-            raise MetricsFormatError("all role verification evidence must be measured and passed")
+        if not self_host_partial:
+            records = invocation["verification_records"]
+            if records == "unavailable" or any(item["status"] != "passed" for item in records):
+                raise MetricsFormatError("all role verification evidence must be measured and passed")
         if invocation["status"] == "blocked":
             raise MetricsFormatError("blocked role evidence cannot be finalized")
     dirty = subprocess.run(

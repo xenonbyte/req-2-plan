@@ -373,6 +373,175 @@ def test_structured_metrics_self_host_bootstrap_sequence_starts_at_task_three(tm
     assert second["result"] == "appended"
 
 
+def test_self_host_partial_append_allows_retroactive_task_six_and_keeps_retry_guards(tmp_path):
+    work_id, _, execution, _, _, _ = _bootstrap_ready_run(tmp_path)
+    bootstrap_self_hosted_metrics(tmp_path, work_id, 2)
+
+    sequence = (
+        ("implementer", 3, "complete", 0),
+        ("task_reviewer", 3, "approved", 0),
+        ("implementer", 4, "complete", 0),
+        ("task_reviewer", 4, "approved", 0),
+        ("implementer", 5, "complete", 0),
+        ("task_reviewer", 5, "approved", 0),
+        ("implementer", 6, "complete", 0),
+        ("task_reviewer", 6, "approved", 0),
+    )
+    for expected_sequence, (role, task, status, fix_wave) in enumerate(sequence, start=1):
+        append_metrics_invocation(
+            tmp_path,
+            work_id,
+            _structured_record(
+                execution,
+                expected_sequence=expected_sequence,
+                role=role,
+                task=task,
+                status=status,
+                fix_wave=fix_wave,
+            ),
+        )
+
+    retroactive = _structured_record(
+        execution,
+        expected_sequence=9,
+        role="task_rereviewer",
+        task=6,
+        status="approved",
+        fix_wave=1,
+    )
+    assert append_metrics_invocation(tmp_path, work_id, retroactive)["result"] == "appended"
+    assert append_metrics_invocation(tmp_path, work_id, retroactive)["result"] == "already_applied"
+    with pytest.raises(MetricsFormatError, match="conflicting retry"):
+        append_metrics_invocation(tmp_path, work_id, dict(retroactive, context_bytes=999))
+    with pytest.raises(MetricsFormatError, match="expected sequence"):
+        append_metrics_invocation(
+            tmp_path,
+            work_id,
+            _structured_record(
+                execution,
+                expected_sequence=11,
+                role="fixer",
+                task=6,
+                status="complete",
+                fix_wave=2,
+            ),
+        )
+
+
+def test_self_host_partial_append_rejects_prebootstrap_task_history(tmp_path):
+    work_id, _, execution, _, _, _ = _bootstrap_ready_run(tmp_path)
+    bootstrap_self_hosted_metrics(tmp_path, work_id, 2)
+
+    with pytest.raises(MetricsFormatError, match="Task 003"):
+        append_metrics_invocation(
+            tmp_path,
+            work_id,
+            _structured_record(
+                execution,
+                expected_sequence=1,
+                role="implementer",
+                task=2,
+                status="complete",
+            ),
+        )
+
+
+def _prepare_self_host_partial_finalization(tmp_path: Path) -> tuple[WorkId, Path]:
+    work_id, _, execution, base, _, _ = _bootstrap_ready_run(tmp_path)
+    bootstrap_self_hosted_metrics(tmp_path, work_id, 2)
+    head = _commit_paths(tmp_path, ("src/self_host_partial.py",))
+    progress_path = execution / "progress.md"
+    progress = progress_path.read_text(encoding="utf-8")
+    progress = re.sub(
+        r"^- \[ \] (PLAN-TASK-\d{3} task \d+)$",
+        r"- [x] \1",
+        progress,
+        flags=re.MULTILINE,
+    )
+    progress += "\n".join(
+        f"Task {number}: complete (commits {base[:7]}..{head[:7]}, review clean)"
+        for number in range(3, 10)
+    ) + "\n"
+    progress_path.write_text(progress, encoding="utf-8")
+    (execution / "final-review.md").write_text("Verdict: Approved\n", encoding="utf-8")
+    return work_id, execution
+
+
+def test_self_host_partial_finalization_closes_observation_without_rewriting_header(tmp_path):
+    work_id, execution = _prepare_self_host_partial_finalization(tmp_path)
+    record = _structured_record(
+        execution,
+        expected_sequence=1,
+        role="task_rereviewer",
+        task=6,
+        status="approved",
+        fix_wave=1,
+    )
+    record["verification_records"][0]["status"] = "failed"
+    append_metrics_invocation(tmp_path, work_id, record)
+
+    finalized = finalize_metrics(tmp_path, work_id, 1)
+    retried = finalize_metrics(tmp_path, work_id, 1)
+    parsed = parse_metrics((execution / "metrics.md").read_text(encoding="utf-8"))
+
+    assert finalized["result"] == "finalized"
+    assert finalized["change_shape"] != "unavailable"
+    assert retried["result"] == "already_finalized"
+    assert parsed.header["instrumentation_complete"] is False
+    assert parsed.header["bootstrap_gap"] == "execution_start_through_task_002_reviewed_complete"
+    assert parsed.header["metrics_finalized"] is True
+
+
+def test_self_host_partial_finalization_still_rejects_blocked_evidence_without_rewriting(tmp_path):
+    work_id, execution = _prepare_self_host_partial_finalization(tmp_path)
+    record = _structured_record(
+        execution,
+        expected_sequence=1,
+        role="implementer",
+        task=3,
+        status="blocked",
+    )
+    record["verification_records"] = "unavailable"
+    append_metrics_invocation(tmp_path, work_id, record)
+    before = (execution / "metrics.md").read_bytes()
+
+    with pytest.raises(MetricsFormatError, match="blocked"):
+        finalize_metrics(tmp_path, work_id, 1)
+
+    assert (execution / "metrics.md").read_bytes() == before
+
+
+def test_finalized_self_host_partial_remains_nonrepresentative(tmp_path):
+    work_id, execution = _prepare_self_host_partial_finalization(tmp_path)
+    append_metrics_invocation(
+        tmp_path,
+        work_id,
+        _structured_record(
+            execution,
+            expected_sequence=1,
+            role="task_rereviewer",
+            task=6,
+            status="approved",
+            fix_wave=1,
+        ),
+    )
+    finalize_metrics(tmp_path, work_id, 1)
+    run_dir = execution.parent
+    record = RunStateManager(run_dir).load()
+    record.status = RunStatus.ARCHIVED
+    RunStateManager(run_dir).save(record)
+    first = _archived_sample(tmp_path / "samples", "WF-20260831-partial-first", 1, "docs_only")
+    second = _archived_sample(tmp_path / "samples", "WF-20260831-partial-second", 2, "single_module_code")
+
+    with pytest.raises(RepresentativeSamplesError) as error:
+        validate_representative_samples((run_dir, first, second))
+
+    assert any(
+        item["rule"] == "instrumentation_complete"
+        for item in error.value.result["details"]
+    )
+
+
 def test_structured_metrics_lock_contention_and_unsafe_report_are_fail_closed(tmp_path):
     work_id, run_dir, execution, _ = _started_metrics_run(tmp_path)
     lock_path = run_dir / "logs" / "metrics.lock"
@@ -709,7 +878,7 @@ def test_finalize_rejects_stale_count_and_self_host_gap_without_rewriting(tmp_pa
     self_host_id, _, self_host_execution, _, _, _ = _bootstrap_ready_run(tmp_path / "self-host")
     bootstrap_self_hosted_metrics(tmp_path / "self-host", self_host_id, 2)
     self_host_before = (self_host_execution / "metrics.md").read_bytes()
-    with pytest.raises(MetricsFormatError, match="instrumentation"):
+    with pytest.raises(MetricsFormatError, match="progress"):
         finalize_metrics(tmp_path / "self-host", self_host_id, 0)
     assert (self_host_execution / "metrics.md").read_bytes() == self_host_before
 
