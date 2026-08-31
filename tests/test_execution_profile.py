@@ -165,6 +165,40 @@ Task 1: complete (commits abcdef0..1234567, final review clean)""",
         )
 
 
+def test_unelevated_fast_all_complete_requires_final_review_clean():
+    progress = ledger(
+        "- [x] PLAN-TASK-001 — first",
+        "- [x] PLAN-TASK-002 — second",
+        "- [x] PLAN-TASK-003 — third",
+        extras="""Execution Profile: fast
+Task 1: complete (commits abcdef0..1234567, review clean)
+Task 2: complete (commits 1234567..7654321, review clean)
+Task 3: complete (commits 7654321..0123456, review clean)""",
+    )
+
+    with pytest.raises(ExecutionProfileError, match="final review clean"):
+        parse_execution_ledger(progress, TASK_IDS)
+    with pytest.raises(ExecutionProfileError, match="final review clean"):
+        finalize_fast_ledger(progress, TASK_IDS)
+
+
+def test_unelevated_fast_all_complete_accepts_final_review_clean():
+    progress = ledger(
+        "- [x] PLAN-TASK-001 — first",
+        "- [x] PLAN-TASK-002 — second",
+        "- [x] PLAN-TASK-003 — third",
+        extras="""Execution Profile: fast
+Task 1: complete (commits abcdef0..1234567, final review clean)
+Task 2: complete (commits 1234567..7654321, final review clean)
+Task 3: complete (commits 7654321..0123456, final review clean)""",
+    )
+
+    parsed = parse_execution_ledger(progress, TASK_IDS)
+
+    assert parsed.reviewed_complete == (1, 2, 3)
+    assert finalize_fast_ledger(progress, TASK_IDS) == progress
+
+
 def test_escalated_fast_retains_reviewed_prefix_for_strict_recovery():
     parsed = parse_execution_ledger(
         ledger(
@@ -303,6 +337,33 @@ Task 3: implemented (commits 7654321..0123456, verification recorded)""",
     assert "implemented" not in migrated
     assert migrated.count("final review clean") == 3
     assert parse_execution_ledger(migrated, TASK_IDS).reviewed_complete == (1, 2, 3)
+
+
+def test_final_fast_migration_preserves_fenced_and_commented_examples_byte_for_byte():
+    nonsemantic = """```text
+- [ ] PLAN-TASK-001 — fenced example
+Task 1: implemented (commits abcdef0..1234567, verification recorded)
+```
+<!--
+- [ ] PLAN-TASK-002 — commented example
+Task 2: implemented (commits 1234567..7654321, verification recorded)
+-->"""
+    progress = ledger(
+        "- [ ] PLAN-TASK-001 — first",
+        "- [ ] PLAN-TASK-002 — second",
+        "- [ ] PLAN-TASK-003 — third",
+        extras=f"""Execution Profile: fast
+Task 1: implemented (commits abcdef0..1234567, verification recorded)
+Task 2: implemented (commits 1234567..7654321, verification recorded)
+Task 3: implemented (commits 7654321..0123456, verification recorded)
+{nonsemantic}""",
+    )
+
+    migrated = finalize_fast_ledger(progress, TASK_IDS)
+
+    assert nonsemantic in migrated
+    assert migrated.count("- [x] PLAN-TASK-") == 3
+    assert migrated.count("final review clean") == 3
 
 
 _SAMPLE_ROLES = (
@@ -521,6 +582,25 @@ def test_evidence_consumption_rejects_producer_impossible_values(tmp_path, mutat
 def test_evidence_consumption_rejects_boolean_instrumentation_schema(tmp_path):
     evidence = _accepted_evidence()
     evidence["samples"][0]["instrumentation_schema"] = True
+    path = tmp_path / "phase-3-sample-evidence.json"
+    path.write_text(json.dumps(evidence), encoding="utf-8")
+
+    with pytest.raises(ExecutionProfileError, match="incomplete"):
+        consume_accepted_sample_evidence(path)
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    (
+        lambda evidence: evidence["aggregate"].__setitem__("sample_count", 3.0),
+        lambda evidence: evidence["aggregate"].__setitem__("sample_count", True),
+        lambda evidence: evidence["aggregate"].__setitem__("task_counts", [1.0, 2]),
+        lambda evidence: evidence["aggregate"].__setitem__("task_counts", [True, 2]),
+    ),
+)
+def test_evidence_consumption_requires_exact_aggregate_integer_types(tmp_path, mutate):
+    evidence = _accepted_evidence()
+    mutate(evidence)
     path = tmp_path / "phase-3-sample-evidence.json"
     path.write_text(json.dumps(evidence), encoding="utf-8")
 

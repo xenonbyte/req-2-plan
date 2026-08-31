@@ -21,6 +21,7 @@ from typing import Any
 from tools.workflow_cli.atomic import UnsafeRegularFileError, read_regular_text
 from tools.workflow_cli.markdown import (
     plan_task_anchors,
+    strip_html_comments_outside_fences,
     strip_nonsemantic_markdown,
     unfenced_markdown_lines,
 )
@@ -42,6 +43,7 @@ class TaskMarker:
     kind: str
     base: str
     head: str
+    review_kind: str | None = None
 
 
 @dataclass(frozen=True)
@@ -183,8 +185,10 @@ def parse_execution_ledger(
                 number, base, head = implemented.groups()
                 markers.append(TaskMarker(int(number), "implemented", base, head))
             elif complete:
-                number, base, head, _review_kind = complete.groups()
-                markers.append(TaskMarker(int(number), "complete", base, head))
+                number, base, head, review_kind = complete.groups()
+                markers.append(
+                    TaskMarker(int(number), "complete", base, head, review_kind)
+                )
             else:
                 raise ExecutionProfileError("task marker is malformed")
     if marker_like_count != len(markers):
@@ -226,6 +230,16 @@ def parse_execution_ledger(
     ):
         raise ExecutionProfileError(
             "unelevated fast ledger cannot retain a reviewed-complete prefix"
+        )
+    if (
+        initial is ExecutionProfile.FAST
+        and effective is ExecutionProfile.FAST
+        and states
+        and all(state == "complete" for state in states)
+        and any(marker.review_kind != "final review" for marker in markers)
+    ):
+        raise ExecutionProfileError(
+            "unelevated fast complete markers must use final review clean"
         )
 
     return ParsedExecutionLedger(
@@ -462,7 +476,10 @@ def _canonical_aggregate(aggregate: Any, samples: list[dict[str, Any]]) -> bool:
     task_count_diverse = len(task_counts) >= 2
     change_shape_diverse = len(change_shapes) >= 2
     return (
-        aggregate["sample_count"] == 3
+        _is_nonnegative_int(aggregate["sample_count"])
+        and aggregate["sample_count"] == 3
+        and isinstance(aggregate["task_counts"], list)
+        and all(_is_nonnegative_int(value) for value in aggregate["task_counts"])
         and aggregate["work_ids"] == [sample["work_id"] for sample in samples]
         and aggregate["task_counts"] == task_counts
         and aggregate["change_shapes"] == change_shapes
@@ -510,18 +527,33 @@ def finalize_fast_ledger(text: str, plan_task_ids: tuple[str, ...]) -> str:
         raise ExecutionProfileError("only an unelevated fast ledger may be finalized")
     if parsed.untouched:
         raise ExecutionProfileError("fast final approval requires every task implemented")
-    result: list[str] = []
-    for line in text.splitlines(keepends=True):
+    semantic = strip_html_comments_outside_fences(text)
+    replacements: list[tuple[int, int, str]] = []
+    for line, start, end in unfenced_markdown_lines(semantic):
         plain = line.rstrip("\r\n")
         checkbox = _CHECKBOX_RE.match(plain)
         implemented = _IMPLEMENTED_RE.match(plain)
+        original_line = text[start:end]
         if checkbox:
-            result.append(line.replace("- [ ]", "- [x]", 1) if checkbox.group(1) == " " else line)
+            if checkbox.group(1) == " ":
+                replacements.append(
+                    (start, end, original_line.replace("- [ ]", "- [x]", 1))
+                )
         elif implemented:
             number, base, head = implemented.groups()
-            result.append(f"Task {number}: complete (commits {base}..{head}, final review clean)" + line[len(plain):])
-        else:
-            result.append(line)
+            replacements.append((
+                start,
+                end,
+                f"Task {number}: complete (commits {base}..{head}, final review clean)"
+                + original_line[len(original_line.rstrip("\r\n")):],
+            ))
+    result: list[str] = []
+    cursor = 0
+    for start, end, replacement in replacements:
+        result.append(text[cursor:start])
+        result.append(replacement)
+        cursor = end
+    result.append(text[cursor:])
     migrated = "".join(result)
     parse_execution_ledger(migrated, plan_task_ids)
     return migrated
