@@ -912,9 +912,38 @@ class TestInstallService:
         assert not wrapper.exists(), "managed context-view wrapper must not be restored"
         assert not (manifest_root / "bin").exists()
 
+    def test_uninstall_discards_generic_managed_wrapper_backups_from_old_checkout(self, tmp_path):
+        current, manifest_root, _ = make_service(tmp_path)
+        old_checkout = tmp_path / "old-checkout"
+        old_checkout.symlink_to(REPO_ROOT, target_is_directory=True)
+        old = InstallService(
+            repo_root=old_checkout,
+            manifest_root=manifest_root,
+            platform_homes=current.platform_homes,
+        )
+
+        old.install("claude")
+        context_wrapper = manifest_root / "bin" / "r2p-context-view"
+        metrics_wrapper = manifest_root / "bin" / "r2p-metrics-status"
+        assert f"REPO_ROOT={old_checkout}" in context_wrapper.read_text(encoding="utf-8")
+        assert f"REPO_ROOT={old_checkout}" in metrics_wrapper.read_text(encoding="utf-8")
+
+        current.install("codex")
+        current.uninstall("codex")
+        current.uninstall("claude")
+
+        assert not context_wrapper.exists()
+        assert not metrics_wrapper.exists()
+
     def test_metrics_wrappers_are_manifest_owned_shared_and_restore_user_backup(self, tmp_path):
         svc, manifest_root, _ = make_service(tmp_path)
-        names = ("r2p-metrics-status", "r2p-metrics-append", "r2p-metrics-finalize")
+        names = (
+            "r2p-prerequisite-check",
+            "r2p-metrics-status",
+            "r2p-metrics-append",
+            "r2p-metrics-ack",
+            "r2p-metrics-finalize",
+        )
         user_target = manifest_root / "bin" / "r2p-metrics-append"
         user_target.parent.mkdir(parents=True)
         user_bytes = b"#!/usr/bin/env bash\nprintf 'user metrics helper\\n'\n"
@@ -934,7 +963,9 @@ class TestInstallService:
         svc.uninstall("codex")
         assert user_target.read_bytes() == user_bytes
         assert not (manifest_root / "bin" / "r2p-metrics-status").exists()
+        assert not (manifest_root / "bin" / "r2p-metrics-ack").exists()
         assert not (manifest_root / "bin" / "r2p-metrics-finalize").exists()
+        assert not (manifest_root / "bin" / "r2p-prerequisite-check").exists()
 
     def test_uninstall_restores_user_context_view_comment_script_byte_identically(self, tmp_path):
         svc, manifest_root, _ = make_service(tmp_path)
@@ -1187,6 +1218,7 @@ class TestInstallService:
         svc, manifest_root, ph_root = make_service(tmp_path)
         svc.install("codex")
         for command in [
+            "r2p-abandon",
             "r2p-continue",
             "r2p-reopen",
             "r2p-start",
@@ -1225,6 +1257,8 @@ class TestInstallService:
         [
             ("-E", "tools.workflow_cli.agent_shortcuts start"),
             ("-I", "tools.workflow_cli.agent_shortcuts start"),
+            ("-E", "tools.workflow_cli context-view"),
+            ("-I", "tools.workflow_cli execution-metrics-status"),
         ],
     )
     def test_trusted_and_legacy_isolated_wrappers_are_recognized_as_managed(
@@ -1310,6 +1344,16 @@ exec python3 -E "$REPO_ROOT/tools/workflow_cli/__main__.py" tools.workflow_cli c
             ("claude", "commands/r2p-archive.md"),
             ("codex", "skills/r2p-archive/SKILL.md"),
             ("gemini", "commands/r2p-archive.toml"),
+        ):
+            service.install(platform)
+            assert (ph_root / platform / rel).exists(), f"{platform}:{rel} not installed"
+
+    def test_install_ships_r2p_abandon_for_all_platforms(self, tmp_path):
+        service, _manifest_root, ph_root = make_service(tmp_path)
+        for platform, rel in (
+            ("claude", "commands/r2p-abandon.md"),
+            ("codex", "skills/r2p-abandon/SKILL.md"),
+            ("gemini", "commands/r2p-abandon.toml"),
         ):
             service.install(platform)
             assert (ph_root / platform / rel).exists(), f"{platform}:{rel} not installed"
@@ -1666,6 +1710,7 @@ def _claude_command_names() -> set[str]:
 
 
 OPENCODE_COMMANDS_WITH_ARGS = {
+    "r2p-abandon.md",
     "r2p-archive.md",
     "r2p-gap-open.md",
     "r2p-gap-resolve.md",
@@ -1674,6 +1719,7 @@ OPENCODE_COMMANDS_WITH_ARGS = {
     "r2p-status.md",
     "r2p-switch.md",
     "r2p-tier-lock.md",
+    "r2p-execute.md",
 }
 
 
@@ -1713,7 +1759,9 @@ class TestInstallOpencode:
             "⚠️ DEFER",
             "r2p-metrics-status",
             "r2p-metrics-append",
+            "r2p-metrics-ack",
             "r2p-metrics-finalize",
+            "r2p-prerequisite-check",
             "metrics_incomplete",
             "Final Fix Wave: <N>",
             "Final Fix Waves: none",
@@ -1729,12 +1777,12 @@ class TestInstallOpencode:
         ):
             assert token in content
 
-    def test_execute_command_runs_fixed_preflight_without_invocation_arguments(self, tmp_path):
+    def test_execute_command_passes_invocation_arguments_to_fixed_preflight(self, tmp_path):
         svc, manifest_root, ph_root = make_service(tmp_path)
         svc.install("opencode")
         content = (ph_root / "opencode" / "commands" / "r2p-execute.md").read_text(encoding="utf-8")
         expected = (
-            f"!`{manifest_root / 'bin' / 'r2p-execute'} 2>&1; "
+            f"!`{manifest_root / 'bin' / 'r2p-execute'} $ARGUMENTS 2>&1; "
             'r2p_status=$?; printf \'\\nR2P_PREFLIGHT_EXIT=%s\\n\' "$r2p_status"`'
         )
 
@@ -1744,10 +1792,10 @@ class TestInstallOpencode:
         assert "no_selected_run" in content
         assert "plan_not_ready" in content
         assert "r2p-switch --work-id <id>" in content
-        assert "$ARGUMENTS" not in content
+        assert "$ARGUMENTS" in content
         shell_blocks = re.findall(r"^!`([^`]+)`", content, flags=re.MULTILINE)
         assert shell_blocks == [
-            f"{manifest_root / 'bin' / 'r2p-execute'} 2>&1; "
+            f"{manifest_root / 'bin' / 'r2p-execute'} $ARGUMENTS 2>&1; "
             'r2p_status=$?; printf \'\\nR2P_PREFLIGHT_EXIT=%s\\n\' "$r2p_status"'
         ]
         assert all("$1" not in block and "$2" not in block for block in shell_blocks)
@@ -1762,8 +1810,9 @@ class TestInstallOpencode:
             "intermediate contract",
             "Prerequisite: none",
             "Prerequisite: PLAN-TASK-NNN",
-            "execution-prerequisite-check --work-id <id> --task <N> --require-version 2",
+            "dispatch prerequisite gate",
             "profile-aware prerequisite semantics",
+            "must not be copied into `Verification`",
             "Dependencies:",
         ):
             assert token in content

@@ -86,8 +86,9 @@ class TestAgentTemplateCheckpointGuidance(unittest.TestCase):
             "intermediate contract",
             "Prerequisite: none",
             "Prerequisite: PLAN-TASK-NNN",
-            "execution-prerequisite-check --work-id <id> --task <N> --require-version 2",
+            "dispatch prerequisite gate",
             "profile-aware prerequisite semantics",
+            "must not be copied into `Verification`",
             "Dependencies:",
         )
         missing = []
@@ -132,7 +133,7 @@ REQUIRED_TEMPLATE_HARDENING_TOKENS = [
     "a non-clean code tree at a task boundary",
     # EXE-3: brief-contents lists Files + reviewer compares changed files vs the brief's Files
     "against the brief's `Files`",
-    # EXE-4: derive-on-resume BASE reconstruction (lowest-numbered unchecked task; preceding completion head7)
+    # EXE-4: derive-on-resume BASE reconstruction from the controller-selected task.
     "reconstruct the in-progress task's BASE",
     # EXE-5: compact, audit-preserving report sections; no Context-Read checklist
     "Status",
@@ -162,6 +163,24 @@ class TestExecuteTemplateContent(unittest.TestCase):
                 offenders.append(rel)
         self.assertEqual(missing, [], f"missing installed r2p-task-brief wrapper call: {missing}")
         self.assertEqual(offenders, [], f"execute surfaces call nonexistent wrapper: {offenders}")
+
+    def test_execute_surfaces_run_prerequisite_only_at_implementation_boundary(self):
+        for rel in EXECUTE_SURFACES:
+            text = (REPO_ROOT / rel).read_text(encoding="utf-8")
+            self.assertIn(
+                "{{R2P_BIN_DIR}}/r2p-prerequisite-check",
+                text,
+                f"{rel}: prerequisite must use the installed wrapper",
+            )
+            self.assertIn("before dispatching this task's implementer", text)
+            self.assertIn("ordinary post-commit reviewer or fixer", text)
+            reviewer_section = _get_role_section(text, "### 5.")
+            self.assertNotIn(
+                "r2p-prerequisite-check",
+                reviewer_section,
+                f"{rel}: post-commit reviewer must not rerun the dispatch gate",
+            )
+            self.assertNotIn("`execution-prerequisite-check", text)
 
     def test_execute_surfaces_carry_sdd_orchestration_tokens(self):
         surfaces = [
@@ -517,7 +536,7 @@ class TestExecuteTemplateContent(unittest.TestCase):
             for section_prefix in ("### 2.", "### 5.", "### 6."):
                 section = _get_role_section(text, section_prefix)
                 self.assertIn(
-                    "Run `{{R2P_BIN_DIR}}/r2p-context-view --work-id <id>` yourself before acting",
+                    "Run `{{R2P_BIN_DIR}}/r2p-context-view --work-id <id> --with-stats` yourself before acting",
                     section,
                     f"{rel}: section {section_prefix!r} must require role-side context view",
                 )
@@ -581,7 +600,11 @@ class TestExecuteTemplateContent(unittest.TestCase):
             "semantic_payload_bytes",
             "r2p-metrics-status",
             "r2p-metrics-append",
+            "r2p-metrics-ack",
             "r2p-metrics-finalize",
+            "{{R2P_BIN_DIR}}/r2p-prerequisite-check",
+            "pending_completion",
+            "do not write it a second time",
             "expected_sequence",
             "already_applied",
             "metrics_incomplete",
@@ -596,11 +619,38 @@ class TestExecuteTemplateContent(unittest.TestCase):
             "atomic_write_text",
             "final review clean",
             "--require-version 2",
+            "prerequisite semantics version 1",
+            "already contains exactly one `Execution BASE:`",
+            "replace the highest-numbered task marker's HEAD",
+            "verification_records` and `verification_total_seconds",
+            "first_actionable_task",
+            "started_at`, `ended_at`, and `elapsed_seconds`",
+            "`Fix Wave N`",
         )
         for surface in EXECUTE_SURFACES:
             text = (REPO_ROOT / surface).read_text(encoding="utf-8")
             for token in required:
                 self.assertIn(token, text, f"{surface}: missing Phase 0 token: {token!r}")
+            self.assertNotIn(
+                "by adding `Execution BASE:",
+                text,
+                f"{surface}: must reuse the transaction-owned BASE line",
+            )
+            self.assertNotIn(
+                "lowest-numbered unchecked",
+                text,
+                f"{surface}: resume must use the parsed first actionable task",
+            )
+            reviewer_section = _get_role_section(text, "### 5.")
+            self.assertIn(
+                "`verification_records` and `verification_total_seconds`",
+                reviewer_section,
+                f"{surface}: task-reviewer inline metrics contract is incomplete",
+            )
+            self.assertIn("r2p-context-view --work-id <id> --with-stats", text)
+            for heading in ("### 2.", "### 5.", "### 6.", "## Final Whole-Branch Review"):
+                section = _get_role_section(text, heading)
+                self.assertIn("semantic_bytes", section, f"{surface}: {heading} lacks role byte count")
 
         codex = (REPO_ROOT / EXECUTE_SURFACES[1]).read_text(encoding="utf-8")
         self.assertIn('fork_turns="none"', codex)

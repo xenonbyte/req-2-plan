@@ -431,6 +431,18 @@ class TestArchivedState(unittest.TestCase):
             is_command_allowed(RunStatus.CLOSED_AT_PLAN_CHECKPOINT, "CMD-RUN-ARCHIVE")
         )
 
+    def test_open_draft_can_be_explicitly_abandoned_to_archive(self):
+        from tools.workflow_cli.models import RunStatus, is_command_allowed, is_transition_allowed
+        self.assertTrue(
+            is_transition_allowed(RunStatus.ACTIVE_STAGE_DRAFT, RunStatus.ARCHIVED)
+        )
+        self.assertTrue(
+            is_command_allowed(RunStatus.ACTIVE_STAGE_DRAFT, "CMD-RUN-ABANDON")
+        )
+        self.assertFalse(
+            is_command_allowed(RunStatus.CLOSED_AT_PLAN_CHECKPOINT, "CMD-RUN-ABANDON")
+        )
+
 
 class TestExecutingState(unittest.TestCase):
     def test_executing_status_exists(self):

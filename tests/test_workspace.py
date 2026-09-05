@@ -36,6 +36,17 @@ class TestEnsureWorkspaceGitignore(unittest.TestCase):
 
             self.assertIn("/*/execution/", gitignore.read_text(encoding="utf-8").splitlines())
 
+    def test_workspace_gitignore_includes_start_transaction_owner(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            ensure_workspace_gitignore(base)
+            gitignore = base / ".req-to-plan" / ".gitignore"
+
+            self.assertIn(
+                "/*/.execution-start-transaction.json",
+                gitignore.read_text(encoding="utf-8").splitlines(),
+            )
+
     def test_appends_archive_line_when_missing(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
@@ -83,6 +94,7 @@ class TestEnsureWorkspaceGitignore(unittest.TestCase):
             self.assertEqual(text.count("/archive"), 1)
             self.assertEqual(text.count("/.workflow-active"), 1)
             self.assertEqual(text.count("/*/logs/"), 1)
+            self.assertEqual(text.count("/*/.execution-start-transaction.json"), 1)
 
     def test_rejects_symlinked_req_to_plan_dir_without_writing_target(self):
         with tempfile.TemporaryDirectory() as tmp:

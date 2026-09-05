@@ -1,0 +1,2 @@
+description = "Explicitly abandon and archive an open requirement-to-PLAN draft"
+prompt = "!{\"{{R2P_BIN_DIR}}/r2p-abandon\" {{args}}}"

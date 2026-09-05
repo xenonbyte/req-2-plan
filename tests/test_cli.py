@@ -27,7 +27,7 @@ from tools.workflow_cli.models import (
     TierModifier,
     WorkId,
 )
-from tools.workflow_cli.state import RunStateManager
+from tools.workflow_cli.state import RunStateManager, create_run_record
 
 
 # ---------------------------------------------------------------------------
@@ -1000,6 +1000,144 @@ class TestRunClose:
 
 
 class TestRunReopen:
+    def test_reopen_auto_archives_closed_source_after_child_is_durable(self, tmp_path):
+        source = "WF-20260605-auto-archive"
+        invoke(
+            ["run-start", "--work-id", source, "--requirement", "repair plan"],
+            base_path=tmp_path,
+        )
+        record = load_record(tmp_path, source)
+        record.status = RunStatus.CLOSED_AT_PLAN_CHECKPOINT
+        record.current_stage = Stage.CLOSED
+        record.approved_checkpoints = [plan_checkpoint()]
+        save_record(tmp_path, record)
+
+        invoke(
+            [
+                "run-reopen",
+                "--from", source,
+                "--stage", "plan",
+                "--reason", "repair plan",
+            ],
+            base_path=tmp_path,
+        )
+
+        child = f"{source}-r1"
+        assert (tmp_path / ".req-to-plan" / child / "run.md").is_file()
+        child_record = load_record(tmp_path, child)
+        assert child_record.resume_context.last_completed_operation == "reopen_run"
+        assert child_record.resume_context.next_allowed_operation == "produce_stage_artifact"
+        assert child_record.resume_context.active_item == "plan"
+        assert not (tmp_path / ".req-to-plan" / source).exists()
+        archived = RunStateManager(
+            tmp_path / ".req-to-plan" / "archive" / source
+        ).load()
+        assert archived.status == RunStatus.ARCHIVED
+        assert archived.resume_context.last_completed_operation == "reopen_superseded"
+        assert archived.resume_context.next_allowed_operation == f"continue_reopened_run:{child}"
+        assert archived.resume_context.resume_reason == f"superseded_by:{child}"
+
+    def test_reopen_blocks_when_same_lineage_has_active_child(self, tmp_path, capsys):
+        source = "WF-20260605-active-child"
+        invoke(
+            ["run-start", "--work-id", source, "--requirement", "repair plan"],
+            base_path=tmp_path,
+        )
+        record = load_record(tmp_path, source)
+        record.status = RunStatus.CLOSED_AT_PLAN_CHECKPOINT
+        record.current_stage = Stage.CLOSED
+        record.approved_checkpoints = [plan_checkpoint()]
+        save_record(tmp_path, record)
+
+        child = f"{source}-r1"
+        child_dir = tmp_path / ".req-to-plan" / child
+        child_dir.mkdir()
+        child_record = create_run_record(WorkId(child))
+        child_record.reopen_lineage = (
+            f"reopened_from: {source}@plan_checkpoint reason: first draft"
+        )
+        RunStateManager(child_dir).save(child_record)
+
+        invoke(
+            [
+                "run-reopen",
+                "--from", source,
+                "--stage", "plan",
+                "--reason", "replace first draft",
+            ],
+            base_path=tmp_path,
+            expect_exit=6,
+        )
+
+        assert "active reopened run already exists" in capsys.readouterr().out
+        assert (tmp_path / ".req-to-plan" / source / "run.md").is_file()
+        assert (child_dir / "run.md").is_file()
+        assert not (tmp_path / ".req-to-plan" / f"{source}-r2").exists()
+
+    def test_reopen_archive_collision_rolls_back_child(self, tmp_path):
+        source = "WF-20260605-archive-collision"
+        invoke(
+            ["run-start", "--work-id", source, "--requirement", "repair plan"],
+            base_path=tmp_path,
+        )
+        record = load_record(tmp_path, source)
+        record.status = RunStatus.CLOSED_AT_PLAN_CHECKPOINT
+        record.current_stage = Stage.CLOSED
+        record.approved_checkpoints = [plan_checkpoint()]
+        save_record(tmp_path, record)
+        archive_dir = tmp_path / ".req-to-plan" / "archive" / source
+        archive_dir.mkdir(parents=True)
+        (archive_dir / "sentinel.txt").write_text("keep\n", encoding="utf-8")
+
+        invoke(
+            [
+                "run-reopen",
+                "--from", source,
+                "--stage", "plan",
+                "--reason", "repair plan",
+            ],
+            base_path=tmp_path,
+            expect_exit=6,
+        )
+
+        assert (tmp_path / ".req-to-plan" / source / "run.md").is_file()
+        assert not (tmp_path / ".req-to-plan" / f"{source}-r1").exists()
+        assert (archive_dir / "sentinel.txt").read_text(encoding="utf-8") == "keep\n"
+
+    def test_reopen_rejects_unsafe_execution_residue_before_child_write(
+        self, tmp_path, capsys
+    ):
+        source = "WF-20260605-unsafe-execution"
+        invoke(
+            ["run-start", "--work-id", source, "--requirement", "repair plan"],
+            base_path=tmp_path,
+        )
+        record = load_record(tmp_path, source)
+        record.status = RunStatus.EXECUTING
+        record.current_stage = Stage.CLOSED
+        save_record(tmp_path, record)
+        run_dir = tmp_path / ".req-to-plan" / source
+        outside = tmp_path / "outside-execution"
+        outside.mkdir()
+        (run_dir / "execution").symlink_to(outside, target_is_directory=True)
+
+        invoke(
+            [
+                "run-reopen",
+                "--from", source,
+                "--stage", "plan",
+                "--reason", "repair plan",
+            ],
+            base_path=tmp_path,
+            expect_exit=6,
+        )
+
+        assert "unsafe execution residue" in capsys.readouterr().out.lower()
+        assert (run_dir / "run.md").is_file()
+        assert (run_dir / "execution").is_symlink()
+        assert not (tmp_path / ".req-to-plan" / f"{source}-r1").exists()
+        assert not (tmp_path / ".req-to-plan" / "archive" / source).exists()
+
     @pytest.mark.parametrize(
         ("source_name", "target_stage"),
         [
@@ -1061,13 +1199,13 @@ class TestRunReopen:
         record.approved_checkpoints = [plan_checkpoint()]
         save_record(tmp_path, record)
 
-        source_dir = tmp_path / ".req-to-plan" / source
         invoke(
             ["run-reopen", "--from", source, "--stage", "plan", "--reason", "repair plan"],
             base_path=tmp_path,
         )
 
         reopened_dir = tmp_path / ".req-to-plan" / f"{source}-r1"
+        source_dir = tmp_path / ".req-to-plan" / "archive" / source
         for context_file in ("02-project-context.json", "02-project-context.md"):
             assert (reopened_dir / context_file).read_text(encoding="utf-8") == (
                 source_dir / context_file
@@ -1087,12 +1225,24 @@ class TestRunReopen:
                 ["run-reopen", "--from", source, "--stage", "spec", "--reason", "fix gap"],
                 base_path=tmp,
             )
+            first_child = f"{source}-r1"
+            first_record = load_record(tmp, first_child)
+            first_record.status = RunStatus.CLOSED_AT_PLAN_CHECKPOINT
+            first_record.current_stage = Stage.CLOSED
+            first_record.approved_checkpoints = [plan_checkpoint()]
+            save_record(tmp, first_record)
             invoke(
-                ["run-reopen", "--from", source, "--stage", "spec", "--reason", "fix another gap"],
+                [
+                    "run-reopen",
+                    "--from", first_child,
+                    "--stage", "spec",
+                    "--reason", "fix another gap",
+                ],
                 base_path=tmp,
             )
 
-            assert (Path(tmp) / ".req-to-plan" / f"{source}-r1").exists()
+            assert (Path(tmp) / ".req-to-plan" / "archive" / source).exists()
+            assert (Path(tmp) / ".req-to-plan" / "archive" / first_child).exists()
             assert (Path(tmp) / ".req-to-plan" / f"{source}-r2").exists()
 
     def test_reopen_truncates_long_slug_to_leave_room_for_suffix(self, tmp_path):
@@ -1114,6 +1264,62 @@ class TestRunReopen:
 
         expected = f"WF-20260605-{'a' * 37}-r1"
         assert (tmp_path / ".req-to-plan" / expected / "run.md").is_file()
+        reopened = load_record(tmp_path, expected)
+        assert f"lineage_root: {source}" in (reopened.reopen_lineage or "")
+
+    @pytest.mark.parametrize("suffix", (1, 10))
+    def test_reopen_retry_detects_durable_truncated_child_before_source_archive(
+        self, tmp_path, capsys, suffix
+    ):
+        from tools.workflow_cli.cli import _reopen_candidate_work_id
+
+        lineage_root = f"WF-20260605-{'a' * 40}"
+        source = (
+            lineage_root
+            if suffix == 1
+            else str(_reopen_candidate_work_id(lineage_root, suffix - 1))
+        )
+        invoke(
+            ["run-start", "--work-id", source, "--requirement", "foo"],
+            base_path=tmp_path,
+        )
+        source_record = load_record(tmp_path, source)
+        source_record.status = RunStatus.CLOSED_AT_PLAN_CHECKPOINT
+        source_record.current_stage = Stage.CLOSED
+        source_record.approved_checkpoints = [plan_checkpoint()]
+        if suffix > 1:
+            source_record.reopen_lineage = (
+                f"lineage_root: {lineage_root}; "
+                "reopened_from: prior@plan_checkpoint reason: earlier reopen"
+            )
+        save_record(tmp_path, source_record)
+
+        child = str(_reopen_candidate_work_id(lineage_root, suffix))
+        child_dir = tmp_path / ".req-to-plan" / child
+        child_dir.mkdir()
+        child_record = create_run_record(WorkId(child))
+        child_record.reopen_lineage = (
+            f"lineage_root: {lineage_root}; "
+            f"reopened_from: {source}@plan_checkpoint reason: interrupted after save"
+        )
+        RunStateManager(child_dir).save(child_record)
+
+        invoke(
+            [
+                "run-reopen",
+                "--from", source,
+                "--stage", "plan",
+                "--reason", "retry after interruption",
+            ],
+            base_path=tmp_path,
+            expect_exit=6,
+        )
+
+        assert "active reopened run already exists" in capsys.readouterr().out
+        assert (tmp_path / ".req-to-plan" / source / "run.md").is_file()
+        assert (child_dir / "run.md").is_file()
+        next_child = str(_reopen_candidate_work_id(lineage_root, suffix + 1))
+        assert not (tmp_path / ".req-to-plan" / next_child).exists()
 
     def test_reopen_skips_suffix_reserved_by_archived_run(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1332,9 +1538,8 @@ class TestRunReopen:
             source_rec = load_record(base, source)
             assert source_rec.status == RunStatus.EXECUTING
 
-    def test_reopen_from_executing_normal_path_unchanged(self):
-        """SPEC-STATE-001: normal reopen from EXECUTING still creates new run and
-        transitions source to CLOSED_AT_PLAN_CHECKPOINT (existing behaviour)."""
+    def test_reopen_from_executing_auto_archives_source(self):
+        """A successful reopen preserves the executing source in archive."""
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
             source = "WF-20260527-exec-normal"
@@ -1364,9 +1569,13 @@ class TestRunReopen:
             assert new_run_dir.exists(), "New run dir must exist after normal reopen"
             assert (new_run_dir / "run.md").exists(), "New run.md must exist"
 
-            source_rec = load_record(base, source)
-            assert source_rec.status == RunStatus.CLOSED_AT_PLAN_CHECKPOINT, (
-                f"Source must be CLOSED_AT_PLAN_CHECKPOINT, got {source_rec.status}"
+            assert not (base / ".req-to-plan" / source).exists()
+            source_rec = RunStateManager(
+                base / ".req-to-plan" / "archive" / source
+            ).load()
+            assert source_rec.status == RunStatus.ARCHIVED
+            assert source_rec.resume_context.resume_reason == (
+                f"superseded_by:{source}-r1"
             )
 
 
@@ -4014,6 +4223,18 @@ class TestContextViewCommand:
         )
         assert payload["semantic_bytes"] == len(expected_content.encode("utf-8"))
 
+    def test_context_view_with_stats_exposes_exact_bytes_without_json_env(self, tmp_path, capsys, monkeypatch):
+        self._seed_executing_context_run(tmp_path)
+        monkeypatch.delenv("R2P_JSON", raising=False)
+        invoke(["context-view", "--work-id", self.WORK_ID], base_path=tmp_path)
+        content = capsys.readouterr().out
+
+        invoke(["context-view", "--work-id", self.WORK_ID, "--with-stats"], base_path=tmp_path)
+
+        assert capsys.readouterr().out == (
+            f"semantic_bytes: {len(content.encode('utf-8'))}\n\n{content}"
+        )
+
     def test_context_view_invalid_argument_exits_cli_error(self, tmp_path):
         self._seed_executing_context_run(tmp_path)
         invoke(["context-view", "--work-id", "../../outside"], base_path=tmp_path, expect_exit=2)
@@ -4457,6 +4678,43 @@ class TestRunArchive:
             assert run_dir.exists()
             assert not (base / ".req-to-plan" / "archive" / "WF-20260101-arch").exists()
 
+    def test_closed_archive_rejects_start_transaction_owner_without_force(self, capsys):
+        from tools.workflow_cli.execution_metrics import START_TRANSACTION_OWNER
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            run_dir = self._closed_run(base, "WF-20260101-arch")
+            (run_dir / START_TRANSACTION_OWNER).write_text("{}\n", encoding="utf-8")
+
+            with pytest.raises(SystemExit) as exc:
+                main(["--base-path", str(base), "run-archive", "--work-id", "WF-20260101-arch"])
+
+            assert exc.value.code == 6
+            assert "execution residue" in capsys.readouterr().out
+            assert run_dir.exists()
+            assert not (base / ".req-to-plan" / "archive" / "WF-20260101-arch").exists()
+
+    def test_closed_archive_rejects_unsafe_start_owner_even_with_force(self, capsys):
+        from tools.workflow_cli.execution_metrics import START_TRANSACTION_OWNER
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            run_dir = self._closed_run(base, "WF-20260101-arch")
+            outside = base / "outside-owner"
+            outside.write_text("do not touch\n", encoding="utf-8")
+            (run_dir / START_TRANSACTION_OWNER).symlink_to(outside)
+
+            with pytest.raises(SystemExit) as exc:
+                main([
+                    "--base-path", str(base), "run-archive",
+                    "--work-id", "WF-20260101-arch", "--force",
+                ])
+
+            assert exc.value.code == 6
+            assert "unsafe execution residue" in capsys.readouterr().out.lower()
+            assert outside.read_text(encoding="utf-8") == "do not touch\n"
+            assert run_dir.exists()
+
     def test_closed_archive_rejects_unsafe_execution_path_even_with_force(self, capsys):
         from tools.workflow_cli.state import RunStateManager
         with tempfile.TemporaryDirectory() as tmp:
@@ -4511,6 +4769,95 @@ class TestRunArchive:
             assert exc.value.code == 0
             assert not run_dir.exists()
             assert (base / ".req-to-plan" / "archive" / "WF-20260101-arch" / "execution").is_dir()
+
+
+class TestRunAbandon:
+    def test_abandon_archives_active_draft_with_reason(self, tmp_path):
+        work_id = "WF-20260605-abandoned-draft"
+        invoke(
+            ["run-start", "--work-id", work_id, "--requirement", "draft work"],
+            base_path=tmp_path,
+        )
+
+        invoke(
+            [
+                "run-abandon",
+                "--work-id", work_id,
+                "--reason", "superseded by a corrected reopen",
+            ],
+            base_path=tmp_path,
+        )
+
+        assert not (tmp_path / ".req-to-plan" / work_id).exists()
+        archived = RunStateManager(
+            tmp_path / ".req-to-plan" / "archive" / work_id
+        ).load()
+        assert archived.status == RunStatus.ARCHIVED
+        assert archived.resume_context.last_completed_operation == "abandon_run"
+        assert archived.resume_context.next_allowed_operation == "none"
+        assert archived.resume_context.resume_reason == "superseded by a corrected reopen"
+
+    def test_abandon_rejects_unsafe_execution_residue(self, tmp_path, capsys):
+        work_id = "WF-20260605-unsafe-abandon"
+        invoke(
+            ["run-start", "--work-id", work_id, "--requirement", "draft work"],
+            base_path=tmp_path,
+        )
+        run_dir = tmp_path / ".req-to-plan" / work_id
+        outside = tmp_path / "outside-execution"
+        outside.mkdir()
+        (run_dir / "execution").symlink_to(outside, target_is_directory=True)
+
+        invoke(
+            ["run-abandon", "--work-id", work_id, "--reason", "not needed"],
+            base_path=tmp_path,
+            expect_exit=6,
+        )
+
+        assert "unsafe execution residue" in capsys.readouterr().out.lower()
+        assert (run_dir / "run.md").is_file()
+        assert (run_dir / "execution").is_symlink()
+        assert not (tmp_path / ".req-to-plan" / "archive" / work_id).exists()
+
+    @pytest.mark.parametrize(
+        "status",
+        [RunStatus.CLOSED_AT_PLAN_CHECKPOINT, RunStatus.EXECUTING],
+    )
+    def test_abandon_rejects_closed_or_executing_run(self, tmp_path, status):
+        work_id = "WF-20260605-not-a-draft"
+        invoke(
+            ["run-start", "--work-id", work_id, "--requirement", "work"],
+            base_path=tmp_path,
+        )
+        record = load_record(tmp_path, work_id)
+        record.status = status
+        record.current_stage = Stage.CLOSED
+        save_record(tmp_path, record)
+
+        invoke(
+            ["run-abandon", "--work-id", work_id, "--reason", "not needed"],
+            base_path=tmp_path,
+            expect_exit=6,
+        )
+
+        assert (tmp_path / ".req-to-plan" / work_id / "run.md").is_file()
+        assert not (tmp_path / ".req-to-plan" / "archive" / work_id).exists()
+
+    def test_abandon_rejects_multiline_reason_without_mutation(self, tmp_path):
+        work_id = "WF-20260605-bad-reason"
+        invoke(
+            ["run-start", "--work-id", work_id, "--requirement", "work"],
+            base_path=tmp_path,
+        )
+
+        invoke(
+            ["run-abandon", "--work-id", work_id, "--reason", "line one\nline two"],
+            base_path=tmp_path,
+            expect_exit=2,
+        )
+
+        assert (tmp_path / ".req-to-plan" / work_id / "run.md").is_file()
+        assert not (tmp_path / ".req-to-plan" / "archive" / work_id).exists()
 
 
 class TestExecutionPhaseZeroIntegration:
@@ -4894,6 +5241,44 @@ class TestExecutionPhaseZeroIntegration:
             assert any(expected in line for line in lines), expected
         assert lines[-1] == "status: representative_metrics_accepted"
 
+    def test_samples_validator_human_failure_preserves_sample_identity_and_rule(self, monkeypatch):
+        from tools.workflow_cli import cli
+        from tools.workflow_cli.execution_metrics import RepresentativeSamplesError
+
+        failure = {
+            "status": "error",
+            "message": "BLOCKED: representative_metrics_missing",
+            "exit_code": 3,
+            "details": [{
+                "sample_dir": "/samples/WF-20260101-two",
+                "work_id": "WF-20260101-two",
+                "rule": "role_coverage",
+                "message": "role sequence is invalid",
+            }],
+        }
+        monkeypatch.setattr(
+            cli,
+            "validate_representative_samples",
+            lambda paths: (_ for _ in ()).throw(RepresentativeSamplesError(failure)),
+            raising=False,
+        )
+
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output), pytest.raises(SystemExit) as exc:
+            main([
+                "execution-samples-validate",
+                "--sample-dir", "/samples/WF-20260101-one",
+                "--sample-dir", "/samples/WF-20260101-two",
+                "--sample-dir", "/samples/WF-20260101-three",
+            ])
+
+        assert exc.value.code == 3
+        rendered = output.getvalue()
+        assert "/samples/WF-20260101-two" in rendered
+        assert "WF-20260101-two" in rendered
+        assert "role_coverage" in rendered
+        assert "role sequence is invalid" in rendered
+
 
 class TestRunExecuteStart:
     _PLAN_WITH_READONLY_PHANTOM_TASK = (
@@ -4942,6 +5327,51 @@ class TestRunExecuteStart:
             ledger = (run_dir / "execution" / "progress.md").read_text(encoding="utf-8")
             assert "- [ ] PLAN-TASK-001 first task" in ledger
             assert "- [ ] PLAN-TASK-002 second task" in ledger
+
+    def test_execute_start_maps_missing_plan_to_not_found(self):
+        from tools.workflow_cli.state import RunStateManager
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            run_dir = self._closed_run_with_plan(
+                base,
+                "WF-20260101-missing-plan",
+                "# Plan\n\n## Tasks\n### PLAN-TASK-001: first task\n",
+            )
+            (run_dir / "07-plan.md").unlink()
+
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output), pytest.raises(SystemExit) as exc:
+                main([
+                    "--base-path", str(base),
+                    "run-execute-start", "--work-id", "WF-20260101-missing-plan",
+                ])
+
+            assert exc.value.code == 7
+            assert "PLAN not found" in output.getvalue()
+            assert RunStateManager(run_dir).load().status == RunStatus.CLOSED_AT_PLAN_CHECKPOINT
+            assert not (run_dir / "execution").exists()
+
+    @pytest.mark.parametrize("missing_file", ["progress.md", "run.md"])
+    @pytest.mark.parametrize("json_mode", [False, True])
+    def test_execute_start_missing_recovery_file_is_conflict(self, missing_file, json_mode, monkeypatch, capsys):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            work_id = "WF-20260101-recovery-missing"
+            run_dir = self._closed_run_with_plan(base, work_id, "### PLAN-TASK-001: task\n")
+            invoke(["run-execute-start", "--work-id", work_id], base_path=base)
+            capsys.readouterr()
+            path = run_dir / missing_file if missing_file == "run.md" else run_dir / "execution" / missing_file
+            path.unlink()
+            monkeypatch.setenv("R2P_JSON", "1" if json_mode else "0")
+
+            invoke(["run-execute-start", "--work-id", work_id], base_path=base, expect_exit=6)
+
+            output = capsys.readouterr().out
+            assert "PLAN not found" not in output
+            assert missing_file in output
+            if json_mode:
+                assert json.loads(output)["exit_code"] == 6
 
     def test_execute_start_ignores_readonly_plan_task_headings(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -5131,7 +5561,13 @@ class TestRunExecuteStart:
 
             assert exc.value.code == 0
             assert (base / ".req-to-plan" / "WF-20260101-exec-r1" / "run.md").exists()
-            assert load_record(base, "WF-20260101-exec").status == RunStatus.CLOSED_AT_PLAN_CHECKPOINT
+            source = RunStateManager(
+                base / ".req-to-plan" / "archive" / "WF-20260101-exec"
+            ).load()
+            assert source.status == RunStatus.ARCHIVED
+            assert source.resume_context.next_allowed_operation == (
+                "continue_reopened_run:WF-20260101-exec-r1"
+            )
             from tools.workflow_cli.agent_shortcuts import scan_open_runs
             assert scan_open_runs(base) == ["WF-20260101-exec-r1"]
 

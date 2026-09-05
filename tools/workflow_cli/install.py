@@ -9,6 +9,7 @@ import os
 import secrets
 import json
 import hashlib
+import re
 import shutil
 import shlex
 import stat
@@ -1021,7 +1022,7 @@ def _render_opencode_command(content: str, version: str, bin_dir: str, command_n
         wrapper = shlex.quote(str(Path(bin_dir) / "r2p-execute"))
         preflight = (
             "\n## Deterministic OpenCode preflight\n\n"
-            f"!`{wrapper} 2>&1; r2p_status=$?; "
+            f"!`{wrapper} $ARGUMENTS 2>&1; r2p_status=$?; "
             'printf \'\\nR2P_PREFLIGHT_EXIT=%s\\n\' "$r2p_status"`\n\n'
             "Treat `R2P_PREFLIGHT_EXIT != 0`, `blocked:`, `no_selected_run`, "
             "or `plan_not_ready` in the preflight output as a hard stop before "
@@ -1062,17 +1063,17 @@ def _looks_like_managed_bin_script(content: str) -> bool:
         'export PYTHONPATH="$REPO_ROOT${PYTHONPATH:+:$PYTHONPATH}"' in content
         and "-m tools.workflow_cli.agent_shortcuts" in content
     )
-    trusted_bootstrap = (
-        any(
-            f'{flag} "$REPO_ROOT/tools/workflow_cli/__main__.py"' in content
-            for flag in ("-E", "-I")
-        )
-        and (
-            "tools.workflow_cli.agent_shortcuts" in content
-            or "tools.workflow_cli.install_cli" in content
-        )
+    trusted_entrypoint = re.compile(
+        r'^[ \t]*exec python(?:3)? -(?:E|I) '
+        r'"\$REPO_ROOT/tools/workflow_cli/__main__\.py" '
+        r'(?:'
+        r'tools\.workflow_cli\.agent_shortcuts [a-z][a-z0-9-]*'
+        r'|tools\.workflow_cli\.install_cli(?: [a-z][a-z0-9-]*)?'
+        r'|tools\.workflow_cli (?:context-view|execution-prerequisite-check|execution-metrics-(?:status|append|ack|finalize))'
+        r') "\$@"$',
+        re.MULTILINE,
     )
-    return common and (legacy or trusted_bootstrap)
+    return common and (legacy or bool(trusted_entrypoint.search(content)))
 
 
 def _dump_manifest(manifest: dict[str, Any]) -> str:

@@ -21,17 +21,18 @@ import stat
 import subprocess
 from typing import Any
 
-from tools.workflow_cli.artifact import _parse_frontmatter, read_artifact
-from tools.workflow_cli.atomic import UnsafeRegularFileError, read_regular_text
+from tools.workflow_cli.artifact import _parse_frontmatter
 from tools.workflow_cli.execution_profile import (
     ExecutionProfile,
     ExecutionProfileError,
     ParsedExecutionLedger,
     check_prerequisite_v2,
     parse_execution_ledger,
+    prerequisite_semantics_version,
     validate_ledger_commit_chain,
 )
 from tools.workflow_cli.markdown import (
+    PLAN_TASK_CHECKBOX_RE,
     plan_task_anchors,
     strip_html_comments_outside_fences,
     strip_nonsemantic_markdown,
@@ -39,7 +40,6 @@ from tools.workflow_cli.markdown import (
 )
 from tools.workflow_cli.models import RunRecord, RunStatus, STAGE_ARTIFACT_MAP, Stage, WorkId
 from tools.workflow_cli.state import (
-    RunStateManager,
     parse_run_record,
     run_record_to_markdown,
     update_resume_context,
@@ -52,6 +52,9 @@ INSTRUMENTATION_SCHEMA = 1
 PREREQUISITE_IMPLEMENTATION_VERSION = 2
 SELF_HOSTED_WORK_ID = "WF-20260829-r2p-execute-token-phase-r2p"
 SELF_HOSTED_BOOTSTRAP_GAP = "execution_start_through_task_002_reviewed_complete"
+_LEGACY_BOOTSTRAP_GAP_RE = re.compile(
+    r"^legacy_metrics_start_(?:task_([0-9]{3})|final)$"
+)
 _HEADER_FIELDS = (
     "work_id", "r2p_version", "instrumentation_schema", "profile", "task_count",
     "instrumentation_complete", "bootstrap_gap", "change_shape", "metrics_finalized",
@@ -84,6 +87,10 @@ class MetricsInputError(MetricsFormatError):
 
 class PrerequisiteError(MetricsFormatError):
     """The legacy prerequisite is not met; callers must not dispatch a role."""
+
+
+class PlanNotFoundError(FileNotFoundError):
+    """Only the PLAN read boundary may report a missing PLAN."""
 
 
 class RepresentativeSamplesError(MetricsFormatError):
@@ -189,8 +196,23 @@ def _parse_header(lines: list[str]) -> dict[str, Any]:
     complete = _parse_bool(raw["instrumentation_complete"], "instrumentation_complete")
     finalized = _parse_bool(raw["metrics_finalized"], "metrics_finalized")
     gap = raw["bootstrap_gap"]
-    expected_gap = SELF_HOSTED_BOOTSTRAP_GAP if not complete else "none"
-    if gap != expected_gap or (not complete and work_id != SELF_HOSTED_WORK_ID):
+    legacy_gap = _LEGACY_BOOTSTRAP_GAP_RE.fullmatch(gap)
+    legacy_task = int(legacy_gap.group(1)) if legacy_gap and legacy_gap.group(1) else None
+    valid_gap = (
+        (complete and gap == "none")
+        or (
+            not complete
+            and work_id == SELF_HOSTED_WORK_ID
+            and gap == SELF_HOSTED_BOOTSTRAP_GAP
+        )
+        or (
+            not complete
+            and raw["profile"] == "strict"
+            and legacy_gap is not None
+            and (legacy_task is None or 1 <= legacy_task <= task_count)
+        )
+    )
+    if not valid_gap:
         raise MetricsFormatError("closed instrumentation header combination is invalid")
     shape = raw["change_shape"]
     if shape != "unavailable" and shape not in _SHAPES:
@@ -224,11 +246,23 @@ def _parse_invocation(raw: dict[str, str], number: int, header: dict[str, Any]) 
         task = "final"
     if raw["model"] != "unavailable" and not raw["model"].strip():
         raise MetricsFormatError("model must be non-empty or unavailable")
-    started_at = _parse_timestamp(raw["started_at"], "started_at")
-    ended_at = _parse_timestamp(raw["ended_at"], "ended_at")
-    if ended_at < started_at:
-        raise MetricsFormatError("ended_at precedes started_at")
-    elapsed = _parse_decimal(raw["elapsed_seconds"], "elapsed_seconds")
+    timing = [raw["started_at"], raw["ended_at"], raw["elapsed_seconds"]]
+    if any(value == "unavailable" for value in timing):
+        if timing != ["unavailable", "unavailable", "unavailable"]:
+            raise MetricsFormatError(
+                "timing fields must all be unavailable or all be measured"
+            )
+        started_at: datetime | str = "unavailable"
+        ended_at: datetime | str = "unavailable"
+        elapsed_text = "unavailable"
+    else:
+        started_at = _parse_timestamp(raw["started_at"], "started_at")
+        ended_at = _parse_timestamp(raw["ended_at"], "ended_at")
+        if ended_at < started_at:
+            raise MetricsFormatError("ended_at precedes started_at")
+        elapsed_text = format(
+            _parse_decimal(raw["elapsed_seconds"], "elapsed_seconds"), "f"
+        )
     if raw["context_mode"] == "direct_acs":
         expected_kind = "declared_payload_bytes"
     elif raw["context_mode"] == "semantic_view":
@@ -266,7 +300,12 @@ def _parse_invocation(raw: dict[str, str], number: int, header: dict[str, Any]) 
         for record in records:
             if not isinstance(record, dict) or set(record) != {"command", "scope", "reason", "elapsed_seconds", "status"}:
                 raise MetricsFormatError("verification record schema is invalid")
-            if not all(isinstance(record[key], str) and record[key] for key in ("command", "reason", "elapsed_seconds")):
+            if not all(
+                isinstance(record[key], str) and record[key]
+                for key in (
+                    "command", "scope", "reason", "elapsed_seconds", "status"
+                )
+            ):
                 raise MetricsFormatError("verification record scalar is invalid")
             if record["scope"] not in {"targeted", "directly_affected", "full_suite"} or record["status"] not in {"passed", "failed"}:
                 raise MetricsFormatError("verification record enum is invalid")
@@ -288,7 +327,7 @@ def _parse_invocation(raw: dict[str, str], number: int, header: dict[str, Any]) 
             raise MetricsFormatError("total_tokens must equal input_tokens + output_tokens")
     return {
         "sequence": number, "role": role, "task": task, "model": raw["model"],
-        "started_at": started_at, "ended_at": ended_at, "elapsed_seconds": format(elapsed, "f"),
+        "started_at": started_at, "ended_at": ended_at, "elapsed_seconds": elapsed_text,
         "context_mode": raw["context_mode"], "context_bytes_kind": raw["context_bytes_kind"],
         "context_bytes": context_bytes, "verification_records": records,
         "verification_total_seconds": total_raw, "report_bytes": _parse_nonnegative(raw["report_bytes"], "report_bytes"),
@@ -410,6 +449,7 @@ _FILE_WRITE_FLAGS = (
     | getattr(os, "O_NOFOLLOW", 0)
     | getattr(os, "O_CLOEXEC", 0)
 )
+START_TRANSACTION_OWNER = ".execution-start-transaction.json"
 
 
 def _require_fd_capabilities() -> None:
@@ -531,6 +571,61 @@ def _write_new_text_at(parent_fd: int, name: str, content: str) -> os.stat_resul
         os.close(fd)
 
 
+def _publish_new_text_at(parent_fd: int, name: str, content: str) -> None:
+    """Atomically create a durable file without ever exposing partial content."""
+    temp = f".{name}.{os.getpid()}.{secrets.token_hex(16)}.tmp"
+    fd = os.open(temp, _FILE_WRITE_FLAGS, 0o600, dir_fd=parent_fd)
+    linked = False
+    try:
+        _write_all(fd, content.encode("utf-8"))
+        os.fsync(fd)
+        opened = os.fstat(fd)
+        current = os.stat(temp, dir_fd=parent_fd, follow_symlinks=False)
+        identity = (opened.st_dev, opened.st_ino)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or identity != (current.st_dev, current.st_ino)
+        ):
+            raise MetricsFormatError("atomic create temp identity changed")
+        os.link(
+            temp,
+            name,
+            src_dir_fd=parent_fd,
+            dst_dir_fd=parent_fd,
+            follow_symlinks=False,
+        )
+        linked = True
+        published = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        if (
+            not stat.S_ISREG(published.st_mode)
+            or identity != (published.st_dev, published.st_ino)
+        ):
+            raise MetricsFormatError("atomic create publish identity changed")
+        os.fsync(parent_fd)
+    finally:
+        os.close(fd)
+        try:
+            os.unlink(temp, dir_fd=parent_fd)
+        except FileNotFoundError:
+            pass
+        if linked:
+            os.fsync(parent_fd)
+
+
+def _clear_owned_execution_dir(execution_fd: int) -> None:
+    """Remove only the closed start transaction's closed set of regular files."""
+    children = set(os.listdir(execution_fd))
+    allowed = {".start-transaction.json", "progress.md", "metrics.md"}
+    if not children <= allowed:
+        raise MetricsFormatError("foreign execution-start residue")
+    for name in sorted(children):
+        before = os.stat(name, dir_fd=execution_fd, follow_symlinks=False)
+        if not stat.S_ISREG(before.st_mode):
+            raise MetricsFormatError("unsafe execution-start residue")
+        os.unlink(name, dir_fd=execution_fd)
+    os.fsync(execution_fd)
+
+
 def _replace_text_at(parent_fd: int, name: str, content: str) -> None:
     temp = f".{name}.{os.getpid()}.{secrets.token_hex(16)}.tmp"
     fd = os.open(temp, _FILE_WRITE_FLAGS, 0o600, dir_fd=parent_fd)
@@ -569,7 +664,10 @@ def _parse_record_at(run_fd: int, expected_work_id: WorkId) -> RunRecord:
 
 
 def _plan_at(run_fd: int) -> str:
-    text = _read_text_at(run_fd, STAGE_ARTIFACT_MAP[Stage.PLAN])
+    try:
+        text = _read_text_at(run_fd, STAGE_ARTIFACT_MAP[Stage.PLAN])
+    except FileNotFoundError as exc:
+        raise PlanNotFoundError("PLAN not found") from exc
     assert text is not None
     _, body = _parse_frontmatter(text)
     return body
@@ -649,6 +747,19 @@ def _execution_base(base_path: Path) -> str:
     return value
 
 
+def _require_clean_code_worktree(base_path: Path) -> None:
+    dirty = subprocess.run(
+        [
+            "git", "-C", str(base_path), "status", "--porcelain=v1",
+            "--untracked-files=all", "--", ".", ":(exclude).req-to-plan",
+        ],
+        capture_output=True,
+        check=False,
+    )
+    if dirty.returncode != 0 or dirty.stdout:
+        raise MetricsFormatError("code worktree outside .req-to-plan must be clean")
+
+
 def _resolve_commit(base_path: Path, abbreviation: str) -> str:
     if not _SHA7.fullmatch(abbreviation):
         raise PrerequisiteError("commit abbreviation is not canonical")
@@ -701,6 +812,25 @@ def _initial_metrics_text(work_id: WorkId, profile: str, task_count: int) -> str
     ))
 
 
+def _legacy_metrics_text(
+    work_id: WorkId,
+    task_count: int,
+    start_task: int | None,
+) -> str:
+    gap = (
+        "legacy_metrics_start_final"
+        if start_task is None
+        else f"legacy_metrics_start_task_{start_task:03d}"
+    )
+    return "\n".join((
+        "# Execution Metrics", f"work_id: {work_id}", f"r2p_version: {R2P_VERSION}",
+        f"instrumentation_schema: {INSTRUMENTATION_SCHEMA}", "profile: strict",
+        f"task_count: {task_count}", "instrumentation_complete: false",
+        f"bootstrap_gap: {gap}", "change_shape: unavailable",
+        "metrics_finalized: false", "",
+    ))
+
+
 def _initial_progress_text(
     work_id: WorkId,
     execution_base: str,
@@ -726,31 +856,31 @@ def start_execution_transaction(base_path: Path, work_id: WorkId, profile: str) 
         repo_fd, workspace_fd, run_fd = _open_run(base_path, work_id)
         logs_fd, lock_fd = _open_lock_at(run_fd, "execute-start.lock")
         record = _parse_record_at(run_fd, work_id)
-        anchors = plan_task_anchors(strip_nonsemantic_markdown(_plan_at(run_fd)))
+        plan = _plan_at(run_fd)
+        anchors = plan_task_anchors(strip_nonsemantic_markdown(plan))
         if not anchors:
             raise MetricsFormatError("PLAN contains no PLAN-TASK anchors")
-        execution_base = _execution_base(base_path)
-        marker_payload = {
-            "schema": 1, "work_id": str(work_id), "profile": profile,
-            "task_count": len(anchors), "execution_base": execution_base,
-        }
-        marker_text = _canonical_json(marker_payload) + "\n"
-        expected_progress = _initial_progress_text(work_id, execution_base, anchors, profile)
-        expected_metrics = _initial_metrics_text(work_id, profile, len(anchors))
+        try:
+            version = prerequisite_semantics_version(plan)
+        except ExecutionProfileError as exc:
+            raise PrerequisiteError(str(exc)) from exc
+        if profile == "fast" and version != 2:
+            raise PrerequisiteError("fast requires prerequisite semantics version 2")
 
         if record.status == RunStatus.EXECUTING:
             execution_fd = _open_dir_at(run_fd, "execution")
             try:
                 progress = _read_text_at(execution_fd, "progress.md")
-                metrics_text = _read_text_at(execution_fd, "metrics.md")
-                assert progress is not None and metrics_text is not None
-                metrics = parse_metrics(metrics_text)
-                if (
-                    metrics.header["work_id"] != str(work_id)
-                    or metrics.header["profile"] != profile
-                    or metrics.header["task_count"] != len(anchors)
-                ):
-                    raise MetricsFormatError("executing run metrics work_id/profile/task count conflicts")
+                owner_marker = _read_text_at(
+                    run_fd, START_TRANSACTION_OWNER, missing_ok=True
+                )
+                existing_marker = _read_text_at(
+                    execution_fd, ".start-transaction.json", missing_ok=True
+                )
+                metrics_text = _read_text_at(
+                    execution_fd, "metrics.md", missing_ok=True
+                )
+                assert progress is not None
                 semantic_progress = "\n".join(
                     line
                     for line, _, _ in unfenced_markdown_lines(
@@ -767,24 +897,73 @@ def start_execution_transaction(base_path: Path, work_id: WorkId, profile: str) 
                     semantic_progress,
                     re.MULTILINE,
                 )
-                rows = re.findall(
-                    r"^- \[[ x]\] (PLAN-TASK-\d{3})\b",
+                rows = [
+                    match.group(2)
+                    for line in semantic_progress.splitlines()
+                    if (match := PLAN_TASK_CHECKBOX_RE.match(line))
+                ]
+                profile_like = re.findall(
+                    r"^\s*Execution\s+Profile[A-Za-z0-9_-]*\s*:.*$",
                     semantic_progress,
                     re.MULTILINE,
                 )
+                legacy_profileless_strict = (
+                    existing_marker is None
+                    and profile == "strict"
+                    and not profile_lines
+                    and not profile_like
+                )
                 if (
                     base_match is None
-                    or profile_lines != [profile]
+                    or not (
+                        profile_lines == [profile] or legacy_profileless_strict
+                    )
                     or rows != [task_id for task_id, _ in anchors]
                 ):
                     raise MetricsFormatError("executing progress does not match start contract")
-                existing_marker = _read_text_at(execution_fd, ".start-transaction.json", missing_ok=True)
+                if metrics_text is None:
+                    if not legacy_profileless_strict:
+                        raise MetricsFormatError("executing run metrics.md is missing")
+                    task_ids = tuple(task_id for task_id, _ in anchors)
+                    try:
+                        legacy_ledger = parse_execution_ledger(progress, task_ids)
+                    except ExecutionProfileError as exc:
+                        raise MetricsFormatError(
+                            f"legacy execution progress is invalid: {exc}"
+                        ) from exc
+                    metrics_text = _legacy_metrics_text(
+                        work_id,
+                        len(anchors),
+                        legacy_ledger.first_actionable_task(),
+                    )
+                    _publish_new_text_at(execution_fd, "metrics.md", metrics_text)
+                metrics = parse_metrics(metrics_text)
+                if (
+                    metrics.header["work_id"] != str(work_id)
+                    or metrics.header["profile"] != profile
+                    or metrics.header["task_count"] != len(anchors)
+                ):
+                    raise MetricsFormatError("executing run metrics work_id/profile/task count conflicts")
+                expected = {
+                    "schema": 1,
+                    "work_id": str(work_id),
+                    "profile": profile,
+                    "task_count": len(anchors),
+                    "execution_base": base_match.group(1),
+                }
+                expected_marker_text = _canonical_json(expected) + "\n"
+                if owner_marker is not None and owner_marker != expected_marker_text:
+                    raise MetricsFormatError(
+                        "execution start owner does not match complete ledgers"
+                    )
                 if existing_marker is not None:
-                    expected = dict(marker_payload, execution_base=base_match.group(1))
-                    if existing_marker != _canonical_json(expected) + "\n":
+                    if owner_marker is None and existing_marker != expected_marker_text:
                         raise MetricsFormatError("execution start marker does not match complete ledgers")
                     os.unlink(".start-transaction.json", dir_fd=execution_fd)
                     os.fsync(execution_fd)
+                if owner_marker is not None:
+                    os.unlink(START_TRANSACTION_OWNER, dir_fd=run_fd)
+                    os.fsync(run_fd)
                 return record
             finally:
                 os.close(execution_fd)
@@ -792,8 +971,24 @@ def start_execution_transaction(base_path: Path, work_id: WorkId, profile: str) 
         if record.status != RunStatus.CLOSED_AT_PLAN_CHECKPOINT:
             raise MetricsFormatError("run is not closed at the PLAN checkpoint")
 
-        # Closed-run recovery. A matching marker owns only the exact allowed
-        # partial children; no-marker exact ledgers mean status-save crashed.
+        _require_clean_code_worktree(base_path)
+        execution_base = _execution_base(base_path)
+        marker_payload = {
+            "schema": 1, "work_id": str(work_id), "profile": profile,
+            "task_count": len(anchors), "execution_base": execution_base,
+        }
+        marker_text = _canonical_json(marker_payload) + "\n"
+        expected_progress = _initial_progress_text(work_id, execution_base, anchors, profile)
+        expected_metrics = _initial_metrics_text(work_id, profile, len(anchors))
+
+        # Closed-run recovery. The run-level owner is atomically published
+        # before execution/ exists, so even an empty directory or truncated
+        # inner marker remains safely attributable after power loss.
+        owner_marker = _read_text_at(
+            run_fd, START_TRANSACTION_OWNER, missing_ok=True
+        )
+        if owner_marker is not None and owner_marker != marker_text:
+            raise MetricsFormatError("foreign execution-start owner residue")
         try:
             execution_fd = _open_dir_at(run_fd, "execution")
         except MetricsFormatError as exc:
@@ -808,19 +1003,29 @@ def start_execution_transaction(base_path: Path, work_id: WorkId, profile: str) 
                 existing_marker = _read_text_at(execution_fd, ".start-transaction.json", missing_ok=True)
                 children = set(os.listdir(execution_fd))
                 allowed = {".start-transaction.json", "progress.md", "metrics.md"}
-                if existing_marker is not None:
-                    if existing_marker != marker_text or not children <= allowed:
-                        raise MetricsFormatError("foreign execution-start residue")
-                    for name in ("metrics.md", "progress.md", ".start-transaction.json"):
-                        if name in children:
-                            before = os.stat(name, dir_fd=execution_fd, follow_symlinks=False)
-                            if not stat.S_ISREG(before.st_mode):
-                                raise MetricsFormatError("unsafe execution-start residue")
-                            os.unlink(name, dir_fd=execution_fd)
-                    os.fsync(execution_fd)
+                if owner_marker is not None:
+                    _clear_owned_execution_dir(execution_fd)
                     os.close(execution_fd)
                     execution_fd = None
                     os.rmdir("execution", dir_fd=run_fd)
+                    os.fsync(run_fd)
+                    os.unlink(START_TRANSACTION_OWNER, dir_fd=run_fd)
+                    owner_marker = None
+                    os.fsync(run_fd)
+                elif existing_marker is not None:
+                    if existing_marker != marker_text or not children <= allowed:
+                        raise MetricsFormatError("foreign execution-start residue")
+                    # Promote old inner-marker ownership before destructive
+                    # cleanup, closing the prior unlink/rmdir crash window.
+                    _publish_new_text_at(
+                        run_fd, START_TRANSACTION_OWNER, marker_text
+                    )
+                    _clear_owned_execution_dir(execution_fd)
+                    os.close(execution_fd)
+                    execution_fd = None
+                    os.rmdir("execution", dir_fd=run_fd)
+                    os.fsync(run_fd)
+                    os.unlink(START_TRANSACTION_OWNER, dir_fd=run_fd)
                     os.fsync(run_fd)
                 elif children == {"progress.md", "metrics.md"}:
                     progress = _read_text_at(execution_fd, "progress.md")
@@ -836,7 +1041,11 @@ def start_execution_transaction(base_path: Path, work_id: WorkId, profile: str) 
             finally:
                 if execution_fd is not None:
                     os.close(execution_fd)
+        elif owner_marker is not None:
+            os.unlink(START_TRANSACTION_OWNER, dir_fd=run_fd)
+            os.fsync(run_fd)
 
+        _publish_new_text_at(run_fd, START_TRANSACTION_OWNER, marker_text)
         os.mkdir("execution", 0o700, dir_fd=run_fd)
         execution_fd = _open_dir_at(run_fd, "execution")
         owned_identity = os.fstat(execution_fd)
@@ -860,32 +1069,24 @@ def start_execution_transaction(base_path: Path, work_id: WorkId, profile: str) 
                 state_saved = True
             os.unlink(".start-transaction.json", dir_fd=execution_fd)
             os.fsync(execution_fd)
+            os.unlink(START_TRANSACTION_OWNER, dir_fd=run_fd)
+            os.fsync(run_fd)
             return record
         except Exception:
             if not state_saved:
                 try:
                     current_dir = os.stat("execution", dir_fd=run_fd, follow_symlinks=False)
-                    marker_now = _read_text_at(execution_fd, ".start-transaction.json", missing_ok=True)
                     children = set(os.listdir(execution_fd))
-                    owned_empty = marker_now is None and not children
-                    owned_with_marker = marker_now == marker_text and children <= {
-                        ".start-transaction.json", "progress.md", "metrics.md"
-                    }
                     if (
                         stat.S_ISDIR(current_dir.st_mode)
                         and (current_dir.st_dev, current_dir.st_ino) == (owned_identity.st_dev, owned_identity.st_ino)
-                        and (owned_empty or owned_with_marker)
                     ):
-                        for name in ("metrics.md", "progress.md", ".start-transaction.json"):
-                            if name in children:
-                                child = os.stat(name, dir_fd=execution_fd, follow_symlinks=False)
-                                if not stat.S_ISREG(child.st_mode):
-                                    raise MetricsFormatError("unsafe owned rollback child")
-                                os.unlink(name, dir_fd=execution_fd)
-                        os.fsync(execution_fd)
+                        _clear_owned_execution_dir(execution_fd)
                         os.close(execution_fd)
                         execution_fd = None
                         os.rmdir("execution", dir_fd=run_fd)
+                        os.fsync(run_fd)
+                        os.unlink(START_TRANSACTION_OWNER, dir_fd=run_fd)
                         os.fsync(run_fd)
                 except Exception:
                     pass
@@ -899,18 +1100,38 @@ def start_execution_transaction(base_path: Path, work_id: WorkId, profile: str) 
         _close_fds(run_fd, workspace_fd, repo_fd)
 
 
-def _read_progress(run_dir: Path) -> str:
+def _read_prerequisite_inputs(
+    base_path: Path, work_id: WorkId
+) -> tuple[RunRecord, str, str]:
+    """Read one identity-checked run through pinned directory descriptors."""
+    repo_fd = workspace_fd = run_fd = execution_fd = None
     try:
-        value = read_regular_text(run_dir / "execution" / "progress.md")
-    except (FileNotFoundError, UnsafeRegularFileError) as exc:
-        raise PrerequisiteError("unsafe or missing execution progress") from exc
-    assert value is not None
-    return value
+        repo_fd, workspace_fd, run_fd = _open_run(Path(base_path), work_id)
+        record = _parse_record_at(run_fd, work_id)
+        if record.status != RunStatus.EXECUTING:
+            raise PrerequisiteError("run must be EXECUTING")
+        plan = _plan_at(run_fd)
+        execution_fd = _open_dir_at(run_fd, "execution")
+        progress = _read_text_at(execution_fd, "progress.md")
+        assert progress is not None
+        return record, plan, progress
+    except (MetricsFormatError, OSError) as exc:
+        raise PrerequisiteError(str(exc)) from exc
+    finally:
+        _close_fds(execution_fd, run_fd, workspace_fd, repo_fd)
+
+
+def _semantic_progress(progress: str) -> str:
+    return "".join(
+        line for line, _, _ in unfenced_markdown_lines(
+            strip_nonsemantic_markdown(progress)
+        )
+    )
 
 
 def _marker_for(progress: str, task: int) -> tuple[str, str] | None:
     pattern = re.compile(rf"^Task {task}: complete \(commits ([0-9a-f]{{7}})\.\.([0-9a-f]{{7}}), (?:review|final review) clean\)$", re.MULTILINE)
-    found = pattern.findall(progress)
+    found = pattern.findall(_semantic_progress(progress))
     if len(found) > 1:
         raise PrerequisiteError(f"Task {task} has duplicate completion markers")
     return found[0] if found else None
@@ -918,11 +1139,7 @@ def _marker_for(progress: str, task: int) -> tuple[str, str] | None:
 
 def check_prerequisite_v1(base_path: Path, work_id: WorkId, task: int) -> dict[str, Any]:
     """Validate strict prerequisite semantics v1 without mutating the run."""
-    run_dir = Path(base_path) / ".req-to-plan" / str(work_id)
-    record = RunStateManager(run_dir).load()
-    if record.status != RunStatus.EXECUTING:
-        raise PrerequisiteError("run must be EXECUTING")
-    plan_text = read_artifact(run_dir, Stage.PLAN)
+    _, plan_text, progress = _read_prerequisite_inputs(base_path, work_id)
     anchors = plan_task_anchors(strip_nonsemantic_markdown(plan_text))
     expected = [f"PLAN-TASK-{number:03d}" for number in range(1, len(anchors) + 1)]
     if not anchors or [anchor[0] for anchor in anchors] != expected:
@@ -931,10 +1148,7 @@ def check_prerequisite_v1(base_path: Path, work_id: WorkId, task: int) -> dict[s
         raise PrerequisiteError("task is outside PLAN bounds")
     if task in {1, 2} and str(work_id) == SELF_HOSTED_WORK_ID and len(anchors) != 9:
         raise PrerequisiteError("self-hosted PLAN must have exactly nine task anchors")
-    progress = _read_progress(run_dir)
-    rows = re.findall(r"^- \[([ x])\] (PLAN-TASK-\d{3})\b", progress, re.MULTILINE)
-    if [item[1] for item in rows] != expected:
-        raise PrerequisiteError("progress must have the corresponding nine task rows")
+    progress = _semantic_progress(progress)
     profile_lines = re.findall(r"^Execution Profile: (\S+)$", progress, re.MULTILINE)
     escalation_lines = re.findall(r"^Profile Escalation:.*$", progress, re.MULTILINE)
     implemented_lines = re.findall(r"^Task \d+: implemented.*$", progress, re.MULTILINE)
@@ -942,19 +1156,14 @@ def check_prerequisite_v1(base_path: Path, work_id: WorkId, task: int) -> dict[s
         raise PrerequisiteError("prerequisite v1 rejects fast-only ledger state")
     if profile_lines not in ([], ["strict"]):
         raise PrerequisiteError("prerequisite v1 requires legacy or explicit strict profile")
-    marker_like = re.findall(r"^Task (\d+): (?:implemented|complete).*$", progress, re.MULTILINE)
-    complete_markers: dict[int, tuple[str, str]] = {}
-    for number in range(1, len(anchors) + 1):
-        marker = _marker_for(progress, number)
-        if marker is not None:
-            complete_markers[number] = marker
-    if len(marker_like) != len(complete_markers):
-        raise PrerequisiteError("malformed or duplicate task marker")
-    base_match = re.search(r"^Execution BASE: ([0-9a-f]{40})$", progress, re.MULTILINE)
-    if not base_match:
-        raise PrerequisiteError("progress must record a full Execution BASE")
-    unchecked = [number for number, (checked, _) in enumerate(rows, start=1) if checked == " "]
-    if not unchecked or unchecked[0] != task:
+    try:
+        ledger = parse_execution_ledger(progress, tuple(expected))
+    except ExecutionProfileError as exc:
+        raise PrerequisiteError(str(exc)) from exc
+    complete_markers = {
+        marker.number: (marker.base, marker.head) for marker in ledger.markers
+    }
+    if ledger.first_actionable_task() != task:
         raise PrerequisiteError("task is not the lowest unchecked task")
     head = _execution_base(Path(base_path))
     if task == 1:
@@ -962,23 +1171,23 @@ def check_prerequisite_v1(base_path: Path, work_id: WorkId, task: int) -> dict[s
             str(work_id) == SELF_HOSTED_WORK_ID and bool(profile_lines)
         )
         if (
-            any(checked == "x" for checked, _ in rows)
+            ledger.reviewed_complete
             or complete_markers
             or historical_self_host_profile
         ):
             raise PrerequisiteError("Task 001 legacy preflight requires untouched ledger state")
-        if base_match.group(1) != head:
+        if ledger.execution_base != head:
             raise PrerequisiteError("Task 001 requires full Execution BASE to equal HEAD")
     else:
         for number in range(1, task):
-            if rows[number - 1][0] != "x" or number not in complete_markers:
+            if number not in ledger.reviewed_complete:
                 raise PrerequisiteError("all predecessor tasks must be reviewed-complete")
         if any(number >= task for number in complete_markers):
             raise PrerequisiteError("later task marker precedes current dispatch")
         prior = complete_markers[task - 1]
         if _resolve_commit(Path(base_path), prior[1]) != head:
             raise PrerequisiteError("HEAD must equal predecessor reviewed-complete head")
-        expected_base = base_match.group(1)[:7] if task == 2 else complete_markers[task - 2][1]
+        expected_base = ledger.execution_base[:7] if task == 2 else complete_markers[task - 2][1]
         if prior[0] != expected_base:
             raise PrerequisiteError("completion marker BASE chain is discontinuous")
     prerequisite = "none" if task == 1 else f"PLAN-TASK-{task - 1:03d}"
@@ -991,7 +1200,7 @@ def check_prerequisite_v1(base_path: Path, work_id: WorkId, task: int) -> dict[s
         "prerequisite": prerequisite,
         "satisfied": True,
         "task_count": len(anchors),
-        "execution_base": base_match.group(1),
+        "execution_base": ledger.execution_base,
     }
 
 
@@ -1008,13 +1217,8 @@ def check_prerequisite(
     if require_version == 1:
         return check_prerequisite_v1(base_path, work_id, task)
 
-    run_dir = Path(base_path) / ".req-to-plan" / str(work_id)
-    record = RunStateManager(run_dir).load()
-    if record.status != RunStatus.EXECUTING:
-        raise PrerequisiteError("run must be EXECUTING")
+    _, plan, progress = _read_prerequisite_inputs(base_path, work_id)
     try:
-        plan = read_artifact(run_dir, Stage.PLAN)
-        progress = _read_progress(run_dir)
         result = check_prerequisite_v2(progress, plan, task)
         task_ids = tuple(
             task_id
@@ -1030,7 +1234,7 @@ def check_prerequisite(
                 Path(base_path), ancestor, descendant
             ),
         )
-    except (ExecutionProfileError, UnsafeRegularFileError, OSError) as exc:
+    except (ExecutionProfileError, OSError) as exc:
         raise PrerequisiteError(str(exc)) from exc
     return {
         "work_id": str(work_id),
@@ -1055,6 +1259,7 @@ def _validate_bootstrap_retry_state(
     invocations: tuple[dict[str, Any], ...],
 ) -> None:
     """Bind Task 003+ metrics groups to the strict progress frontier."""
+    progress = _semantic_progress(progress)
     completed: set[int] = set()
     untouched_seen = False
     marker_like = re.findall(r"^Task (\d+): (?:implemented|complete).*$", progress, re.MULTILINE)
@@ -1130,13 +1335,24 @@ def bootstrap_self_hosted_metrics(base_path: Path, work_id: WorkId, through_task
         execution_fd = _open_dir_at(run_fd, "execution")
         progress = _read_text_at(execution_fd, "progress.md")
         assert progress is not None
+        try:
+            parse_execution_ledger(progress, tuple(item[0] for item in anchors))
+        except ExecutionProfileError as exc:
+            raise PrerequisiteError(f"self-hosted bootstrap progress is invalid: {exc}") from exc
+        progress = _semantic_progress(progress)
         complete_one = _marker_for(progress, 1)
         complete_two = _marker_for(progress, 2)
         if complete_one is None or complete_two is None:
             raise PrerequisiteError("self-hosted bootstrap requires Tasks 001 and 002 reviewed-complete")
         base_match = re.search(r"^Execution BASE: ([0-9a-f]{40})$", progress, re.MULTILINE)
         profile_lines = re.findall(r"^Execution Profile: (\S+)$", progress, re.MULTILINE)
-        rows = re.findall(r"^- \[([ x])\] (PLAN-TASK-\d{3})\b", progress, re.MULTILINE)
+        rows = [
+            (match.group(1).lower(), match.group(2))
+            for line, _, _ in unfenced_markdown_lines(
+                strip_nonsemantic_markdown(progress)
+            )
+            if (match := PLAN_TASK_CHECKBOX_RE.match(line))
+        ]
         if (
             base_match is None
             or profile_lines not in ([], ["strict"])
@@ -1227,18 +1443,127 @@ _APPEND_REQUIRED_KEYS = {
     "report_path", "status", "concerns", "fix_wave",
 }
 _TOKEN_KEYS = {"input_tokens", "output_tokens", "total_tokens"}
+_PENDING_COMPLETIONS_NAME = ".pending-completions.json"
 
 
-def _status_result(parsed: ParsedMetrics, result: str) -> dict[str, Any]:
+def _read_pending_completions(execution_fd: int) -> list[dict[str, Any]]:
+    text = _read_text_at(
+        execution_fd, _PENDING_COMPLETIONS_NAME, missing_ok=True
+    )
+    if text is None:
+        return []
+    try:
+        payload = json.loads(text)
+    except (json.JSONDecodeError, ValueError) as exc:
+        raise MetricsFormatError("pending completion journal is invalid") from exc
+    if (
+        not isinstance(payload, dict)
+        or set(payload) != {"schema", "entries"}
+        or payload["schema"] != 1
+        or not isinstance(payload["entries"], list)
+        or _canonical_json(payload) + "\n" != text
+    ):
+        raise MetricsFormatError("pending completion journal is not canonical")
+    entries: list[dict[str, Any]] = []
+    sequences: list[int] = []
+    for entry in payload["entries"]:
+        if (
+            not isinstance(entry, dict)
+            or set(entry) != {"sequence", "record", "invocation"}
+            or isinstance(entry["sequence"], bool)
+            or not isinstance(entry["sequence"], int)
+            or entry["sequence"] <= 0
+            or not isinstance(entry["record"], dict)
+            or not isinstance(entry["invocation"], dict)
+            or entry["record"].get("expected_sequence") != entry["sequence"]
+            or entry["invocation"].get("sequence") != entry["sequence"]
+        ):
+            raise MetricsFormatError("pending completion entry is invalid")
+        sequences.append(entry["sequence"])
+        entries.append(entry)
+    if sequences != sorted(set(sequences)):
+        raise MetricsFormatError("pending completion sequences are not canonical")
+    return entries
+
+
+def _write_pending_completions(
+    execution_fd: int, entries: list[dict[str, Any]]
+) -> None:
+    if entries:
+        _replace_text_at(
+            execution_fd,
+            _PENDING_COMPLETIONS_NAME,
+            _canonical_json({"schema": 1, "entries": entries}) + "\n",
+        )
+        return
+    try:
+        before = os.stat(
+            _PENDING_COMPLETIONS_NAME,
+            dir_fd=execution_fd,
+            follow_symlinks=False,
+        )
+    except FileNotFoundError:
+        return
+    if not stat.S_ISREG(before.st_mode):
+        raise MetricsFormatError("pending completion journal is unsafe")
+    os.unlink(_PENDING_COMPLETIONS_NAME, dir_fd=execution_fd)
+    os.fsync(execution_fd)
+
+
+def _validate_pending_completions(
+    parsed: ParsedMetrics, entries: list[dict[str, Any]]
+) -> None:
+    prepared = 0
+    for entry in entries:
+        sequence = entry["sequence"]
+        if sequence <= len(parsed.invocations):
+            if parsed.invocations[sequence - 1] != entry["invocation"]:
+                raise MetricsFormatError(
+                    "pending completion does not match metrics.md"
+                )
+        elif sequence == len(parsed.invocations) + 1:
+            prepared += 1
+        else:
+            raise MetricsFormatError(
+                "pending completion skips the metrics sequence"
+            )
+    if prepared > 1:
+        raise MetricsFormatError(
+            "pending completion journal has multiple prepared records"
+        )
+
+
+def _status_result(
+    parsed: ParsedMetrics,
+    result: str,
+    pending: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    pending = pending or []
+    public_pending = [
+        {
+            "sequence": entry["sequence"],
+            "phase": (
+                "appended"
+                if entry["sequence"] <= len(parsed.invocations)
+                else "prepared"
+            ),
+            "record_json": _canonical_json(entry["record"]),
+        }
+        for entry in pending
+    ]
     return {
         "work_id": parsed.header["work_id"],
         "profile": parsed.header["profile"],
         "instrumentation_schema": parsed.header["instrumentation_schema"],
+        "instrumentation_complete": parsed.header["instrumentation_complete"],
+        "bootstrap_gap": parsed.header["bootstrap_gap"],
         "result": result,
         "invocation_count": len(parsed.invocations),
         "next_sequence": len(parsed.invocations) + 1,
         "metrics_finalized": parsed.header["metrics_finalized"],
         "change_shape": parsed.header["change_shape"],
+        "pending_completion": public_pending[0] if public_pending else None,
+        "pending_completions": public_pending,
     }
 
 
@@ -1299,16 +1624,6 @@ def _validate_current_metrics(
         or (profile_like and len(profile_like) != len(profiles))
     ):
         raise MetricsFormatError("metrics header identity does not match the run")
-    if parsed.header["profile"] == "strict":
-        if re.search(
-            r"^(?:\s*Profile\s+Escalation[A-Za-z0-9_-]*\s*:|\s*Task\s+[0-9]+\s*:\s*implemented\b)",
-            semantic_progress,
-            re.MULTILINE,
-        ):
-            raise MetricsFormatError(
-                "strict metrics reject fast-only execution progress state"
-            )
-        return None
     task_ids = tuple(task_id for task_id, _ in anchors)
     try:
         ledger = parse_execution_ledger(progress, task_ids)
@@ -1325,6 +1640,23 @@ def _is_self_host_partial(parsed: ParsedMetrics) -> bool:
         parsed.header["work_id"] == SELF_HOSTED_WORK_ID
         and not parsed.header["instrumentation_complete"]
         and parsed.header["bootstrap_gap"] == SELF_HOSTED_BOOTSTRAP_GAP
+    )
+
+
+def _legacy_metrics_start_task(parsed: ParsedMetrics) -> int | None:
+    match = _LEGACY_BOOTSTRAP_GAP_RE.fullmatch(parsed.header["bootstrap_gap"])
+    if match is None:
+        raise MetricsFormatError("legacy metrics bootstrap gap is invalid")
+    return int(match.group(1)) if match.group(1) is not None else None
+
+
+def _is_legacy_partial(parsed: ParsedMetrics) -> bool:
+    return (
+        not parsed.header["instrumentation_complete"]
+        and _LEGACY_BOOTSTRAP_GAP_RE.fullmatch(
+            parsed.header["bootstrap_gap"]
+        )
+        is not None
     )
 
 
@@ -1405,9 +1737,20 @@ def _canonical_append_fields(
                 "command", "scope", "reason", "elapsed_seconds", "status"
             }:
                 raise MetricsInputError("verification record schema is invalid")
+            if not all(
+                isinstance(verification.get(field), str)
+                and bool(verification.get(field))
+                for field in (
+                    "command", "scope", "reason", "elapsed_seconds", "status"
+                )
+            ):
+                raise MetricsInputError("verification record scalar is invalid")
+            if verification["scope"] not in {
+                "targeted", "directly_affected", "full_suite"
+            } or verification["status"] not in {"passed", "failed"}:
+                raise MetricsInputError("verification record enum is invalid")
             elapsed = verification.get("elapsed_seconds")
-            if not isinstance(elapsed, str):
-                raise MetricsInputError("verification record elapsed_seconds must be a string")
+            assert isinstance(elapsed, str)
             try:
                 total += _parse_decimal(elapsed, "verification record elapsed_seconds")
             except MetricsFormatError as exc:
@@ -1420,10 +1763,18 @@ def _canonical_append_fields(
     }.get(record["context_mode"])
     if context_kind is None:
         raise MetricsInputError("context_mode is invalid")
-    report_text = _read_text_at(
-        execution_fd,
-        _report_name(base_path, work_id, record["report_path"]),
-    )
+    role = record["role"]
+    if role in {"implementer", "fixer", "task_reviewer", "task_rereviewer"} and isinstance(task, int) and task > 0:
+        suffix = "review" if role in {"task_reviewer", "task_rereviewer"} else "report"
+        expected_report = f"task-{task}-{suffix}.md"
+    elif role in {"final_reviewer", "final_fixer", "final_rereviewer"} and task == "final":
+        expected_report = "final-review-report.md"
+    else:
+        raise MetricsInputError("report_path requires a valid role and task")
+    report_name = _report_name(base_path, work_id, record["report_path"])
+    if report_name != expected_report:
+        raise MetricsInputError(f"report_path for {role}/{task} must name {expected_report}")
+    report_text = _read_text_at(execution_fd, report_name)
     assert report_text is not None
     tokens: list[str]
     if token_keys:
@@ -1455,12 +1806,13 @@ def _validate_strict_role_sequence(
     task_count: int,
     *,
     start_task: int = 1,
+    start_at_final: bool = False,
     require_complete: bool = False,
 ) -> None:
     if start_task < 1 or start_task > task_count:
         raise MetricsFormatError("role sequence start task is outside PLAN bounds")
     task = start_task
-    expected_role = "implementer"
+    expected_role = "final_reviewer" if start_at_final else "implementer"
     expected_wave = 0
     blocked = False
     complete = False
@@ -1727,7 +2079,13 @@ def read_metrics_status(base_path: Path, work_id: WorkId) -> dict[str, Any]:
         progress = _read_text_at(execution_fd, "progress.md")
         assert progress is not None
         _validate_current_metrics(run_fd, work_id, current, progress)
-        return _status_result(current, "status")
+        pending = _read_pending_completions(execution_fd)
+        _validate_pending_completions(current, pending)
+        return _status_result(
+            current,
+            "status",
+            pending,
+        )
     finally:
         if lock_fd is not None and logs_fd is not None:
             _release_lock(logs_fd, lock_fd)
@@ -1751,6 +2109,8 @@ def append_metrics_invocation(
         text = _read_text_at(execution_fd, "metrics.md")
         assert text is not None
         parsed = parse_metrics(text)
+        pending = _read_pending_completions(execution_fd)
+        _validate_pending_completions(parsed, pending)
         progress = _read_text_at(execution_fd, "progress.md")
         assert progress is not None
         execution_ledger = _validate_current_metrics(
@@ -1775,7 +2135,7 @@ def append_metrics_invocation(
             normalized["sequence"] = sequence
             if parsed.invocations[sequence - 1] != normalized:
                 raise MetricsFormatError("conflicting retry for existing sequence")
-            result = _status_result(parsed, "already_applied")
+            result = _status_result(parsed, "already_applied", pending)
         else:
             if sequence != len(parsed.invocations) + 1:
                 raise MetricsFormatError("expected sequence skips the canonical next sequence")
@@ -1794,6 +2154,18 @@ def append_metrics_invocation(
                     raise MetricsFormatError(
                         "self-host partial metrics cannot append pre-bootstrap Task 003 evidence"
                     )
+            elif _is_legacy_partial(updated):
+                start_task = _legacy_metrics_start_task(updated)
+                _validate_strict_role_sequence(
+                    updated.invocations,
+                    updated.header["task_count"],
+                    start_task=(
+                        updated.header["task_count"]
+                        if start_task is None
+                        else start_task
+                    ),
+                    start_at_final=start_task is None,
+                )
             else:
                 if (
                     execution_ledger is not None
@@ -1810,13 +2182,125 @@ def append_metrics_invocation(
                         profile=updated.header["profile"],
                         task_count=updated.header["task_count"],
                     )
+            invocation = dict(updated.invocations[-1])
+            entry = {
+                "sequence": sequence,
+                "record": json.loads(_canonical_json(record)),
+                "invocation": invocation,
+            }
+            prior = next(
+                (item for item in pending if item["sequence"] == sequence),
+                None,
+            )
+            if prior is not None and prior != entry:
+                raise MetricsFormatError(
+                    "conflicting retry for pending completion sequence"
+                )
+            if prior is None:
+                pending = sorted(
+                    [*pending, entry], key=lambda item: item["sequence"]
+                )
+                _write_pending_completions(execution_fd, pending)
             parsed = _publish_metrics(execution_fd, identity, candidate)
-            result = _status_result(parsed, "appended")
+            result = _status_result(parsed, "appended", pending)
         invocation = parsed.invocations[sequence - 1]
         result.update({
             "sequence": sequence,
             "role": invocation["role"],
             "task": invocation["task"],
+            "fix_wave": invocation["fix_wave"],
+        })
+        return result
+    finally:
+        if lock_fd is not None and logs_fd is not None:
+            _release_lock(logs_fd, lock_fd)
+        _close_fds(execution_fd, run_fd, workspace_fd, repo_fd)
+
+
+def acknowledge_metrics_completion(
+    base_path: Path,
+    work_id: WorkId,
+    expected_sequence: int,
+) -> dict[str, Any]:
+    """Clear one durable append handoff after authoritative state catches up."""
+    if (
+        isinstance(expected_sequence, bool)
+        or not isinstance(expected_sequence, int)
+        or expected_sequence <= 0
+    ):
+        raise MetricsInputError("expected_sequence must be a positive integer")
+    repo_fd = workspace_fd = run_fd = execution_fd = None
+    logs_fd = lock_fd = None
+    try:
+        repo_fd, workspace_fd, run_fd, execution_fd, _, _, _ = _open_metrics_run(
+            Path(base_path), work_id
+        )
+        logs_fd, lock_fd = _open_lock_at(run_fd, "metrics.lock")
+        parsed = parse_metrics(_read_text_at(execution_fd, "metrics.md") or "")
+        progress = _read_text_at(execution_fd, "progress.md")
+        assert progress is not None
+        ledger = _validate_current_metrics(run_fd, work_id, parsed, progress)
+        pending = _read_pending_completions(execution_fd)
+        _validate_pending_completions(parsed, pending)
+        entry = next(
+            (item for item in pending if item["sequence"] == expected_sequence),
+            None,
+        )
+        if entry is None:
+            if expected_sequence <= len(parsed.invocations):
+                return _status_result(parsed, "already_acknowledged", pending)
+            raise MetricsFormatError("pending completion sequence is unknown")
+        if expected_sequence > len(parsed.invocations):
+            raise MetricsFormatError(
+                "pending completion has not reached metrics.md; retry its exact record"
+            )
+        invocation = parsed.invocations[expected_sequence - 1]
+        if invocation != entry["invocation"]:
+            raise MetricsFormatError("pending completion does not match metrics.md")
+        assert isinstance(ledger, ParsedExecutionLedger)
+        role = invocation["role"]
+        status = invocation["status"]
+        task = invocation["task"]
+        if (
+            role in {"task_reviewer", "task_rereviewer"}
+            and status == "approved"
+            and task not in ledger.reviewed_complete
+        ):
+            raise MetricsFormatError(
+                "approved task review progress transition is not durable"
+            )
+        if (
+            role == "implementer"
+            and parsed.header["profile"] == "fast"
+            and status == "complete"
+        ):
+            marker = ledger.marker_for(task)
+            if marker is None or marker.kind not in {"implemented", "complete"}:
+                raise MetricsFormatError(
+                    "fast implementer progress transition is not durable"
+                )
+        if role in {"final_reviewer", "final_rereviewer"} and status == "approved":
+            final_review = _read_text_at(
+                execution_fd, "final-review.md", missing_ok=True
+            )
+            if (
+                ledger.implemented
+                or ledger.reviewed_complete != tuple(range(1, parsed.header["task_count"] + 1))
+                or final_review is None
+                or _current_verdict(final_review) != "approved"
+            ):
+                raise MetricsFormatError(
+                    "approved final review progress transition is not durable"
+                )
+        remaining = [
+            item for item in pending if item["sequence"] != expected_sequence
+        ]
+        _write_pending_completions(execution_fd, remaining)
+        result = _status_result(parsed, "acknowledged", remaining)
+        result.update({
+            "sequence": expected_sequence,
+            "role": role,
+            "task": task,
             "fix_wave": invocation["fix_wave"],
         })
         return result
@@ -1836,6 +2320,30 @@ def _current_verdict(text: str) -> str | None:
     return value
 
 
+def _parse_finalization_ledger(
+    progress: str, task_count: int
+) -> ParsedExecutionLedger:
+    """Parse the authoritative ledger after normalizing accepted checkbox style."""
+    normalized: list[str] = []
+    for line, _, _ in unfenced_markdown_lines(
+        strip_nonsemantic_markdown(progress)
+    ):
+        plain = line.rstrip("\r\n")
+        match = PLAN_TASK_CHECKBOX_RE.match(plain)
+        if match:
+            mark = "x" if match.group(1).lower() == "x" else " "
+            normalized.append(f"- [{mark}] {match.group(2)}")
+        else:
+            normalized.append(plain)
+    task_ids = tuple(
+        f"PLAN-TASK-{number:03d}" for number in range(1, task_count + 1)
+    )
+    try:
+        return parse_execution_ledger("\n".join(normalized) + "\n", task_ids)
+    except ExecutionProfileError as exc:
+        raise MetricsFormatError(f"execution progress ledger is invalid: {exc}") from exc
+
+
 def _require_finalization_truth(
     base_path: Path,
     execution_fd: int,
@@ -1844,24 +2352,28 @@ def _require_finalization_truth(
     execution_ledger: Any,
 ) -> bytes:
     self_host_partial = _is_self_host_partial(parsed)
-    if not self_host_partial and (
+    legacy_partial = _is_legacy_partial(parsed)
+    if not (self_host_partial or legacy_partial) and (
         not parsed.header["instrumentation_complete"]
         or parsed.header["bootstrap_gap"] != "none"
     ):
         raise MetricsFormatError("metrics instrumentation is incomplete")
     task_count = parsed.header["task_count"]
+    if not self_host_partial:
+        execution_ledger = _parse_finalization_ledger(progress, task_count)
     semantic_progress = strip_html_comments_outside_fences(progress)
     progress_lines = [
         line for line, _, _ in unfenced_markdown_lines(semantic_progress)
     ]
-    unchecked_re = re.compile(r"^\s*-\s*\[\s*\]\s*(PLAN-TASK-\d+)\b")
-    checked_re = re.compile(r"^\s*-\s*\[[xX]\]\s*(PLAN-TASK-\d+)\b")
-    if any(unchecked_re.match(line) for line in progress_lines):
+    progress_rows = [
+        (match.group(1).lower(), match.group(2))
+        for line in progress_lines
+        if (match := PLAN_TASK_CHECKBOX_RE.match(line))
+    ]
+    if any(not mark for mark, _task_id in progress_rows):
         raise MetricsFormatError("execution progress is incomplete")
     checked_ids = {
-        match.group(1)
-        for line in progress_lines
-        if (match := checked_re.match(line))
+        task_id for mark, task_id in progress_rows if mark == "x"
     }
     expected_ids = {f"PLAN-TASK-{number:03d}" for number in range(1, task_count + 1)}
     if not expected_ids.issubset(checked_ids):
@@ -1875,7 +2387,20 @@ def _require_finalization_truth(
     if _current_verdict(final_review) != "approved":
         raise MetricsFormatError("final review is not Approved")
     if not self_host_partial:
-        if (
+        if legacy_partial:
+            start_task = _legacy_metrics_start_task(parsed)
+            _validate_strict_role_sequence(
+                parsed.invocations,
+                parsed.header["task_count"],
+                start_task=(
+                    parsed.header["task_count"]
+                    if start_task is None
+                    else start_task
+                ),
+                start_at_final=start_task is None,
+                require_complete=True,
+            )
+        elif (
             execution_ledger is not None
             and execution_ledger.initial_profile is ExecutionProfile.FAST
             and execution_ledger.effective_profile is ExecutionProfile.STRICT
@@ -1913,16 +2438,25 @@ def _require_finalization_truth(
                 raise MetricsFormatError("all role verification evidence must be measured and passed")
         if invocation["status"] == "blocked":
             raise MetricsFormatError("blocked role evidence cannot be finalized")
-    dirty = subprocess.run(
-        [
-            "git", "-C", str(base_path), "status", "--porcelain=v1",
-            "--untracked-files=all", "--", ".", ":(exclude).req-to-plan",
-        ],
-        capture_output=True,
-        check=False,
-    )
-    if dirty.returncode != 0 or dirty.stdout:
-        raise MetricsFormatError("code worktree outside .req-to-plan must be clean")
+    _require_clean_code_worktree(base_path)
+    if not self_host_partial:
+        assert isinstance(execution_ledger, ParsedExecutionLedger)
+        current_head = _execution_base(base_path)
+        try:
+            validate_ledger_commit_chain(
+                execution_ledger,
+                current_head=current_head,
+                resolve_commit=lambda value: _resolve_commit_or_full(
+                    base_path, value
+                ),
+                is_ancestor=lambda ancestor, descendant: _is_ancestor(
+                    base_path, ancestor, descendant
+                ),
+            )
+        except (ExecutionProfileError, PrerequisiteError) as exc:
+            raise MetricsFormatError(
+                f"execution ledger commit chain is invalid: {exc}"
+            ) from exc
     base_match = re.search(
         r"^Execution BASE: ([0-9a-f]{40})$", semantic_progress_text, re.MULTILINE
     )
@@ -1989,11 +2523,17 @@ def finalize_metrics(
         )
         if expected_invocation_count != len(parsed.invocations):
             raise MetricsFormatError("expected invocation count is stale")
+        pending = _read_pending_completions(execution_fd)
+        _validate_pending_completions(parsed, pending)
         if parsed.header["metrics_finalized"]:
+            if pending:
+                raise MetricsFormatError("finalized metrics cannot retain pending completions")
             return _status_result(parsed, "already_finalized")
         name_status = _require_finalization_truth(
             Path(base_path), execution_fd, parsed, progress, execution_ledger
         )
+        if pending:
+            raise MetricsFormatError("pending completions must be acknowledged before metrics finalization")
         try:
             shape = classify_change_shape(name_status)
         except ValueError as exc:
@@ -2053,10 +2593,11 @@ def _six(value: Decimal) -> str:
 
 def _fix_waves(text: str) -> set[int]:
     semantic = strip_nonsemantic_markdown(text)
+    marker = re.compile(r"Fix Wave ([1-9][0-9]*)")
     return {
         int(match.group(1))
         for line, _, _ in unfenced_markdown_lines(semantic)
-        for match in re.finditer(r"(?i)\bfix[ -]wave\s+([1-9][0-9]*)\b", line)
+        if (match := marker.fullmatch(line.rstrip("\r\n")))
     }
 
 
@@ -2181,7 +2722,13 @@ def _summarize_sample(
 
     anchors = plan_task_anchors(strip_nonsemantic_markdown(plan))
     task_ids = [item[0] for item in anchors]
-    rows = re.findall(r"^- \[([ x])\] (PLAN-TASK-\d{3})\b", strip_nonsemantic_markdown(progress), re.MULTILINE)
+    rows = [
+        (match.group(1).lower(), match.group(2))
+        for line, _, _ in unfenced_markdown_lines(
+            strip_nonsemantic_markdown(progress)
+        )
+        if (match := PLAN_TASK_CHECKBOX_RE.match(line))
+    ]
     plan_ok = (
         task_ids == [f"PLAN-TASK-{n:03d}" for n in range(1, len(anchors) + 1)]
         and len(anchors) == header["task_count"]
@@ -2194,6 +2741,17 @@ def _summarize_sample(
     if _current_verdict(final_review) != "approved":
         failures.append(_sample_failure(canonical, str(work_id), "final_review_approved", "last final-review verdict is not Approved"))
 
+    role_sequence_error: str | None = None
+    try:
+        validate_role_sequence(
+            parsed.invocations,
+            profile="strict",
+            task_count=header["task_count"],
+            require_complete=True,
+        )
+    except MetricsFormatError as exc:
+        role_sequence_error = str(exc)
+
     role_counts = {role: 0 for role in _ROLE_ORDER}
     task_roles: dict[tuple[str, int], int] = {}
     fixer_waves: set[tuple[int, int]] = set()
@@ -2202,6 +2760,7 @@ def _summarize_sample(
     final_rereviewer_waves: set[int] = set()
     task_review_statuses: dict[int, list[str]] = {}
     final_review_statuses: list[str] = []
+    final_role_full_suite: list[bool] = []
     completed_statuses_ok = True
     measured_ok = True
     totals_ok = True
@@ -2235,22 +2794,32 @@ def _summarize_sample(
             final_fixer_waves.add(invocation["fix_wave"])
         elif role == "final_rereviewer":
             final_rereviewer_waves.add(invocation["fix_wave"])
-        role_elapsed += Decimal(invocation["elapsed_seconds"])
+        if invocation["elapsed_seconds"] == "unavailable":
+            measured_ok = False
+        else:
+            role_elapsed += Decimal(invocation["elapsed_seconds"])
         report_bytes += invocation["report_bytes"]
         records = invocation["verification_records"]
         if records == "unavailable" or invocation["verification_total_seconds"] == "unavailable":
             measured_ok = False
+            if role in {"final_reviewer", "final_rereviewer"}:
+                final_role_full_suite.append(False)
             continue
         record_total = sum((Decimal(item["elapsed_seconds"]) for item in records), Decimal())
         verification_elapsed += record_total
         if record_total != Decimal(invocation["verification_total_seconds"]):
             totals_ok = False
+        has_passing_full_suite = False
         for item in records:
             if item["status"] != "passed":
                 measured_ok = False
             if item["scope"] == "full_suite":
                 full_suite_count += 1
                 full_suite_duration += Decimal(item["elapsed_seconds"])
+                if item["status"] == "passed":
+                    has_passing_full_suite = True
+        if role in {"final_reviewer", "final_rereviewer"}:
+            final_role_full_suite.append(has_passing_full_suite)
         context = contexts[invocation["context_mode"]]
         context["invocation_count"] += 1
         context["context_bytes"] += invocation["context_bytes"]
@@ -2281,27 +2850,41 @@ def _summarize_sample(
         and final_review_statuses[-1] == "approved"
     )
     evidence_ok = (
-        role_evidence["fixer"] <= fixer_waves
-        and role_evidence["task_rereviewer"] <= rereviewer_waves
-        and role_evidence["final_fixer"] <= final_fixer_waves
-        and role_evidence["final_rereviewer"] <= final_rereviewer_waves
+        role_evidence["fixer"] == fixer_waves
+        and role_evidence["task_rereviewer"] == rereviewer_waves
+        and role_evidence["final_fixer"] == final_fixer_waves
+        and role_evidence["final_rereviewer"] == final_rereviewer_waves
     )
-    if not evidence_ok:
-        failures.append(_sample_failure(
-            canonical,
-            str(work_id),
-            "role_coverage",
-            "persistent role/fix-wave evidence is missing matching metrics blocks",
-        ))
-    elif not completed_statuses_ok:
+    if not completed_statuses_ok:
         failures.append(_sample_failure(
             canonical,
             str(work_id),
             "role_coverage",
             "required role invocation did not complete successfully",
         ))
+    elif role_sequence_error is not None:
+        failures.append(_sample_failure(
+            canonical,
+            str(work_id),
+            "role_coverage",
+            f"role sequence is invalid: {role_sequence_error}",
+        ))
     elif not coverage_ok:
         failures.append(_sample_failure(canonical, str(work_id), "role_coverage", "required role coverage or fix-wave pairing is incomplete"))
+    elif not evidence_ok:
+        failures.append(_sample_failure(
+            canonical,
+            str(work_id),
+            "role_coverage",
+            "persistent role/fix-wave evidence is missing matching metrics blocks",
+        ))
+    if not final_role_full_suite or not final_role_full_suite[-1]:
+        failures.append(_sample_failure(
+            canonical,
+            str(work_id),
+            "role_coverage",
+            "approved terminal final reviewer requires passed full-suite evidence",
+        ))
     if not measured_ok:
         failures.append(_sample_failure(canonical, str(work_id), "measured_fields_complete", "required measured timing or verification fields are unavailable/failed"))
     if not totals_ok:
@@ -2360,7 +2943,8 @@ def validate_representative_samples(sample_dirs: tuple[Path, Path, Path]) -> dic
 
     summaries: list[dict[str, Any]] = []
     failures: list[dict[str, str]] = []
-    identities: set[tuple[str, str]] = set()
+    canonical_paths: set[str] = set()
+    work_ids: set[str] = set()
     for raw_path in sample_dirs:
         source = os.fspath(raw_path)
         sample_fd = execution_fd = None
@@ -2373,11 +2957,24 @@ def validate_representative_samples(sample_dirs: tuple[Path, Path, Path]) -> dic
             failures.append(_sample_failure(source, "unavailable", "path_safety", str(exc)))
             continue
         try:
-            identity = (canonical, str(work_id))
-            if identity in identities:
-                failures.append(_sample_failure(source, str(work_id), "identity_unique", "canonical sample path/work ID is duplicated"))
+            if canonical in canonical_paths:
+                failures.append(_sample_failure(
+                    source,
+                    str(work_id),
+                    "identity_unique",
+                    "canonical sample path is duplicated",
+                ))
                 continue
-            identities.add(identity)
+            canonical_paths.add(canonical)
+            if str(work_id) in work_ids:
+                failures.append(_sample_failure(
+                    source,
+                    str(work_id),
+                    "identity_unique",
+                    "sample work ID is duplicated",
+                ))
+                continue
+            work_ids.add(str(work_id))
             summary, sample_failures = _summarize_sample(
                 canonical, work_id, record, plan, parsed, progress, final_review, role_evidence
             )

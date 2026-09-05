@@ -147,14 +147,19 @@ class TestStageTemplates(unittest.TestCase):
             "executable intermediate contract",
             "Prerequisite: none",
             "Prerequisite: PLAN-TASK-NNN",
-            "execution-prerequisite-check --work-id <id> --task <N> --require-version 2",
+            "dispatch prerequisite gate",
             "profile-aware prerequisite semantics",
+            "must not be copied into `Verification`",
             "group's declared dependents",
             "reverse topological order",
             "other Phase",
         ):
             self.assertIn(token, text)
         self.assertNotIn("Dependencies:", text)
+        verification = next(
+            line for line in text.splitlines() if line.startswith("Verification:")
+        )
+        self.assertNotIn("prerequisite", verification.lower())
 
     # --- non-PLAN stage byte-identical invariant ---
 

@@ -158,15 +158,17 @@ parameters show their default; `—` means you must supply the value:
 | | | `--confirm` | required | — |
 | | | `--modifiers <a,b,…>` | optional | none |
 | | | `--override-floor` | optional | off |
-| `r2p-reopen` | Reopen a closed or executing run to repair an upstream artifact. | `--from <work-id>` | required | — |
+| `r2p-reopen` | Reopen a closed or executing run, then archive its direct source. | `--from <work-id>` | required | — |
 | | | `--stage <stage>` | required | — |
+| | | `--reason <text>` | required | — |
+| `r2p-abandon` | Explicitly abandon and archive an unfinished open draft. | `--work-id <id>` | required | — |
 | | | `--reason <text>` | required | — |
 | `r2p-gap-open` | Route an upstream decision gap on an open run back to its owner stage. | `--work-id <id>` | required | — |
 | | | `--owner-stage <stage>` | required | — |
 | | | `--required-action "<text>"` | required | — |
 | `r2p-gap-resolve` | Close a repaired upstream-gap route. | `--work-id <id>` | required | — |
 | | | `--route-id <id>` | required | — |
-| `r2p-archive` | Archive a closed run out of the active workspace. | `--work-id <id>` | optional | active run |
+| `r2p-archive` | Archive a closed or executing run out of the active workspace. | `--work-id <id>` | optional | active run |
 | | | `--force` | optional | off |
 | `r2p-execute` | Execute a closed PLAN in place, run a whole-branch review, then archive. | `--work-id <id>` | optional | active run |
 
@@ -180,9 +182,15 @@ floor. `--separate` starts a parallel run while another is still open. `--force`
 lets `r2p-archive` archive an executing run whose PLAN-TASKs are not all checked
 off.
 
+`r2p-reopen` keeps one active run per reopen lineage: after the child is durable,
+the direct source is moved to `.req-to-plan/archive/`. If another active reopened
+draft already exists, reopen stops instead of silently replacing it; use
+`r2p-abandon --work-id <id> --reason "<text>"` only after explicitly deciding
+that the draft is no longer needed.
+
 Most runs only need `r2p-start` and repeated `r2p-continue`. Use the specialized
 commands when the workflow prints them or when you intentionally need to switch,
-repair, reopen, execute, or archive a run.
+repair, reopen, abandon, execute, or archive a run.
 
 > [!IMPORTANT]
 > `r2p-execute` assumes the host agent can dispatch subagents. It works on the
@@ -263,37 +271,60 @@ The loop is Spec-Driven Development (SDD):
 
 Progress is tracked durably in `execution/progress.md`. If a run is interrupted,
 just run `r2p-execute` again on the same run: it detects the `executing` status,
-continues from the first unchecked task, and never re-runs completed work or
-restarts from scratch. If it cannot reconstruct where the interrupted task began,
+returns the parsed first actionable task, and never re-runs reviewed-complete or
+fast-implemented work or restarts from scratch. If it cannot reconstruct where
+the interrupted task began,
 it stops and asks you rather than guessing.
 
 **Execution metrics (Phase 0).**
 
 Normal `run-execute-start` creates `execution/metrics.md` alongside progress.
+Its transient run-level `.execution-start-transaction.json` owner is published
+atomically before `execution/` is created, is gitignored, and lets a retry
+identify and safely clear a crash residue without manual cleanup. Archive
+refuses that residue unless the operator explicitly forces abandonment.
 Controllers must treat that document as CLI-owned structural data: call
 `r2p-metrics-status --work-id <id>` at start/resume,
 `r2p-metrics-append --work-id <id> --record-json '<json>'` after every completed
-role report, and `r2p-metrics-finalize --work-id <id>` with
+role report, `r2p-metrics-ack --work-id <id> --expected-sequence <N>` after its
+authoritative progress/report transition is durable, and
+`r2p-metrics-finalize --work-id <id>` with
 `--expected-invocation-count <N>` after the approved final review. Append derives
 the canonical sequence, context byte kind, verification total, and report byte
-count; finalize derives `change_shape` from the Execution BASE diff and
-atomically sets `metrics_finalized: true`. Exact retries are idempotent. A
+count. Before publishing metrics it persists the exact request as
+`pending_completion.record_json`; status returns that request after interruption so the
+controller completes the transition instead of redispatching the role. Recovery
+checks whether the authoritative transition is already durable before
+writing it, so a crash between that transition and acknowledgment cannot create
+duplicate task markers or verdict records. Finalize derives `change_shape` from
+the Execution BASE diff and atomically sets
+`metrics_finalized: true`. Exact retries and acknowledgments are idempotent. A
 metrics failure is reported as `metrics_incomplete`; metrics remain
 non-authoritative and do not add an archive gate.
+
+An upgraded profileless `EXECUTING` run that predates `metrics.md` is resumed as
+strict and receives an explicit incomplete-instrumentation bootstrap header at
+its current actionable task. This preserves execution compatibility without
+pretending the missing historical observations were measured.
 
 The controller owns this append-only observation ledger; it never participates
 in run state, completion, resume, final-review, or archive gates. It records a
 block for every role call with elapsed time, report bytes, verification records,
 status, concerns, fix wave, and any model or Token value the platform actually
-exposes. A missing model, timing, or Token value is written as `unavailable` —
-bytes and elapsed time must never be presented as an estimated Token count.
+exposes. A missing model, timing, or Token value is written as `unavailable`;
+unavailable role timing uses that value consistently for `started_at`, `ended_at`,
+and `elapsed_seconds`. Bytes and elapsed time must never be presented as an
+estimated Token count.
 
 Context bytes name the delivered payload kind: Phase 0 direct ACS uses
 `declared_payload_bytes` (the raw UTF-8 bytes of the required sources). Phase 1
-roles run `r2p-context-view --work-id <id>` themselves and record
+roles run `r2p-context-view --work-id <id> --with-stats` themselves and record
 `context_mode=semantic_view` with `semantic_payload_bytes` from its live,
 deterministically filtered output. The controller does not read or forward that
-content and no persistent context bundle is created. These are auditable byte
+content and no persistent context bundle is created. The human output includes
+an aggregate `semantic_bytes` integer (excluding the stats prefix); every role
+returns that integer inline for the controller's `context_bytes`. JSON mode
+includes the same count. These are auditable byte
 measurements, not a claim about model-consumed context or Token usage.
 
 Role reports and reviews are compact audit records: `Status`, `Commit Range`,
@@ -302,9 +333,13 @@ reviews additionally retain `Spec Verdict` and `Quality Verdict`. Every concern
 and deferred item is preserved in both the persistent artifact and the role's
 inline concerns. Strict final review reads reports and reviews; fast primary
 final review reads every report and does not require nonexistent task reviews.
+Each task repair wave persists the same exact unfenced `Fix Wave N` marker in
+both its task report and task review so structured fixer/rereviewer metrics have
+auditable artifact evidence.
 
 `r2p-execute` defaults to `strict`. Explicit `--profile fast` first performs a
-read-only LIGHT/no-modifier structure preflight and returns
+read-only LIGHT/no-modifier structure preflight, validates prerequisite v2 in
+every PLAN task, and returns
 `fast_profile_review`; the agent must review every PLAN task before confirming
 with `--confirm-fast-eligible` or rejecting with
 `--reject-fast-ineligible --reason <single-line>`. Fast records implemented
@@ -314,9 +349,18 @@ file-boundary, concern, ambiguity, marker-chain, or shared/core risk. Final full
 suite, `Verdict: Approved`, checkbox completion, metrics finalization, and
 archive gates remain unchanged.
 
-The internal commands are intended for the controller and safe test tooling:
-`execution-prerequisite-check --work-id <id> --task <N> --require-version 2`
-(with version 1 compatibility for already-generated PLANs),
+Legacy PLANs without prerequisite declarations use strict v1; mixed or malformed
+declarations block execution before start. Final ack requires the fast ledger
+migration to be durable, and metrics finalization rejects any pending completion
+until acknowledged. Metrics report paths are bound to the current role/task's
+canonical report; task repair evidence uses an exact unfenced `Fix Wave N` line.
+
+The installed controller surface includes
+`r2p-prerequisite-check --work-id <id> --task <N> --require-version 2`
+(with version 1 compatibility for already-generated PLANs). It runs immediately
+before task dispatch; it is not a post-implementation Verification command.
+The corresponding internal command is `execution-prerequisite-check`.
+Other internal commands intended for safe test tooling include
 `execution-samples-validate` with exactly three absolute `--sample-dir` values,
 and the narrowly scoped self-host exception
 `execution-metrics-bootstrap --work-id WF-20260829-r2p-execute-token-phase-r2p --profile strict --self-hosted-gap-through-task 002`.

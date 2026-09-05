@@ -21,6 +21,7 @@ from typing import Any
 from tools.workflow_cli.atomic import UnsafeRegularFileError, read_regular_text
 from tools.workflow_cli.markdown import (
     PLAN_TASK_ANCHOR_RE,
+    PLAN_TASK_CHECKBOX_RE,
     heading_bounded_bodies,
     plan_task_anchors,
     strip_nonsemantic_markdown,
@@ -86,9 +87,12 @@ _COMPLETE_RE = re.compile(
 _MARKER_LIKE_RE = re.compile(
     r"^\s*Task\s*[0-9]+\s*:?\s*(?:implemented|complete).*$"
 )
-_CHECKBOX_RE = re.compile(r"^- \[([ x])\] (PLAN-TASK-[0-9]{3})\b")
+_CHECKBOX_RE = PLAN_TASK_CHECKBOX_RE
 _BASE_RE = re.compile(r"^Execution BASE: ([0-9a-f]{40})$")
 _PREREQUISITE_RE = re.compile(r"^Prerequisite: (none|PLAN-TASK-[0-9]{3})$")
+_PREREQUISITE_LIKE_RE = re.compile(
+    r"^\s*(?:(?:[-*+]|[0-9]+[.)]|#{1,6})\s+)?Prerequisite\b", re.IGNORECASE
+)
 _SAMPLE_ROLES = (
     "implementer",
     "task_reviewer",
@@ -237,7 +241,7 @@ def parse_execution_ledger(
     states: list[str] = []
     for number, (checked, _task_id) in zip(expected_numbers, checkbox_rows):
         marker = by_task.get(number)
-        if checked == "x":
+        if checked.lower() == "x":
             if marker is None or marker.kind != "complete":
                 raise ExecutionProfileError("checked task must have one complete marker")
             states.append("complete")
@@ -318,13 +322,14 @@ def _declared_prerequisite(
         if steps_start <= start < steps_end and line.strip()
     ]
     prerequisite_like = [
-        line for line in step_lines if line.lstrip().startswith("Prerequisite")
+        line.rstrip("\r\n") for line, _, _ in lines
+        if _PREREQUISITE_LIKE_RE.match(line)
     ]
     if not prerequisite_like:
         raise ExecutionProfileError("prerequisite declaration is missing")
     if len(prerequisite_like) != 1:
         raise ExecutionProfileError("prerequisite declaration is duplicated")
-    if step_lines[0] != prerequisite_like[0]:
+    if not step_lines or step_lines[0] != prerequisite_like[0]:
         raise ExecutionProfileError(
             "prerequisite declaration must be the first Steps line"
         )
@@ -377,6 +382,28 @@ def check_prerequisite_v2(progress: str, plan: str, task: int) -> dict[str, Any]
     }
 
 
+def prerequisite_semantics_version(plan: str) -> int:
+    """Classify every task before execution; reject mixed or malformed v2 PLANs."""
+    semantic = strip_nonsemantic_markdown(plan)
+    ids = tuple(task_id for task_id, _ in plan_task_anchors(semantic))
+    _expected_numbers(ids)
+    bodies = tuple(heading_bounded_bodies(semantic, PLAN_TASK_ANCHOR_RE.match))
+    has_declarations = any(
+        _PREREQUISITE_LIKE_RE.match(line)
+        for body in bodies
+        for line, _, _ in unfenced_markdown_lines(body)
+    )
+    if not has_declarations:
+        return 1
+    for task in range(1, len(ids) + 1):
+        prerequisite = _declared_prerequisite(semantic, ids, task)
+        if prerequisite != "none" and prerequisite not in ids[:task - 1]:
+            raise ExecutionProfileError(
+                "declared prerequisite must reference an earlier PLAN task"
+            )
+    return 2
+
+
 def fast_structure_eligible(tier_locked: TierEstimate | None) -> bool:
     """Fast may only be considered for a locked LIGHT tier without modifiers."""
     return (
@@ -409,6 +436,10 @@ def validate_ledger_commit_chain(
             marker_head = resolve_commit(marker.head)
             if marker_base != previous_head:
                 raise ExecutionProfileError("task marker BASE chain is discontinuous")
+            if marker_head == previous_head:
+                raise ExecutionProfileError(
+                    "task marker commit range is empty; every task must contain a commit"
+                )
             if not _FULL_SHA_RE.fullmatch(marker_head) or not is_ancestor(previous_head, marker_head):
                 raise ExecutionProfileError("task marker head is not an ordered descendant")
             previous_head = marker_head
@@ -638,10 +669,16 @@ def finalize_fast_ledger(text: str, plan_task_ids: tuple[str, ...]) -> str:
         implemented = _IMPLEMENTED_RE.match(plain)
         original_line = text[start:end]
         if checkbox:
-            if checkbox.group(1) == " ":
-                replacements.append(
-                    (start, end, original_line.replace("- [ ]", "- [x]", 1))
-                )
+            if not checkbox.group(1):
+                line_end = len(original_line.rstrip("\r\n"))
+                ending = original_line[line_end:]
+                replacements.append((
+                    start,
+                    end,
+                    f"- [x] {checkbox.group(2)}"
+                    + plain[checkbox.end(2):]
+                    + ending,
+                ))
         elif implemented:
             number, base, head = implemented.groups()
             replacements.append((

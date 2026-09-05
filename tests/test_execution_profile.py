@@ -76,6 +76,21 @@ Task 1: complete (commits abcdef0..1234567, review clean)
     assert parsed.untouched == (2,)
 
 
+def test_execution_ledger_accepts_authoritative_checkbox_spacing_and_case():
+    parsed = parse_execution_ledger(
+        ledger(
+            "  -  [X]   PLAN-TASK-001 — first",
+            "\t- [   ] PLAN-TASK-002 — second",
+            "- [ ] PLAN-TASK-003 — third",
+            extras="Task 1: complete (commits abcdef0..1234567, review clean)",
+        ),
+        TASK_IDS,
+    )
+
+    assert parsed.reviewed_complete == (1,)
+    assert parsed.untouched == (2, 3)
+
+
 def test_comments_and_fenced_examples_do_not_create_profile_or_markers():
     parsed = parse_execution_ledger(
         ledger(
@@ -446,6 +461,26 @@ Task 2: complete (commits 1234567..7654321, review clean)""",
             current_head="2" * 40,
             resolve_commit={**commits, "abcdef0": "f" * 40}.__getitem__,
             is_ancestor=lambda _older, _newer: True,
+        )
+
+
+def test_commit_chain_rejects_zero_length_task_marker_range():
+    parsed = parse_execution_ledger(
+        ledger(
+            "- [x] PLAN-TASK-001 — first",
+            "- [ ] PLAN-TASK-002 — second",
+            "- [ ] PLAN-TASK-003 — third",
+            extras="Task 1: complete (commits abcdef0..abcdef0, review clean)",
+        ),
+        TASK_IDS,
+    )
+
+    with pytest.raises(ExecutionProfileError, match="empty|zero-length|contain a commit"):
+        validate_ledger_commit_chain(
+            parsed,
+            current_head=BASE,
+            resolve_commit={BASE: BASE, "abcdef0": BASE}.__getitem__,
+            is_ancestor=lambda older, newer: older == newer,
         )
 
 
@@ -830,3 +865,37 @@ def test_evidence_consumption_requires_exact_canonical_result_shape(tmp_path, mu
 
     with pytest.raises(ExecutionProfileError):
         consume_accepted_sample_evidence(path)
+
+
+@pytest.mark.parametrize("second", [
+    "Steps:\n- implement\n",
+    "Steps:\nPrerequisite : PLAN-TASK-001\n",
+    "Steps:\nPrerequisite: PLAN-TASK-002\n",
+    "Steps:\nPrerequisite: PLAN-TASK-003\n",
+    "Steps:\nPrerequisite: PLAN-TASK-999\n",
+    "Steps:\nPrerequisite: PLAN-TASK-001\nPrerequisite: none\n",
+    "Steps:\nPrerequisite: PLAN-TASK-001\nVerification:\nPrerequisite: none\n",
+    "Steps:\n- Prerequisite: PLAN-TASK-001\n",
+    "Steps:\nprerequisite: PLAN-TASK-001\n",
+])
+def test_plan_prerequisite_classification_validates_every_task(second):
+    from tools.workflow_cli.execution_profile import prerequisite_semantics_version
+
+    text = (
+        "### PLAN-TASK-001: first\nSteps:\nPrerequisite: none\n"
+        "### PLAN-TASK-002: second\n" + second
+    )
+    with pytest.raises(ExecutionProfileError):
+        prerequisite_semantics_version(text)
+
+
+def test_plan_prerequisite_classification_preserves_legacy_and_group_roots():
+    from tools.workflow_cli.execution_profile import prerequisite_semantics_version
+
+    legacy = "### PLAN-TASK-001: first\nSteps:\n- implement\n"
+    examples = "```text\nPrerequisite: none\n```\n<!-- Prerequisite: bad -->\n"
+    assert prerequisite_semantics_version(legacy + examples) == 1
+    assert prerequisite_semantics_version(
+        "### PLAN-TASK-001: first\nSteps:\nPrerequisite: none\n"
+        "### PLAN-TASK-002: root\nSteps:\nPrerequisite: none\n" + examples
+    ) == 2

@@ -20,6 +20,13 @@ _READONLY_SECTION_END_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Shared grammar for the authoritative execution-completion checkbox surface.
+# Consumers decide whether an empty mark or ``x``/``X`` is legal for their
+# current state, but spacing/case acceptance must stay identical.
+PLAN_TASK_CHECKBOX_RE = re.compile(
+    r"^\s*-\s*\[\s*([xX]?)\s*\]\s*(PLAN-TASK-\d+)\b"
+)
+
 
 def unfenced_markdown_lines(content: str):
     """Yield (line, start, end) for lines outside Markdown fenced code blocks.

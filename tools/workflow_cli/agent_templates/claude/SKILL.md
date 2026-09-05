@@ -18,7 +18,8 @@ Run each via Bash using the scripts in `{{R2P_BIN_DIR}}`:
 | `{{R2P_BIN_DIR}}/r2p-tier-lock --work-id <id> --base <light\|standard> --confirm` | Lock the tier for a run |
 | `{{R2P_BIN_DIR}}/r2p-status [--all]` | Inspect run state (read-only) |
 | `{{R2P_BIN_DIR}}/r2p-switch --work-id <id>` | Switch active run pointer |
-| `{{R2P_BIN_DIR}}/r2p-reopen --from <work-id> --stage <stage> --reason "<text>"` | Reopen a closed or executing run |
+| `{{R2P_BIN_DIR}}/r2p-reopen --from <work-id> --stage <stage> --reason "<text>"` | Reopen a run and automatically archive its direct source |
+| `{{R2P_BIN_DIR}}/r2p-abandon --work-id <id> --reason "<text>"` | Explicitly abandon and archive an unfinished open draft |
 | `{{R2P_BIN_DIR}}/r2p-gap-open --work-id <id> --owner-stage <stage> --required-action "<text>"` | Route an upstream gap back to its owner stage |
 | `{{R2P_BIN_DIR}}/r2p-gap-resolve --work-id <id> --route-id <route-id>` | Resolve an open upstream-gap route after the owner stage re-passes gate-quality |
 
@@ -38,5 +39,5 @@ Run each via Bash using the scripts in `{{R2P_BIN_DIR}}`:
    - Never defer or drop requirement content while decomposing: everything the brief puts in scope must be implemented this run. The only skippable work is the brief's own `## Out-of-Scope` (SCOPE-OUT-*); to exclude anything else, route it back to the brief — never write "do later / not this round" in a downstream stage (the Quality Gate rejects unanchored deferral).
    - When authoring or repairing a PLAN, form a phase-level cohesive slice around one observable behavior or contract result. If it needs both create and modify paths, R19 requires an operation-homogeneous task group: each task has operation-homogeneous `Files` and a directly testable intermediate contract; the final integration/adoption task runs Phase acceptance. Do not split by file/class alone, create a wrapper before its target, or merge unrelated behavior into a mega-task.
    - The first semantic line in every task's `Steps` is exactly `Prerequisite: none` or `Prerequisite: PLAN-TASK-NNN`. Declare only direct predecessors in that task group; cross-Phase order follows PLAN order and prior Phase acceptance, not the rollback graph. Derive rollback only from those group-local prerequisite lines: roll back one task after its group's declared dependents, or roll back a whole group in reverse topological order without touching another Phase. Do not add a `Dependencies:` field.
-   - Every generated v2 PLAN puts `execution-prerequisite-check --work-id <id> --task <N> --require-version 2` first in `Verification` before dispatch. It uses profile-aware prerequisite semantics and fails closed on malformed, discontinuous, or non-actionable state. Existing generated v1 PLAN invocations remain compatible.
+   - Every generated v2 PLAN declares its prerequisite as the first semantic `Steps` line. The execution controller consumes it as a dispatch prerequisite gate using profile-aware prerequisite semantics; it must not be copied into `Verification` or rerun by a reviewer after implementation. Existing generated v1 PLAN invocations remain compatible.
 3. When the run closes, hand the approved PLAN at `07-plan.md` directly to your executor — the PLAN is executor-neutral and needs no adaptation step.

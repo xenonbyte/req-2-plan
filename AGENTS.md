@@ -82,7 +82,9 @@ from Claude's Markdown command templates.
 - **Manifest safety**: uninstall removes only paths in `installed_paths`; pre-existing user files are backed up, never deleted. Every manifest write routes through `InstallService._write_manifest_atomic` (unique-temp + `O_EXCL` + `O_NOFOLLOW` + atomic replace, symlink-rejecting) — never a bare `write_text`; obsolete-wrapper cleanup tolerates its `ValueError` best-effort rather than aborting the install. `_manifest_shape_issues` checks **structural trust** (field presence/types) only: a valid manifest whose `schema_version` merely differs from the current `SCHEMA_VERSION` is *drift* (`status`-only), **not** a shape defect — flagging it there would make uninstall/cleanup strand a prior install on the next schema bump.
 - **Trusted-input reads are symlink-safe**: reads of trusted on-disk text (artifacts, `02-project-context.md` + scanned dependency configs, continue seeds, `run.md`, gap-open snapshots) route through `atomic.read_regular_text` (lstat → `O_NOFOLLOW` → fstat dev/ino identity; offset-preserving) — never a bare `path.read_text()`. A non-regular/symlinked/raced source raises `UnsafeRegularFileError`, surfaced as exit `6` (`cli.main` catch-all; shortcuts print `blocked: unsafe_seed_source` for seed/artifact reads, `blocked: unsafe_run_record` for a symlinked `run.md` via `_load_matching_record_or_exit`).
 - **Wrapper bootstrap isolation**: the `tools/r2p-*` wrappers and generated commands exec `python -E …/tools/workflow_cli/__main__.py <target>` — **`-E`, not `-I`**, so a user-site `pyyaml` still imports (isolate against `PYTHONPATH` injection, not user site). `__main__._sanitized_sys_path` then drops cwd **and the script's own dir** before prepending the repo root, so `tools/workflow_cli/` modules (notably `trace`) can't shadow stdlib. Do not revert to `-I` or drop the sys.path surgery.
+- **Execution recovery protocol**: start publishes the run-level `.execution-start-transaction.json` owner atomically before creating `execution/` and removes it only after rollback or durable `EXECUTING` state. Metrics append persists an exact pending completion before `metrics.md`; the controller advances authoritative progress/artifacts and clears it through `r2p-metrics-ack`. Missing metrics on a profileless legacy `EXECUTING` ledger are initialized as an observable incomplete-instrumentation gap, never fabricated as complete telemetry.
 - **Non-semantic Markdown stripped uniformly**: gate/trace checks preprocess with `strip_nonsemantic_markdown` — seeded read-only sections removed **and** HTML comments masked to spaces (offset-preserving so removal can't concatenate adjacent IDs/fields; fence-aware so fenced examples stay verbatim). Commented-out headings, PLAN-TASK fields, trace IDs, and fenced snippets neither satisfy nor trip a gate. Trace-ID matching (`SPEC_ID_RE`, `_SCOPE_IN_ID_RE`, `_ID_RE`, and the closure-vicinity search in `gates._find_ids_without_closure`) is token-boundary-aware: `SPEC-…-1` is not closed by `SPEC-…-10`, and a line bearing only a suffixed/typo'd variant no longer self-closes the base ref (fail-closed on typo'd IDs).
+- **Execution protocol boundaries**: classify every PLAN task's prerequisite before start; fast requires valid v2 throughout. Prerequisite reads pin run directories and verify the embedded work ID. Roles use `context-view --with-stats` and return `semantic_bytes` for metrics `context_bytes`; report paths must match their role/task. Approved final ack requires every task reviewed-complete and no implemented markers; metrics finalization requires an empty pending journal under the metrics lock. Task fix-wave evidence is a complete unfenced `Fix Wave N` line.
 - **JSON mode**: set `R2P_JSON=1` for machine-readable output.
 - **Final-review marker gate** (`check_final_review_recorded`): a presence/audit check at the same trust level as the PLAN-TASK checkbox gate — it verifies `execution/final-review.md` exists and records `Verdict: Approved`. It **never** runs code, runs tests, or asserts the verdict is true.
 - **Cross-stage trace closure**: enforced only at the PLAN quality gate (every `SPEC-*` consumed by a PLAN-TASK, every `SCOPE-IN-*` carried into PLAN, every `RISK-*` closed). Intermediate stages enforce only "cited upstream ID ⇒ closure tag"; stages 04–06 have no forward full-coverage gate by design (REQ→DES→SPEC is a legitimately many-to-many mapping — a hard symmetric gate produces false positives).
@@ -94,19 +96,24 @@ from Claude's Markdown command templates.
 
 ```text
 not_started -> active_stage_draft
-active_stage_draft -> active_stage_draft | entry_gate_failed | quality_gate_failed | ready_for_checkpoint_review | upstream_gap_routing
-entry_gate_failed -> active_stage_draft | upstream_gap_routing
-quality_gate_failed -> active_stage_draft | upstream_gap_routing
-ready_for_checkpoint_review -> active_stage_draft | checkpoint_review | upstream_gap_routing
-checkpoint_review -> active_stage_draft | checkpoint_changes_requested | checkpoint_approved | upstream_gap_routing
-checkpoint_changes_requested -> active_stage_draft | quality_gate_failed | upstream_gap_routing
-upstream_gap_routing -> active_stage_draft | upstream_gap_routing | ready_for_checkpoint_review | checkpoint_approved
-checkpoint_approved -> next_stage | closed_at_plan_checkpoint | upstream_gap_routing
-next_stage -> active_stage_draft | entry_gate_failed
+active_stage_draft -> active_stage_draft | entry_gate_failed | quality_gate_failed | ready_for_checkpoint_review | upstream_gap_routing | archived
+entry_gate_failed -> active_stage_draft | upstream_gap_routing | archived
+quality_gate_failed -> active_stage_draft | upstream_gap_routing | archived
+ready_for_checkpoint_review -> active_stage_draft | checkpoint_review | upstream_gap_routing | archived
+checkpoint_review -> active_stage_draft | checkpoint_changes_requested | checkpoint_approved | upstream_gap_routing | archived
+checkpoint_changes_requested -> active_stage_draft | quality_gate_failed | upstream_gap_routing | archived
+upstream_gap_routing -> active_stage_draft | upstream_gap_routing | ready_for_checkpoint_review | checkpoint_approved | archived
+checkpoint_approved -> next_stage | closed_at_plan_checkpoint | upstream_gap_routing | archived
+next_stage -> active_stage_draft | entry_gate_failed | archived
 closed_at_plan_checkpoint -> executing | archived
 executing -> executing | closed_at_plan_checkpoint | archived
 archived -> none
 ```
+
+Open-state transitions to `archived` are owned only by explicit `r2p-abandon`.
+Successful `r2p-reopen` archives its direct closed/executing source after the
+child is durable and refuses to create another child while the lineage already
+has an active reopened run.
 
 ### Artifact filenames
 
@@ -123,7 +130,7 @@ archived -> none
 
 ## Repo-layout gotchas
 
-- `docs/` is **tracked** design state (only `docs/archive/` is ignored). `.req-to-plan/` run dirs (`<work-id>/`) are **tracked** and committed by the path-scoped close/archive commit; only `.req-to-plan/archive`, `.workflow-active`, `<work-id>/logs/`, and `<work-id>/execution/` are ignored (see `.req-to-plan/.gitignore`). `execution/` is ignored like `logs/`: the SDD execution ledger/reports/reviews are local audit trail, never shared git history (gates still read them from the working tree — "ignored" means "not shared via git," not "unimportant").
+- `docs/` is **tracked** design state (only `docs/archive/` is ignored). `.req-to-plan/` run dirs (`<work-id>/`) are **tracked** and committed by the path-scoped close/archive commit; only `.req-to-plan/archive`, `.workflow-active`, `<work-id>/logs/`, `<work-id>/execution/`, and the transient `<work-id>/.execution-start-transaction.json` owner are ignored (see `.req-to-plan/.gitignore`). `execution/` is ignored like `logs/`: the SDD execution ledger/reports/reviews are local audit trail, never shared git history (gates still read them from the working tree — "ignored" means "not shared via git," not "unimportant").
 - `.claude/skills/` is local tool state, not the canonical project guide. The user-facing Claude install template is `tools/workflow_cli/agent_templates/claude/SKILL.md`.
 - `.codegraph/` is present and indexed — prefer `codegraph explore` / `codegraph node` over grep+read when locating code.
 - `.drfx/` holds archived local run artifacts, not source.

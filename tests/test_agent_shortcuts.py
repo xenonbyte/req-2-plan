@@ -6,6 +6,7 @@ from __future__ import annotations
 import contextlib
 import argparse
 import io
+import itertools
 import json
 import os
 import shlex
@@ -1025,6 +1026,78 @@ class TestCmdReopen:
             pointer = read_active_pointer(base)
             assert pointer is not None
             assert pointer["selected_work_id"] == "WF-20260527-source-r1"
+
+
+class TestCmdAbandon:
+    def test_delegates_to_run_abandon_and_clears_matching_pointer(self, capsys):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            work_id = "WF-20260527-abandoned-draft"
+            write_active_pointer(base, work_id, reason="test")
+
+            def fake_run_cli(args_list, base_path):
+                print(
+                    "  work_id: WF-20260527-abandoned-draft\n"
+                    "  status: archived\n"
+                )
+                return 0
+
+            with patch(
+                "tools.workflow_cli.agent_shortcuts._run_cli",
+                side_effect=fake_run_cli,
+            ) as mock_cli:
+                _invoke(
+                    [
+                        "abandon",
+                        "--work-id", work_id,
+                        "--reason", "superseded draft",
+                    ],
+                    base,
+                )
+
+            called_args = mock_cli.call_args[0][0]
+            assert called_args == [
+                "run-abandon",
+                "--work-id", work_id,
+                "--reason", "superseded draft",
+            ]
+            assert read_active_pointer(base) is None
+            assert "abandoned_and_archived" in capsys.readouterr().out
+
+    def test_json_mode_emits_single_payload_and_clears_pointer(
+        self, capsys, monkeypatch
+    ):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            work_id = "WF-20260527-abandoned-json"
+            write_active_pointer(base, work_id, reason="test")
+            monkeypatch.setenv("R2P_JSON", "1")
+
+            def fake_run_cli(args_list, base_path):
+                print(json.dumps({
+                    "status": "ok",
+                    "work_id": work_id,
+                    "archived_to": f"{base}/.req-to-plan/archive/{work_id}",
+                }))
+                return 0
+
+            with patch(
+                "tools.workflow_cli.agent_shortcuts._run_cli",
+                side_effect=fake_run_cli,
+            ):
+                _invoke(
+                    [
+                        "abandon",
+                        "--work-id", work_id,
+                        "--reason", "superseded draft",
+                    ],
+                    base,
+                )
+
+            payload = json.loads(capsys.readouterr().out)
+            assert payload["work_id"] == work_id
+            assert payload["next"] == "r2p-status --all"
+            assert read_active_pointer(base) is None
 
 
 # ---------------------------------------------------------------------------
@@ -2114,9 +2187,11 @@ class TestExecuteShortcutAndRouting(unittest.TestCase):
         rec = create_run_record(wid)
         rec.status = status
         rec.current_stage = Stage.CLOSED if status != RunStatus.ACTIVE_STAGE_DRAFT else Stage.RAW_REQUIREMENT
-        write_artifact(run_dir, Stage.PLAN, "# Plan\n\n## Tasks\n### PLAN-TASK-001: t\n", version=1, status="approved")
+        write_artifact(run_dir, Stage.PLAN, "# Plan\n\n## Tasks\n### PLAN-TASK-001: t\nSteps:\nPrerequisite: none\n", version=1, status="approved")
         RunStateManager(run_dir).save(rec)
         if status == RunStatus.EXECUTING:
+            from tools.workflow_cli.execution_metrics import _initial_metrics_text
+
             execution = run_dir / "execution"
             execution.mkdir()
             execution_base = subprocess.run(
@@ -2137,6 +2212,10 @@ class TestExecuteShortcutAndRouting(unittest.TestCase):
                     "- [ ] PLAN-TASK-001 t",
                     "",
                 )),
+                encoding="utf-8",
+            )
+            (execution / "metrics.md").write_text(
+                _initial_metrics_text(wid, "strict", 1),
                 encoding="utf-8",
             )
         from tools.workflow_cli import agent_shortcuts as ash
@@ -2220,6 +2299,40 @@ class TestExecuteShortcutAndRouting(unittest.TestCase):
                 "Execution Profile: fast",
                 (run_dir / "execution" / "progress.md").read_text(encoding="utf-8"),
             )
+
+    def test_execute_fast_rejects_invalid_prerequisites_before_any_mutation(self):
+        from tools.workflow_cli.artifact import write_artifact
+        from tools.workflow_cli.models import RunStatus, Stage
+        from tools.workflow_cli import agent_shortcuts as ash
+
+        first = "### PLAN-TASK-001: first\nSteps:\nPrerequisite: none\n"
+        second = "### PLAN-TASK-002: second\nSteps:\nPrerequisite: PLAN-TASK-001\n"
+        plans = (
+            "### PLAN-TASK-001: legacy\n",
+            first + "### PLAN-TASK-002: legacy\nSteps:\n- implement\n",
+            first + second.replace("PLAN-TASK-001\n", "PLAN-TASK-999\n"),
+            first + second.replace("Prerequisite:", "Prerequisite :"),
+            first + second + "Prerequisite: none\n",
+        )
+        for plan, confirm, json_mode in itertools.product(plans, (False, True), (False, True)):
+            with self.subTest(plan=plan, confirm=confirm, json_mode=json_mode), tempfile.TemporaryDirectory() as tmp:
+                base = Path(tmp)
+                work_id = "WF-20260101-prerequisite-preflight"
+                run_dir = self._run(base, work_id, RunStatus.CLOSED_AT_PLAN_CHECKPOINT)
+                self._lock_light_tier(run_dir)
+                write_artifact(run_dir, Stage.PLAN, plan, version=1, status="approved")
+                before = {p.relative_to(base): p.read_bytes() for p in (base / ".req-to-plan").rglob("*") if p.is_file()}
+                with patch.dict(os.environ, {"R2P_JSON": "1" if json_mode else "0"}):
+                    out, code = self._capture(
+                        ash._cmd_execute,
+                        self._execute_args(work_id, profile="fast", confirm=confirm),
+                        base,
+                    )
+                self.assertEqual(code, 6, out)
+                self.assertIn("prerequisite", out.lower())
+                after = {p.relative_to(base): p.read_bytes() for p in (base / ".req-to-plan").rglob("*") if p.is_file()}
+                self.assertEqual(before, after)
+                self.assertFalse((run_dir / "execution").exists())
 
     def test_execute_fast_reject_and_structure_ineligible_are_zero_mutation(self):
         import tempfile
@@ -2319,6 +2432,260 @@ class TestExecuteShortcutAndRouting(unittest.TestCase):
             )
             self.assertEqual(code, EXIT_CONFLICT)
             self.assertIn("profile_decision_on_executing_run", out)
+
+    def test_execute_escalated_fast_resume_recovers_transaction_with_initial_profile(self):
+        import tempfile
+        from pathlib import Path
+        from tools.workflow_cli import agent_shortcuts as ash
+        from tools.workflow_cli.models import RunStatus
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            work_id = "WF-20260101-escalated-fast"
+            run_dir = self._run(
+                base, work_id, RunStatus.CLOSED_AT_PLAN_CHECKPOINT
+            )
+            self._lock_light_tier(run_dir)
+            self._capture(
+                ash._cmd_execute,
+                self._execute_args(work_id, profile="fast", confirm=True),
+                base,
+            )
+            progress_path = run_dir / "execution" / "progress.md"
+            progress_path.write_text(
+                progress_path.read_text(encoding="utf-8")
+                + "\nProfile Escalation: fast -> strict (reason: concern found)\n",
+                encoding="utf-8",
+            )
+
+            out, code = self._capture(
+                ash._cmd_execute,
+                self._execute_args(work_id, profile="strict"),
+                base,
+            )
+
+            self.assertEqual(code, 0)
+            self.assertIn("stop: resume_execution", out)
+            self.assertIn("effective_profile: strict", out)
+            self.assertIn("first_actionable_task: 1", out)
+
+    def test_execute_fast_resume_reports_first_actionable_task_not_first_unchecked(self):
+        import re
+        import tempfile
+        from pathlib import Path
+        from tools.workflow_cli import agent_shortcuts as ash
+        from tools.workflow_cli.artifact import write_artifact
+        from tools.workflow_cli.models import RunStatus, Stage
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            work_id = "WF-20260101-fast-actionable"
+            run_dir = self._run(
+                base, work_id, RunStatus.CLOSED_AT_PLAN_CHECKPOINT
+            )
+            write_artifact(
+                run_dir,
+                Stage.PLAN,
+                "# Plan\n\n## Tasks\n"
+                "### PLAN-TASK-001: first\nSteps:\nPrerequisite: none\n"
+                "### PLAN-TASK-002: second\nSteps:\nPrerequisite: PLAN-TASK-001\n",
+                version=1,
+                status="approved",
+            )
+            self._lock_light_tier(run_dir)
+            self._capture(
+                ash._cmd_execute,
+                self._execute_args(work_id, profile="fast", confirm=True),
+                base,
+            )
+            progress_path = run_dir / "execution" / "progress.md"
+            execution_base = re.search(
+                r"^Execution BASE: ([0-9a-f]{40})$",
+                progress_path.read_text(encoding="utf-8"),
+                re.MULTILINE,
+            ).group(1)
+            (base / "task-one.py").write_text("done = True\n", encoding="utf-8")
+            subprocess.run(["git", "add", "task-one.py"], cwd=base, check=True)
+            subprocess.run(["git", "commit", "-qm", "task one"], cwd=base, check=True)
+            task_head = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=base,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+            progress_path.write_text(
+                progress_path.read_text(encoding="utf-8")
+                + f"Task 1: implemented (commits {execution_base[:7]}..{task_head[:7]}, verification recorded)\n",
+                encoding="utf-8",
+            )
+
+            out, code = self._capture(
+                ash._cmd_execute, self._execute_args(work_id), base
+            )
+
+            self.assertEqual(code, 0)
+            self.assertIn("first_actionable_task: 2", out)
+            self.assertNotIn("first unchecked task", out)
+
+            with patch.dict(os.environ, {"R2P_JSON": "1"}):
+                out, code = self._capture(
+                    ash._cmd_execute, self._execute_args(work_id), base
+                )
+            self.assertEqual(code, 0)
+            self.assertEqual(json.loads(out)["first_actionable_task"], 2)
+
+    def test_execute_resume_recovers_start_transaction_marker_and_rejects_mismatch(self):
+        import re
+        import tempfile
+        from pathlib import Path
+        from tools.workflow_cli import agent_shortcuts as ash
+        from tools.workflow_cli.models import RunStatus
+        from tools.workflow_cli.output import EXIT_CONFLICT
+
+        def seed_marker(base, work_id, *, profile="strict"):
+            run_dir = self._run(
+                base, work_id, RunStatus.CLOSED_AT_PLAN_CHECKPOINT
+            )
+            self._capture(
+                ash._cmd_execute, self._execute_args(work_id), base
+            )
+            progress = (run_dir / "execution" / "progress.md").read_text(
+                encoding="utf-8"
+            )
+            execution_base = re.search(
+                r"^Execution BASE: ([0-9a-f]{40})$", progress, re.MULTILINE
+            ).group(1)
+            marker = {
+                "schema": 1,
+                "work_id": work_id,
+                "profile": profile,
+                "task_count": 1,
+                "execution_base": execution_base,
+            }
+            marker_path = run_dir / "execution" / ".start-transaction.json"
+            marker_path.write_text(
+                json.dumps(marker, sort_keys=True, separators=(",", ":")) + "\n",
+                encoding="utf-8",
+            )
+            return marker_path
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            marker = seed_marker(base, "WF-20260101-resume-recovery")
+
+            out, code = self._capture(
+                ash._cmd_execute,
+                self._execute_args("WF-20260101-resume-recovery"),
+                base,
+            )
+
+            self.assertEqual(code, 0)
+            self.assertIn("stop: resume_execution", out)
+            self.assertFalse(marker.exists())
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            marker = seed_marker(
+                base, "WF-20260101-resume-conflict", profile="fast"
+            )
+
+            out, code = self._capture(
+                ash._cmd_execute,
+                self._execute_args("WF-20260101-resume-conflict"),
+                base,
+            )
+
+            self.assertEqual(code, EXIT_CONFLICT)
+            self.assertNotIn("stop: resume_execution", out)
+            self.assertTrue(marker.exists())
+
+    def test_execute_profile_resume_errors_remain_json(self):
+        import tempfile
+        from pathlib import Path
+        from tools.workflow_cli import agent_shortcuts as ash
+        from tools.workflow_cli.models import RunStatus
+        from tools.workflow_cli.output import EXIT_CONFLICT
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            with patch.dict(os.environ, {"R2P_JSON": "1"}):
+                out, code = self._capture(
+                    ash._cmd_execute,
+                    self._execute_args(
+                        "WF-20260101-invalid", profile="strict", confirm=True
+                    ),
+                    base,
+                )
+            self.assertEqual(code, 2)
+            payload = json.loads(out)
+            self.assertEqual(payload["status"], "error")
+            self.assertEqual(payload["reason"], "invalid_execute_profile_arguments")
+            self.assertEqual(payload["exit_code"], 2)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            run_dir = self._run(base, "WF-20260101-malformed", RunStatus.EXECUTING)
+            progress = run_dir / "execution" / "progress.md"
+            progress.write_text(
+                progress.read_text(encoding="utf-8").replace(
+                    "Execution BASE:", "Execution BASE: invalid\nExecution BASE:", 1
+                ),
+                encoding="utf-8",
+            )
+            with patch.dict(os.environ, {"R2P_JSON": "1"}):
+                out, code = self._capture(
+                    ash._cmd_execute,
+                    self._execute_args("WF-20260101-malformed"),
+                    base,
+                )
+            self.assertEqual(code, EXIT_CONFLICT)
+            payload = json.loads(out)
+            self.assertEqual(payload["status"], "error")
+            self.assertEqual(payload["reason"], "invalid_execution_profile_ledger")
+            self.assertEqual(payload["exit_code"], EXIT_CONFLICT)
+            self.assertEqual(payload["work_id"], "WF-20260101-malformed")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            run_dir = self._run(base, "WF-20260101-conflict", RunStatus.EXECUTING)
+            progress = run_dir / "execution" / "progress.md"
+            progress.write_text(
+                progress.read_text(encoding="utf-8").replace(
+                    "- [ ] PLAN-TASK-001",
+                    "Execution Profile: fast\n\n- [ ] PLAN-TASK-001",
+                ),
+                encoding="utf-8",
+            )
+            with patch.dict(os.environ, {"R2P_JSON": "1"}):
+                out, code = self._capture(
+                    ash._cmd_execute,
+                    self._execute_args("WF-20260101-conflict", profile="strict"),
+                    base,
+                )
+            self.assertEqual(code, EXIT_CONFLICT)
+            payload = json.loads(out)
+            self.assertEqual(payload["status"], "error")
+            self.assertEqual(payload["reason"], "execution_profile_conflict")
+            self.assertEqual(payload["effective_profile"], "fast")
+            self.assertEqual(payload["requested_profile"], "strict")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            self._run(base, "WF-20260101-decision", RunStatus.EXECUTING)
+            with patch.dict(os.environ, {"R2P_JSON": "1"}):
+                out, code = self._capture(
+                    ash._cmd_execute,
+                    self._execute_args(
+                        "WF-20260101-decision", profile="fast", confirm=True
+                    ),
+                    base,
+                )
+            self.assertEqual(code, EXIT_CONFLICT)
+            payload = json.loads(out)
+            self.assertEqual(payload["status"], "error")
+            self.assertEqual(payload["reason"], "profile_decision_on_executing_run")
+            self.assertEqual(payload["exit_code"], EXIT_CONFLICT)
 
     def test_execute_profile_invalid_argument_combinations_fail_before_mutation(self):
         import tempfile
@@ -2453,6 +2820,38 @@ class TestExecuteShortcutAndRouting(unittest.TestCase):
             self.assertIn(f"plan: {run_dir / '07-plan.md'}\n", out)
             self.assertIn(f"ledger: {run_dir / 'execution' / 'progress.md'}\n", out)
             self.assertIn("r2p-archive --work-id WF-20260101-exec", out)
+
+    def test_execute_resume_bootstraps_missing_metrics_for_legacy_ledger(self):
+        import tempfile
+        from pathlib import Path
+        from tools.workflow_cli import agent_shortcuts as ash
+        from tools.workflow_cli.models import RunStatus
+        from tools.workflow_cli.execution_metrics import parse_metrics
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            work_id = "WF-20260101-missing-metrics"
+            run_dir = self._run(base, work_id, RunStatus.EXECUTING)
+            (run_dir / "execution" / "metrics.md").unlink()
+
+            out, code = self._capture(
+                ash._cmd_execute,
+                argparse.Namespace(work_id=work_id),
+                base,
+            )
+
+            self.assertEqual(code, 0)
+            self.assertIn("stop: resume_execution", out)
+            parsed = parse_metrics(
+                (run_dir / "execution" / "metrics.md").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertFalse(parsed.header["instrumentation_complete"])
+            self.assertEqual(
+                parsed.header["bootstrap_gap"],
+                "legacy_metrics_start_task_001",
+            )
 
     def test_execute_resume_rejects_symlinked_run_dir(self):
         import tempfile, argparse

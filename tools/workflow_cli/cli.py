@@ -82,11 +82,14 @@ from tools.workflow_cli.markdown import (
     strip_nonsemantic_markdown,
 )
 from tools.workflow_cli.execution_metrics import (
+    START_TRANSACTION_OWNER,
     MetricsFormatError,
     MetricsInputError,
+    PlanNotFoundError,
     PrerequisiteError,
     RepresentativeSamplesError,
     _canonical_json,
+    acknowledge_metrics_completion,
     append_metrics_invocation,
     bootstrap_self_hosted_metrics,
     check_prerequisite,
@@ -677,6 +680,151 @@ def _copy_reopen_regular_file(source: Path, destination: Path) -> bool:
     return True
 
 
+def _reopen_lineage_root(work_id: str, reopen_lineage: str | None = None) -> str:
+    """Return the stable root persisted by reopen, with legacy derivation."""
+    if reopen_lineage:
+        explicit = re.match(r"^lineage_root: ([^;]+); ", reopen_lineage)
+        if explicit:
+            return str(WorkId(explicit.group(1)))
+        legacy_parent = re.match(r"^reopened_from: ([^@]+)@", reopen_lineage)
+        if legacy_parent:
+            parent = str(WorkId(legacy_parent.group(1)))
+            suffix_match = re.match(r"^WF-\d{8}-.+?-r([1-9][0-9]*)$", work_id)
+            if suffix_match:
+                suffix = int(suffix_match.group(1))
+                for root in (parent, re.sub(r"-r[1-9][0-9]*$", "", parent)):
+                    try:
+                        if str(_reopen_candidate_work_id(root, suffix)) == work_id:
+                            return root
+                    except ValueError:
+                        continue
+            return parent
+    return work_id
+
+
+def _active_reopen_lineage_runs(
+    base_path: Path,
+    source_id: str,
+    source_lineage: str | None = None,
+) -> list[str]:
+    """Return other non-terminal active-workspace runs in the source lineage."""
+    workspace = base_path / ".req-to-plan"
+    if not workspace.is_dir():
+        return []
+    root = _reopen_lineage_root(source_id, source_lineage)
+    lineage_names = {root}
+    for suffix in range(1, 100):
+        try:
+            lineage_names.add(str(_reopen_candidate_work_id(root, suffix)))
+        except ValueError:
+            continue
+    conflicts: list[str] = []
+    for candidate in sorted(workspace.iterdir(), key=lambda path: path.name):
+        if candidate.name == source_id or candidate.name not in lineage_names:
+            continue
+        record, _, _ = _load_run(candidate.name, base_path)
+        if record.status not in {
+            RunStatus.CLOSED_AT_PLAN_CHECKPOINT,
+            RunStatus.ARCHIVED,
+        }:
+            conflicts.append(candidate.name)
+    return conflicts
+
+
+def _prepare_archive_destination(base_path: Path, work_id: str) -> Path:
+    archive_dir = base_path / ".req-to-plan" / "archive" / work_id
+    if archive_dir.exists():
+        print_and_exit(
+            format_error(
+                f"Archive target already exists: {archive_dir}",
+                exit_code=EXIT_CONFLICT,
+            ),
+            EXIT_CONFLICT,
+        )
+    _ensure_workspace_gitignore_or_exit(base_path)
+    _reject_symlink_or_exit(
+        archive_dir.parent,
+        f"Archive parent is a symlink: {archive_dir.parent}",
+    )
+    archive_dir.parent.mkdir(parents=True, exist_ok=True)
+    return archive_dir
+
+
+def _validate_execution_residue(run_dir: Path) -> bool:
+    """Return whether owned execution residue exists; reject unsafe shapes."""
+    owner_path = run_dir / START_TRANSACTION_OWNER
+    try:
+        owner_stat = owner_path.lstat()
+    except FileNotFoundError:
+        owner_exists = False
+    except OSError as exc:
+        print_and_exit(
+            format_error(
+                f"Unsafe execution residue: cannot inspect {owner_path.name}: {exc}",
+                exit_code=EXIT_CONFLICT,
+            ),
+            EXIT_CONFLICT,
+        )
+    else:
+        if not stat.S_ISREG(owner_stat.st_mode):
+            print_and_exit(
+                format_error(
+                    "Unsafe execution residue: transaction owner is not a real "
+                    "file. Resolve the unsafe path before archiving.",
+                    exit_code=EXIT_CONFLICT,
+                ),
+                EXIT_CONFLICT,
+            )
+        owner_exists = True
+
+    execution_path = run_dir / "execution"
+    try:
+        execution_stat = execution_path.lstat()
+    except FileNotFoundError:
+        return owner_exists
+    except OSError as exc:
+        print_and_exit(
+            format_error(
+                f"Unsafe execution residue: cannot inspect {execution_path.name}: {exc}",
+                exit_code=EXIT_CONFLICT,
+            ),
+            EXIT_CONFLICT,
+        )
+    if not stat.S_ISDIR(execution_stat.st_mode):
+        print_and_exit(
+            format_error(
+                "Unsafe execution residue: execution is not a real directory. "
+                "Resolve the unsafe path before archiving.",
+                exit_code=EXIT_CONFLICT,
+            ),
+            EXIT_CONFLICT,
+        )
+    return True
+
+
+def _move_run_to_archive(
+    base_path: Path,
+    record,
+    run_dir: Path,
+    archive_dir: Path,
+) -> tuple[object, Path]:
+    """Move one validated run to archive and persist its terminal record."""
+    archived_record = update_run_status(record, RunStatus.ARCHIVED)
+    shutil.move(str(run_dir), str(archive_dir))
+    try:
+        RunStateManager(archive_dir).save(archived_record)
+    except Exception:
+        if archive_dir.exists() and not run_dir.exists():
+            shutil.move(str(archive_dir), str(run_dir))
+        raise
+    commit_requirement_dir(
+        base_path,
+        str(archived_record.work_id),
+        f"chore(r2p): archive {archived_record.work_id}",
+    )
+    return archived_record, archive_dir
+
+
 def _cmd_run_reopen(args):
     source_id = str(_validate_work_id(args.from_id))
     target_stage = _parse_reopen_stage(args.stage)
@@ -706,14 +854,33 @@ def _cmd_run_reopen(args):
             EXIT_CONFLICT,
         )
 
+    base_path = args.base_path or Path.cwd()
+    lineage_root = _reopen_lineage_root(
+        source_id, source_record.reopen_lineage
+    )
+    active_lineage_runs = _active_reopen_lineage_runs(
+        base_path, source_id, source_record.reopen_lineage
+    )
+    if active_lineage_runs:
+        print_and_exit(
+            format_error(
+                "An active reopened run already exists in this lineage; "
+                "continue it or abandon it explicitly before reopening again.",
+                details=active_lineage_runs,
+                exit_code=EXIT_CONFLICT,
+            ),
+            EXIT_CONFLICT,
+        )
+    _validate_execution_residue(source_dir)
+    source_archive_dir = _prepare_archive_destination(base_path, source_id)
+
     # Determine new work_id suffix: -r1, -r2, etc.
-    base = source_id
+    base = lineage_root
     suffix = 1
-    # Remove existing -rN suffix from base if present
-    m = re.match(r"^(WF-\d{8}-.+?)-r(\d+)$", source_id)
-    if m:
-        base = m.group(1)
-        suffix = int(m.group(2)) + 1
+    # Only a run carrying lineage metadata owns a generated -rN suffix.
+    m = re.match(r"^WF-\d{8}-.+?-r(\d+)$", source_id)
+    if source_record.reopen_lineage and m:
+        suffix = int(m.group(1)) + 1
 
     new_work_id = None
     new_run_dir = None
@@ -771,8 +938,18 @@ def _cmd_run_reopen(args):
             if source_record.status == RunStatus.EXECUTING
             else "plan_checkpoint"
         )
-        new_record.reopen_lineage = f"reopened_from: {source_id}@{source_phase} reason: {args.reason}"
+        new_record.reopen_lineage = (
+            f"lineage_root: {lineage_root}; "
+            f"reopened_from: {source_id}@{source_phase} reason: {args.reason}"
+        )
         new_record.current_stage = target_stage
+        update_resume_context(
+            new_record,
+            last_operation="reopen_run",
+            next_operation="produce_stage_artifact",
+            active_item=target_stage.value,
+            reason=args.reason,
+        )
 
         # Copy approved checkpoints before target stage
         for cp in source_record.approved_checkpoints:
@@ -813,24 +990,24 @@ def _cmd_run_reopen(args):
             shutil.rmtree(new_run_dir, ignore_errors=True)
         raise
 
-    if source_record.status == RunStatus.EXECUTING:
-        try:
-            source_record = update_run_status(source_record, RunStatus.CLOSED_AT_PLAN_CHECKPOINT)
-        except ValueError as e:
-            print_and_exit(format_error(str(e), exit_code=EXIT_CONFLICT), EXIT_CONFLICT)
-        source_record.current_stage = Stage.CLOSED
-        update_resume_context(
+    update_resume_context(
+        source_record,
+        last_operation="reopen_superseded",
+        next_operation=f"continue_reopened_run:{new_work_id}",
+        reason=f"superseded_by:{new_work_id}",
+    )
+    try:
+        _, source_archive_dir = _move_run_to_archive(
+            base_path,
             source_record,
-            last_operation="reopen_from_execution",
-            next_operation=f"continue_reopened_run:{new_work_id}",
+            source_dir,
+            source_archive_dir,
         )
-        try:
-            source_mgr.save(source_record)
-        except Exception:
-            # Roll back the just-created new run so no orphan is left and the
-            # source stays consistently EXECUTING.
-            shutil.rmtree(new_run_dir, ignore_errors=True)
-            raise
+    except Exception:
+        # The child is not authoritative until its source has been archived.
+        # Roll it back so a retry cannot leave two active lineage members.
+        shutil.rmtree(new_run_dir, ignore_errors=True)
+        raise
 
     print_and_exit(
         format_success(
@@ -839,6 +1016,7 @@ def _cmd_run_reopen(args):
                 "source_work_id": source_id,
                 "target_stage": target_stage.value,
                 "run_dir": str(new_run_dir),
+                "source_archived_to": str(source_archive_dir),
             },
             message=f"Run reopened as {new_work_id}",
         ),
@@ -846,8 +1024,69 @@ def _cmd_run_reopen(args):
     )
 
 
+_ABANDONABLE_RUN_STATUSES = {
+    RunStatus.ACTIVE_STAGE_DRAFT,
+    RunStatus.ENTRY_GATE_FAILED,
+    RunStatus.QUALITY_GATE_FAILED,
+    RunStatus.READY_FOR_CHECKPOINT_REVIEW,
+    RunStatus.CHECKPOINT_REVIEW,
+    RunStatus.CHECKPOINT_CHANGES_REQUESTED,
+    RunStatus.UPSTREAM_GAP_ROUTING,
+    RunStatus.CHECKPOINT_APPROVED,
+    RunStatus.NEXT_STAGE,
+}
+
+
+def _cmd_run_abandon(args):
+    if not args.reason.strip() or _has_line_break(args.reason):
+        print_and_exit(
+            format_error(
+                "--reason must be one non-blank line",
+                exit_code=EXIT_CLI_ERR,
+            ),
+            EXIT_CLI_ERR,
+        )
+    record, _, run_dir = _load_run(args.work_id, args.base_path)
+    if record.status not in _ABANDONABLE_RUN_STATUSES:
+        print_and_exit(
+            format_error(
+                f"Cannot abandon run in status {record.status.value!r}; "
+                "use r2p-archive for closed or executing runs",
+                exit_code=EXIT_CONFLICT,
+            ),
+            EXIT_CONFLICT,
+        )
+    base = args.base_path or Path.cwd()
+    _validate_execution_residue(run_dir)
+    archive_dir = _prepare_archive_destination(base, str(record.work_id))
+    update_resume_context(
+        record,
+        last_operation="abandon_run",
+        next_operation="none",
+        reason=args.reason,
+    )
+    archived_record, archive_dir = _move_run_to_archive(
+        base,
+        record,
+        run_dir,
+        archive_dir,
+    )
+    print_and_exit(
+        format_success(
+            {
+                "work_id": str(archived_record.work_id),
+                "status": archived_record.status.value,
+                "reason": args.reason,
+                "archived_to": str(archive_dir),
+            },
+            message=f"Run abandoned and archived: {archived_record.work_id}",
+        ),
+        EXIT_OK,
+    )
+
+
 def _cmd_run_archive(args):
-    record, mgr, run_dir = _load_run(args.work_id, args.base_path)
+    record, _, run_dir = _load_run(args.work_id, args.base_path)
     base = args.base_path or Path.cwd()
     archivable = {RunStatus.CLOSED_AT_PLAN_CHECKPOINT, RunStatus.EXECUTING}
     if record.status not in archivable:
@@ -862,39 +1101,17 @@ def _cmd_run_archive(args):
     # 0. Completion gate: an executing run must show every PLAN-TASK done in its
     # ledger before it can be archived. --force overrides (abandoned/superseded run).
     if record.status == RunStatus.CLOSED_AT_PLAN_CHECKPOINT:
-        execution_path = run_dir / "execution"
-        try:
-            execution_stat = execution_path.lstat()
-        except FileNotFoundError:
-            execution_stat = None
-        except OSError as exc:
+        has_execution_residue = _validate_execution_residue(run_dir)
+        if has_execution_residue and not args.force:
             print_and_exit(
                 format_error(
-                    f"Unsafe execution residue: cannot inspect {execution_path.name}: {exc}",
+                    "Closed run has execution residue. Re-run r2p-execute to "
+                    "recover or resume it, or use --force only to archive an "
+                    "intentionally abandoned or superseded run.",
                     exit_code=EXIT_CONFLICT,
                 ),
                 EXIT_CONFLICT,
             )
-        if execution_stat is not None:
-            if not stat.S_ISDIR(execution_stat.st_mode):
-                print_and_exit(
-                    format_error(
-                        "Unsafe execution residue: execution is not a real directory. "
-                        "Resolve the unsafe path before archiving.",
-                        exit_code=EXIT_CONFLICT,
-                    ),
-                    EXIT_CONFLICT,
-                )
-            if not args.force:
-                print_and_exit(
-                    format_error(
-                        "Closed run has execution residue. Re-run r2p-execute to "
-                        "recover or resume it, or use --force only to archive an "
-                        "intentionally abandoned or superseded run.",
-                        exit_code=EXIT_CONFLICT,
-                    ),
-                    EXIT_CONFLICT,
-                )
     elif record.status == RunStatus.EXECUTING and not args.force:
         gate = check_execution_complete(run_dir)
         if not gate.passed:
@@ -918,36 +1135,12 @@ def _cmd_run_archive(args):
                 ),
                 review_gate.exit_code,
             )
-    # 1. Refuse to clobber an existing archived copy before mutating state.
-    archive_dir = base / ".req-to-plan" / "archive" / str(record.work_id)
-    if archive_dir.exists():
-        print_and_exit(
-            format_error(
-                f"Archive target already exists: {archive_dir}",
-                exit_code=EXIT_CONFLICT,
-            ),
-            EXIT_CONFLICT,
-        )
-    # 2. Ensure /archive is ignored before anything lands under it.
-    _ensure_workspace_gitignore_or_exit(base)
-    # 3. Build the archived record, but do not persist it until the move succeeds.
-    try:
-        archived_record = update_run_status(record, RunStatus.ARCHIVED)
-    except ValueError as e:
-        print_and_exit(format_error(str(e), exit_code=EXIT_CONFLICT), EXIT_CONFLICT)
-    _reject_symlink_or_exit(archive_dir.parent, f"Archive parent is a symlink: {archive_dir.parent}")
-    archive_dir.parent.mkdir(parents=True, exist_ok=True)
-    # 4. Move the run dir into the (ignored) archive, then persist ARCHIVED there.
-    shutil.move(str(run_dir), str(archive_dir))
-    try:
-        RunStateManager(archive_dir).save(archived_record)
-    except Exception:
-        if archive_dir.exists() and not run_dir.exists():
-            shutil.move(str(archive_dir), str(run_dir))
-        raise
-    # 5. Commit the removal of the original path (untracks the dir). spec §4.6
-    commit_requirement_dir(
-        base, str(archived_record.work_id), f"chore(r2p): archive {archived_record.work_id}"
+    archive_dir = _prepare_archive_destination(base, str(record.work_id))
+    archived_record, archive_dir = _move_run_to_archive(
+        base,
+        record,
+        run_dir,
+        archive_dir,
     )
     print_and_exit(
         format_success(
@@ -963,6 +1156,19 @@ def _cmd_run_execute_start(args):
     try:
         record = start_execution_transaction(
             (args.base_path or Path.cwd()).resolve(), work_id, args.profile
+        )
+    except PlanNotFoundError:
+        print_and_exit(
+            format_error(
+                f"PLAN not found for run: {work_id}",
+                exit_code=EXIT_NOT_FOUND,
+            ),
+            EXIT_NOT_FOUND,
+        )
+    except FileNotFoundError as exc:
+        print_and_exit(
+            format_error(f"Execution state file missing: {exc.filename or exc}", exit_code=EXIT_CONFLICT),
+            EXIT_CONFLICT,
         )
     except (MetricsFormatError, PrerequisiteError) as exc:
         print_and_exit(
@@ -1084,6 +1290,15 @@ def _cmd_execution_metrics_append(args):
     )
 
 
+def _cmd_execution_metrics_ack(args):
+    _metrics_result_or_exit(
+        acknowledge_metrics_completion,
+        args.base_path or Path.cwd(),
+        _validate_work_id(args.work_id),
+        args.expected_sequence,
+    )
+
+
 def _cmd_execution_metrics_finalize(args):
     _metrics_result_or_exit(
         finalize_metrics,
@@ -1172,7 +1387,12 @@ def _cmd_execution_samples_validate(args):
     except RepresentativeSamplesError as exc:
         if is_json_mode():
             print_and_exit(_canonical_json(exc.result), EXIT_GATE_FAIL)
-        details = [item["message"] for item in exc.result["details"]]
+        details = [
+            f"sample_dir={item.get('sample_dir', 'unavailable')} "
+            f"work_id={item.get('work_id', 'unavailable')} "
+            f"rule={item.get('rule', 'unavailable')}: {item['message']}"
+            for item in exc.result["details"]
+        ]
         print_and_exit(format_error(exc.result["message"], details=details, exit_code=EXIT_GATE_FAIL), EXIT_GATE_FAIL)
     except MetricsFormatError as exc:
         print_and_exit(format_error(str(exc), exit_code=EXIT_CONFLICT), EXIT_CONFLICT)
@@ -2168,6 +2388,15 @@ def _register_run_commands(subparsers):
     p.add_argument("--reason", required=True, help="Reason for reopening")
     p.set_defaults(func=_cmd_run_reopen)
 
+    # run-abandon
+    p = subparsers.add_parser(
+        "run-abandon",
+        help="Explicitly abandon and archive an open workflow draft",
+    )
+    p.add_argument("--work-id", required=True)
+    p.add_argument("--reason", required=True, help="One-line abandonment reason")
+    p.set_defaults(func=_cmd_run_abandon)
+
     # run-archive
     p = subparsers.add_parser("run-archive", help="Archive a closed run out of the active workspace")
     p.add_argument("--work-id", required=True)
@@ -2219,6 +2448,14 @@ def _register_run_commands(subparsers):
     p.add_argument("--work-id", required=True)
     p.add_argument("--record-json", required=True)
     p.set_defaults(func=_cmd_execution_metrics_append)
+
+    p = subparsers.add_parser(
+        "execution-metrics-ack",
+        help="Acknowledge one persisted metrics completion after progress is durable",
+    )
+    p.add_argument("--work-id", required=True)
+    p.add_argument("--expected-sequence", required=True, type=_positive_int)
+    p.set_defaults(func=_cmd_execution_metrics_ack)
 
     p = subparsers.add_parser(
         "execution-metrics-finalize",
@@ -2732,6 +2969,8 @@ def _cmd_context_view(args):
             EXIT_OK,
         )
 
+    if args.with_stats:
+        sys.stdout.write(f"semantic_bytes: {view.semantic_bytes}\n\n")
     sys.stdout.write(view.content)
     sys.exit(EXIT_OK)
 
@@ -2747,6 +2986,10 @@ def _register_context_commands(subparsers):
         "context-view", help="Print the deterministic semantic context view for an executing run"
     )
     p.add_argument("--work-id", required=True)
+    p.add_argument(
+        "--with-stats", action="store_true",
+        help="Prefix human output with aggregate semantic_bytes for role metrics",
+    )
     p.add_argument("--base-path", type=Path, default=argparse.SUPPRESS)
     p.set_defaults(func=_cmd_context_view)
 
