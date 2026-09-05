@@ -1069,7 +1069,7 @@ def _looks_like_managed_bin_script(content: str) -> bool:
         r'(?:'
         r'tools\.workflow_cli\.agent_shortcuts [a-z][a-z0-9-]*'
         r'|tools\.workflow_cli\.install_cli(?: [a-z][a-z0-9-]*)?'
-        r'|tools\.workflow_cli (?:context-view|execution-prerequisite-check|execution-metrics-(?:status|append|ack|finalize))'
+        r'|tools\.workflow_cli (?:context-view|execution-progress|execution-prerequisite-check|execution-metrics-(?:status|append|ack|finalize))'
         r') "\$@"$',
         re.MULTILINE,
     )

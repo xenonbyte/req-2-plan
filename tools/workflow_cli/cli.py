@@ -104,6 +104,8 @@ from tools.workflow_cli.execution_context import (
     UnsafeContextSourceError,
     build_context_view,
 )
+from tools.workflow_cli.execution_progress import record_execution_progress
+from tools.workflow_cli.execution_profile import ExecutionProfileError
 
 
 # ---------------------------------------------------------------------------
@@ -1207,6 +1209,18 @@ def _cmd_execution_prerequisite_check(args):
         ),
         EXIT_OK,
     )
+
+
+def _cmd_execution_progress(args):
+    try:
+        result = record_execution_progress(
+            args.base_path or Path.cwd(), _validate_work_id(args.work_id),
+            args.action, args.expected_sequence, status=args.status,
+            head=args.head, reason=args.reason,
+        )
+    except (ExecutionProfileError, MetricsFormatError, OSError) as exc:
+        print_and_exit(format_error(str(exc), exit_code=EXIT_CONFLICT), EXIT_CONFLICT)
+    print_and_exit(format_success(result, message=result["result"]), EXIT_OK)
 
 
 def _cmd_execution_metrics_bootstrap(args):
@@ -2415,6 +2429,15 @@ def _register_run_commands(subparsers):
     p.add_argument("--work-id", required=True)
     p.add_argument("--profile", choices=["strict", "fast"], default="strict")
     p.set_defaults(func=_cmd_run_execute_start)
+
+    p = subparsers.add_parser("execution-progress", help="Atomically record a role dispatch or completion in progress.md")
+    p.add_argument("action", choices=["begin", "complete", "escalate", "recover"])
+    p.add_argument("--work-id", required=True)
+    p.add_argument("--expected-sequence", type=_positive_int, required=True)
+    p.add_argument("--status", choices=["complete", "approved", "changes_requested", "blocked"])
+    p.add_argument("--head")
+    p.add_argument("--reason")
+    p.set_defaults(func=_cmd_execution_progress)
 
     p = subparsers.add_parser(
         "execution-prerequisite-check",

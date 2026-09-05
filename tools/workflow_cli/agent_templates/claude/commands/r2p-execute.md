@@ -32,55 +32,82 @@ when role timing is unavailable, `started_at`, `ended_at`, and `elapsed_seconds`
 must be one consistent `unavailable` triple. Do not estimate Token counts from
 bytes or elapsed time.
 
+### Authoritative role checkpoints
+
+`execution/progress.md` owns `Execution Journal`, ordered `Execution Role` results,
+and at most one `Execution Inflight` dispatch. Before **every** role call, run
+`{{R2P_BIN_DIR}}/r2p-progress begin --work-id <id> --expected-sequence <role_sequence>`.
+Use sequence 1 only when no journal exists; otherwise use the sequence returned
+by `r2p-execute` or the preceding progress command. The command returns
+`next_role`, `task`, `fix_wave`, `role_base`, `review_ranges`, and `report_path`.
+Dispatch exactly that role. `recover_role_result` means a dispatch is already
+recorded: recover its report/result, never automatically redispatch it. If the
+report is missing, establish whether that invocation is still running before
+any retry; an unknown live invocation is a blocker.
+
+After the role report is durable, record the result with
+`{{R2P_BIN_DIR}}/r2p-progress complete --work-id <id> --expected-sequence <role_sequence> --status <canonical-status> --head <full-current-HEAD>`.
+The CLI atomically records the role result and required structural task-marker,
+checkbox, and fast-final migration changes. It does not generate report prose.
+An exact retry returns `already_applied`; a conflicting result is rejected.
+Task review concerns must be resolved before submitting `approved`; final
+approval additionally requires the durable Approved final-review verdict.
+
+For a fast risk discovered by a role, add `--reason <single-line>` to that
+completion. At an idle fast boundary use
+`{{R2P_BIN_DIR}}/r2p-progress escalate --work-id <id> --expected-sequence <role_sequence> --reason <single-line>`.
+Both persist `Profile Escalation: fast -> strict` and return the correct next
+role, including when the primary final reviewer found the concern. The actual
+dispatch profile is fixed in each role checkpoint. Each original task range
+remains fixed; later task/final fixer commits have separate journal ranges.
+Build a task diff from **every returned `review_ranges` entry**, using
+`git diff -U10 <range-base> <range-head>` separately for each range, with range
+labels in the diff scratch file. Tests still execute against current HEAD.
+
 ### Structured metrics protocol
 
 The controller never hand-edits `execution/metrics.md` and never emits ad-hoc
-`## Role` prose. At start and on every resume, call
+`## Role` prose. At start/resume, call
 `{{R2P_BIN_DIR}}/r2p-metrics-status --work-id <id>` and inspect
-`next_sequence`, `metrics_finalized`, and `pending_completion`. A pending record
-is the durable recovery handoff: if its phase is `prepared`, retry its exact
-persisted record; if its phase is `appended`, do not redispatch the role—finish
-the corresponding progress/report/final-verdict transition, then call
+`next_sequence`, `metrics_finalized`, and `pending_completion`.
+The metrics `expected_sequence` is separate from the authoritative `role_sequence`.
+Capture measured UTC/monotonic role times and the role's measured context/verification
+values. After its authoritative progress completion succeeds, call
+`{{R2P_BIN_DIR}}/r2p-metrics-append --work-id <id> --record-json '<json>'`, then
 `{{R2P_BIN_DIR}}/r2p-metrics-ack --work-id <id> --expected-sequence <N>`.
-If that authoritative transition is already durable, do not write it a second time;
-acknowledge the pending sequence directly.
-Before dispatching each role, capture
-its measured UTC start and monotonic start. After the role returns and its
-compact report exists, capture the measured end/duration, map the role result to
-the canonical status, and call
-`{{R2P_BIN_DIR}}/r2p-metrics-append --work-id <id> --record-json '<json>'`
-before dispatching another role or advancing a progress checkbox. The CLI first
-persists the exact retry request in its pending-completion journal, then appends
-metrics. After the role's required authoritative transition is durable, call
-`{{R2P_BIN_DIR}}/r2p-metrics-ack`; roles with no progress transition are acknowledged
-immediately. The JSON
-record carries `expected_sequence`, role/task/model/times, context mode/bytes,
-ordered verification records, report path, status, concerns, fix wave, and only
-platform-measured Token values. The CLI derives the heading, byte kind,
-verification total, and report bytes. `report_path` must name the current role/task artifact: `execution/task-N-report.md` for implementers/fixers, `execution/task-N-review.md` for task reviewers/re-reviewers, and `execution/final-review-report.md` for every final role.
+The record carries role/task/model/times, context mode/bytes, ordered verification
+records, report path, status, concerns, fix wave, and only measured Token values.
+The CLI derives sequence headings, byte kind, verification total, and report bytes.
+`report_path` must name `execution/task-N-report.md` for implementers/fixers,
+`execution/task-N-review.md` for task reviewers/re-reviewers, or
+`execution/final-review-report.md` for final roles.
 
-Canonical status mapping is exact: implementer/fixer/final-fixer DONE or
-DONE_WITH_CONCERNS maps to `complete`; task/final reviewer APPROVED maps to
-`approved`; CHANGES_REQUESTED maps to `changes_requested`; NEEDS_CONTEXT or
-BLOCKED maps to `blocked`. A blocked append is terminal for a validator-eligible
-profile-aware metrics sequence: stop the execution loop and surface the blocker rather
-than dispatching a later role that the CLI must reject.
+DONE/DONE_WITH_CONCERNS maps to `complete`, APPROVED to `approved`,
+CHANGES_REQUESTED to `changes_requested`, and NEEDS_CONTEXT/BLOCKED to `blocked`.
+A blocked result pauses until the blocker is resolved, then retries the same
+role/task/fix-wave with a fresh invocation and a new sequence. Preserve blocked
+attempts, TDD red results, failed checks, and successful retries in order; never
+remove observations to obtain an all-green history. Final approval requires the
+latest outcome of each final verification command to pass, including a full suite.
 
-Metrics record every actual dispatch. Strict preserves `N implementers + N task reviewers + final reviewer`. Fast records exactly its `N implementers + primary final reviewer` minimum and never synthesizes task-reviewer blocks. Final fixer/re-reviewer waves and task recovery waves each get their truthful role/fix-wave blocks.
+A pending observation is a retry journal, not the execution-state authority.
+For `prepared`, retry its exact persisted `record_json`; for `appended`, acknowledge
+it after checking the corresponding progress transition is durable. If it is
+already durable, do not write it a second time. Never redispatch a role because
+its observation is pending. Reuse exact requests on conflicts and accept
+`already_applied`. Surface any metrics failure as `metrics_incomplete`; preserve
+the evidence and continue from authoritative progress when it is valid. Metrics
+failures never choose a role or block a progress transition or archive gate.
+Missing observations cannot be finalized as complete measured history.
 
-On retry or resume, call status first and reuse the exact `record_json` in
-`pending_completion`; accept `already_applied`,
-never count headings or invent a new sequence. A busy/conflict result is retried
-only with that exact request. Never redispatch a role whose completion is
-pending acknowledgment.
-After the appended final reviewer or final re-reviewer is approved, make the
-last unfenced final verdict `Verdict: Approved`, finish any fast ledger
-migration, acknowledge that final-role sequence, and only then call
+Metrics record every actual dispatch and retry. Strict preserves its
+`N implementers + N task reviewers + final reviewer` minimum. Fast uses
+`N implementers + primary final reviewer` and never synthesizes task-reviewer blocks;
+actual recovery reviews/fix waves are recorded when performed. After final approval,
+acknowledge pending observations and call
 `{{R2P_BIN_DIR}}/r2p-metrics-finalize --work-id <id> --expected-invocation-count <N>`.
-The CLI alone derives `change_shape` and atomically closes finalization. Surface
-any metrics command failure as `metrics_incomplete`; do not rewrite progress or
-final-review truth. Metrics remain non-authoritative, so this does not add a new
-archive gate and the unchanged `r2p-archive` flow follows finalization.
+The CLI derives `change_shape`; incomplete metrics remain observable and do not
+add a new archive gate.
 
 ## In-Place Execution (no branch)
 
@@ -160,7 +187,7 @@ history, and prior task reports/reviews.
 
 ### Ledger Ownership and Sibling Escalation
 
-Default position/ownership derives from the ledger's `PLAN-TASK-NNN <title>` list (stay within the brief's Files/Steps; treat every other listed task ID as owned elsewhere). The full `07-plan.md` is not handed to subagents; whole-plan reasoning stays with the controller's Pre-flight read. Resolve an unclear sibling boundary before dispatch, optionally by handing a specific `r2p-task-brief --task <M>` brief. If a dispatched role still returns `NEEDS_CONTEXT` / `BLOCKED`, append its terminal blocked record and stop — never re-dispatch, hand over the whole PLAN, or guess from the title.
+Default position/ownership derives from the ledger's `PLAN-TASK-NNN <title>` list (stay within the brief's Files/Steps; treat every other listed task ID as owned elsewhere). The full `07-plan.md` is not handed to subagents; whole-plan reasoning stays with the controller's Pre-flight read. Resolve an unclear sibling boundary before dispatch, optionally by handing a specific `r2p-task-brief --task <M>` brief. If a dispatched role still returns `NEEDS_CONTEXT` / `BLOCKED`, persist its blocked role result and observation, then stop until the context is resolved. Resume that role using the authoritative checkpoint; never hand over the whole PLAN or guess from a title.
 
 ### Path Delivery and Fail-Closed Preflight
 
@@ -213,7 +240,7 @@ Run `{{R2P_BIN_DIR}}/r2p-task-brief --work-id <work-id> --task <N>` (where `<N>`
 
 **Per-task boundary clean-tree invariant**: before dispatching this task's implementer, run `git status --short -- ':!.req-to-plan'`; a non-clean code tree at a task boundary is a boundary-invariant violation (the previous task or fix wave left uncommitted work): stop and resolve before continuing. This per-task check is distinct from the Task 1 check in `## In-Place Execution`, which additionally negotiates pre-existing user dirty work.
 
-Record BASE (`git rev-parse HEAD`) BEFORE dispatching the implementer — **never use `HEAD~1`** as BASE (it drops all but the last commit of a multi-commit task). For Task 1, this BASE is also `<execution-base-commit>` for the final whole-branch review. Persist the Task 1 BASE immediately in tracked execution state by reusing the transaction-created `execution/progress.md`, which already contains exactly one `Execution BASE:` line populated as `Execution BASE: <execution-base-commit>`; verify it equals the Task 1 BASE. Never append a second BASE line. A mismatch blocks dispatch.
+Record BASE (`git rev-parse HEAD`) BEFORE dispatching the implementer — **never use `HEAD~1`** as BASE (it drops all but the last commit of a multi-commit task). For Task 1, this BASE is also `<execution-base-commit>` for the final whole-branch review. Persist the Task 1 BASE immediately in durable execution state by reusing the transaction-created `execution/progress.md`, which already contains exactly one `Execution BASE:` line populated as `Execution BASE: <execution-base-commit>`; verify it equals the Task 1 BASE. Never append a second BASE line. A mismatch blocks dispatch.
 
 Provide the subagent with:
 - The `brief_path` returned by `r2p-task-brief` (not pasted task text from `07-plan.md`)
@@ -242,8 +269,8 @@ The implementer must:
 
 ### 3. Handle implementer status
 
-- **DONE / DONE_WITH_CONCERNS**: proceed to review
-- **NEEDS_CONTEXT**: append the terminal blocked metrics record, stop, and surface the missing information
+- **DONE / DONE_WITH_CONCERNS**: record authoritative completion, then follow the returned `next_role`
+- **NEEDS_CONTEXT**: record blocked progress and metrics, stop, and surface the missing information; resume the same role after resolution
 - **BLOCKED**: assess the blocker; provide context, use a more capable model, or break the task into smaller pieces; escalate to the human if the plan itself is wrong
 
 ### 4. Ambiguity ladder
@@ -255,7 +282,7 @@ The fresh implementer subagent verifies-then-removes ambiguity by evidence and T
 ### 5. Write diff and dispatch task-reviewer
 
 After the implementer reports DONE, strict does the following:
-1. `mkdir -p .req-to-plan/<work-id>/logs` then `git diff -U10 <base-commit> HEAD > .req-to-plan/<work-id>/logs/task-N-diff.md`. Keep diff scratch under `logs/` (gitignored), never under `execution/`.
+1. `mkdir -p .req-to-plan/<work-id>/logs`, then write each returned `review_ranges` diff, with its range label, to `logs/task-N-diff.md`. Keep diff scratch under `logs/` (gitignored), never under `execution/`. A recovered task uses its original range plus its own repair ranges; later sibling work is not part of that task diff.
 2. Dispatch a task-reviewer subagent with:
    - **Run `{{R2P_BIN_DIR}}/r2p-context-view --work-id <id> --with-stats` yourself before acting**: the reviewer checks `Spec References` IDs against the live semantic spec, not the IDs alone
    - The `brief_path` returned by `r2p-task-brief` (not pasted task text). The reviewer reads `Spec References` from the task brief. Do not pass separate `Spec References`.
@@ -283,22 +310,20 @@ Task fixers use the implementer inline return contract, including `semantic_byte
 
 - Dispatch fix subagents for Critical and Important findings. Pass the `review_report_path` to the fix subagent with the instruction: Fix all Critical and Important findings in the review report. Do not paste the finding bodies into the dispatch. Also hand: **Run `{{R2P_BIN_DIR}}/r2p-context-view --work-id <id> --with-stats` yourself before acting**, the task brief path (`brief_path`), and the current task diff path (`logs/task-N-diff.md`).
 - For task fix wave N, the fixer appends one exact unfenced `Fix Wave N` marker to `execution/task-N-report.md`, and the task re-reviewer appends the same exact marker to `execution/task-N-review.md`, before their metrics records are appended. These two persistent markers are the evidence for the matching `fixer` and `task_rereviewer` metrics blocks.
-- After each fix wave: the fix subagent commits only its intentionally-changed files (staging only files changed for this task, exactly as the §2 implementer does); then the loop regenerates `logs/task-N-diff.md` from the task's BASE to `HEAD` (`git diff -U10 <base-commit> HEAD > .req-to-plan/<work-id>/logs/task-N-diff.md`) — commit-then-diff — before re-dispatching the task-reviewer. The re-review must not run against an uncommitted working tree.
+- After each fix wave: the fix subagent commits only its intentionally-changed files (staging only files changed for this task, exactly as the §2 implementer does); then record its authoritative completion and regenerate `logs/task-N-diff.md` from every returned `review_ranges` entry — commit-then-diff — before dispatching the returned task re-reviewer. The re-review must not run against an uncommitted working tree.
 - Re-dispatch the task-reviewer after each fix wave with the refreshed diff path; every re-review uses the same inline return contract, including `verification_records` and `verification_total_seconds`
 - Before flipping the checkbox, adjudicate each reviewer "cannot verify from diff" warning. When `concerns` lists ⚠️ items, open `review_report_path` to adjudicate each; a `none`/empty `concerns` means no ⚠️ remains to adjudicate. Record one line per finding in `execution/progress.md`:
   - `Resolved: <finding>` — clears the warning; a `Resolved:` claim about unchanged code must cite implementation and test evidence
   - `Gap: <finding>` — blocks the flip and cannot be overridden on the controller's own judgment
   - `Unresolved: <finding>` — blocks the flip and cannot be overridden on the controller's own judgment
 - Minor findings not fixed within a task: record each as `Minor: <finding>` in `execution/progress.md` and carry them into the final whole-branch review input rather than dropping them per task.
-- Only when the task-reviewer is clean (both spec ✅ and quality Approved, and `Verification` satisfied, and no open `Gap:` or `Unresolved:` entries), update the matching `execution/progress.md` checkbox from `- [ ] PLAN-TASK-NNN ...` to `- [x] PLAN-TASK-NNN ...` and append one line:
-  `Task N: complete (commits <base7>..<head7>, review clean)`
-  Then acknowledge that approved reviewer metrics sequence with `{{R2P_BIN_DIR}}/r2p-metrics-ack`; the next role is not dispatched until the acknowledgment succeeds.
+- Only when the task-reviewer is clean (spec and quality approved, Verification satisfied, no open `Gap:` or `Unresolved:`), record `r2p-progress complete --status approved`. It atomically sets `- [x] PLAN-TASK-NNN ...` and `Task N: complete (commits <base7>..<head7>, review clean)` while preserving the original implementation range. Record and acknowledge the reviewer observation afterward. The next role comes from progress, independently of metrics acknowledgment.
 
 ### Fast task completion and strict recovery
 
-In unelevated fast, after the implementer commit and verification are recorded, keep the checkbox `[ ]` and append exactly `Task N: implemented (commits <base7>..<head7>, verification recorded)`, then acknowledge the implementer metrics sequence. Do not create an empty review or synthetic reviewer metrics block. Continue from the first untouched task using Task 1's full Execution BASE or the prior legal complete/implemented marker head—never `HEAD~1`.
+In unelevated fast, successful `r2p-progress complete` records `Task N: implemented (commits <base7>..<head7>, verification recorded)` with checkbox `[ ]`. Record/acknowledge the implementer observation; use the returned next role without synthetic task reviews. In strict, the same command persists the implemented role checkpoint and selects its task-reviewer without checking the task complete.
 
-Escalate fast to strict by appending exactly one `Profile Escalation: fast -> strict (reason: <single-line>)` when verification fails, files are unexpected, a concern or unresolved `⚠️ DEFER` appears, the BASE/HEAD/marker chain is invalid, an upstream ambiguity appears, or work is shared/core/security/migration/dependency/config. Review every implemented range in task order, including real task reviewer/fixer/re-reviewer metrics, convert each clean range to `[x]` plus `review clean`, then continue the ordinary strict loop from the first untouched task. Never return to fast.
+Escalate fast on unresolved verification failure, unexpected files, concerns or unresolved `⚠️ DEFER`, upstream ambiguity, or shared/core/security/migration/dependency/config work. Use the progress command's `--reason` completion or idle `escalate` action. Review every implemented range in task order, including truthful reviewer/fixer/re-reviewer metrics, then continue strict from the first untouched task. This also applies after a primary final reviewer has already run. An invalid BASE/HEAD chain is a blocker: recover the recorded result/range before any further dispatch; escalating does not authorize guessing a range. Never return to fast.
 
 **Continuous execution**: execute all PLAN-TASKs without pausing to ask "should I continue?" between tasks. Stop only on: unresolvable `BLOCKED`, upstream defect requiring repair, dirty-tree block, or all tasks complete. `Verification` requires fresh command output; "should pass" / "looks correct" is not evidence; do not report `DONE` without it.
 
@@ -325,13 +350,13 @@ After the review settles, write `execution/final-review.md` recording the review
 - `Verdict: Approved` when the review is clean
 - `Verdict: Changes Requested` while findings remain
 - After any final-review fix wave, regenerate `.req-to-plan/<work-id>/logs/final-diff.md` from the same `<execution-base-commit>` to current `HEAD`, re-run the full verification suite, and re-dispatch the final whole-branch reviewer with the refreshed diff and output
-- After the final fixer commits, preserve one continuous ledger boundary: replace the highest-numbered task marker's HEAD with the new current HEAD while retaining that marker's original BASE. Do not append another task marker or another `Execution BASE:` line. Apply this boundary update before strict finalization and, for fast, before the BASE→HEAD revalidation/migration below.
+- After the final fixer commits, record its progress completion. The role journal owns that separate repair range; all original task ranges remain fixed. The complete journal must connect Execution BASE to current HEAD before final approval.
 - Repeat until the post-fix reviewer is clean; only then append `Verdict: Approved` as the final unfenced verdict (the gate reads the last one)
 - Once the Approved verdict and any fast ledger migration are durable, acknowledge the approved final-role metrics sequence before metrics finalization.
 
 Note: `r2p-archive` refuses to archive an executing run unless this file's current verdict is `Verdict: Approved`.
 
-After clean fast approval, revalidate the full Execution BASE→HEAD marker chain and task count, build the complete migrated ledger in memory, replace every implemented marker with `Task N: complete (commits <base7>..<head7>, final review clean)`, set every corresponding checkbox to `[x]`, and perform one atomic full-file `atomic_write_text` of `execution/progress.md`. Never write task completion piecemeal. Then write the final Approved verdict, acknowledge the final-role metrics sequence, finalize metrics, and archive through the unchanged gates.
+After clean fast approval, write the final Approved verdict and complete the final role through `r2p-progress`. It revalidates the full Execution BASE→HEAD journal and task count, migrates every implemented marker to `final review clean`, and checks all tasks in one atomic full-file update. Then record/acknowledge the final observation, finalize metrics, and use the unchanged archive gates.
 
 ## Auto-Archive on Completion
 
@@ -347,17 +372,18 @@ Commits are already on the **current branch**. `push` and PR creation still requ
 
 ## Durable Progress
 
-Track progress in `execution/progress.md` (not only in todos). On resume, use the `first_actionable_task` returned by `r2p-execute`; skip every earlier reviewed-complete or fast-implemented task.
-On resume, read `execution/progress.md` before the final review and reuse its `Execution BASE:` line as `<execution-base-commit>`. Do not recalculate it from `HEAD` or from the latest task range. If the line is missing, stop and ask the human for the original Task 1 BASE instead of inferring a range.
+Track progress in `execution/progress.md` (not only in todos). On resume, use `next_role`, `task`, `fix_wave`, `role_sequence`, and `review_ranges` returned by `r2p-execute`. `first_actionable_task` is task-level context, not permission to rerun an implementer. A completed final role selects archive, without repeating final review because metrics are missing.
 
-**Mid-task interruption recovery**: on resume, select only the integer `first_actionable_task` returned by the precondition output; `none` means proceed to final review. To reconstruct the in-progress task's BASE, use existing on-disk markers: Task 1 uses the ledger `Execution BASE:` line; Task N (N > 1) uses the `head7` of the immediately preceding legal `Task N-1: complete (...)` or `Task N-1: implemented (...)` marker. If the selected task already has an implemented marker after fast→strict escalation, regenerate `logs/task-N-diff.md` from that BASE to HEAD and dispatch its task-reviewer idempotently. If it is untouched, dispatch its implementer normally. If the required boundary cannot be resolved, stop and ask the human for the BASE. Never derive task selection from checkbox state, infer a range from `HEAD~1`, or capture a fresh BASE from HEAD on resume.
+For `recover_role_result`, recover the existing report, complete its exact recorded role sequence, and then retry/acknowledge observations. If the authoritative transition is already durable, do not write it a second time. A crash after an implementer commit but before completion retains its original dispatch BASE; never capture a fresh task BASE from HEAD or use `HEAD~1`.
+
+Legacy runs without a journal adopt it at their next clean role boundary via `r2p-progress begin --expected-sequence 1`. If an implementer has already committed before adoption, its canonical report must record DONE and the exact original commit range. Run `r2p-progress recover --work-id <id> --expected-sequence 1 --status complete --head <full-current-HEAD>` to adopt that evidence and select review. Missing or conflicting evidence blocks recovery; ask for the original result, never infer a task range from Git history. Preserve the ledger's full `Execution BASE:` for final review.
 
 ## Error Reference
 
 | Condition | Action |
 |---|---|
 | Status not `closed_at_plan_checkpoint` or `executing` | Stop: `plan_not_ready` |
-| Implementer returns `NEEDS_CONTEXT` | Append the terminal blocked metrics record, stop, and surface the missing information |
+| Implementer returns `NEEDS_CONTEXT` | Record blocked progress and metrics, stop, then resume the same role after resolution |
 | Upstream PLAN/SPEC/DESIGN defect found | Stop: ask the human to reopen/repair the upstream stage |
 | Platform lacks subagent capability | Fail explicitly (subagents are a hard prerequisite) |
 

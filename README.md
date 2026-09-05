@@ -271,10 +271,27 @@ The loop is Spec-Driven Development (SDD):
 
 Progress is tracked durably in `execution/progress.md`. If a run is interrupted,
 just run `r2p-execute` again on the same run: it detects the `executing` status,
-returns the parsed first actionable task, and never re-runs reviewed-complete or
-fast-implemented work or restarts from scratch. If it cannot reconstruct where
-the interrupted task began,
-it stops and asks you rather than guessing.
+returns the journal's next role, task, fix wave, and sequence. Before every role,
+the controller calls `r2p-progress begin --work-id <id> --expected-sequence <N>`.
+After its report is durable, it calls `r2p-progress complete --work-id <id>
+--expected-sequence <N> --status <status> --head <full-HEAD>`. The CLI atomically
+records structural role results and task markers; agents still write all report
+prose. A recorded dispatch returns `recover_role_result` on resume: recover its
+result instead of automatically redispatching a possibly live invocation.
+Completed strict implementation resumes at its reviewer even if metrics are absent.
+
+Original implementation ranges stay fixed. Task and final repair commits have
+separate journal ranges, so reviewing an earlier fast task cannot absorb later
+sibling commits or invalidate their boundaries. Task reviews use each returned
+`review_ranges` entry; final review covers Execution BASE through current HEAD.
+Fast risk findings use completion's `--reason`, or `r2p-progress escalate` at an
+idle boundary, to enter strict recovery even after the primary final review.
+
+Old ledgers can start a journal at a validated task boundary. An old implementer
+that already committed without a checkpoint requires `r2p-progress recover`
+with its exact current HEAD and a durable report explicitly recording DONE and
+the original BASE..HEAD. Missing or contradictory evidence blocks recovery;
+the CLI does not infer ownership from commit history.
 
 **Execution metrics (Phase 0).**
 
@@ -286,21 +303,29 @@ refuses that residue unless the operator explicitly forces abandonment.
 Controllers must treat that document as CLI-owned structural data: call
 `r2p-metrics-status --work-id <id>` at start/resume,
 `r2p-metrics-append --work-id <id> --record-json '<json>'` after every completed
-role report, `r2p-metrics-ack --work-id <id> --expected-sequence <N>` after its
-authoritative progress/report transition is durable, and
+authoritative progress transition, then
+`r2p-metrics-ack --work-id <id> --expected-sequence <N>`, and
 `r2p-metrics-finalize --work-id <id>` with
 `--expected-invocation-count <N>` after the approved final review. Append derives
 the canonical sequence, context byte kind, verification total, and report byte
 count. Before publishing metrics it persists the exact request as
 `pending_completion.record_json`; status returns that request after interruption so the
-controller completes the transition instead of redispatching the role. Recovery
-checks whether the authoritative transition is already durable before
-writing it, so a crash between that transition and acknowledgment cannot create
-duplicate task markers or verdict records. Finalize derives `change_shape` from
+controller retries the observation without redispatching the role. The metrics
+sequence is independent of the progress role sequence. An appended observation
+is acknowledged once its authoritative transition is durable; exact progress
+completion retries cannot create duplicate task markers or verdict records.
+Finalize checks journal coverage for fully journaled runs, derives `change_shape` from
 the Execution BASE diff and atomically sets
 `metrics_finalized: true`. Exact retries and acknowledgments are idempotent. A
 metrics failure is reported as `metrics_incomplete`; metrics remain
-non-authoritative and do not add an archive gate.
+non-authoritative and do not block valid progress, resume, or archive. Missing
+observations cannot be finalized as complete measured history.
+
+BLOCKED/NEEDS_CONTEXT pauses the current role. After resolving its blocker,
+retry that same role/task/fix wave with a new sequence; preserve both observations.
+TDD red results and failed verification attempts remain in the history. Final
+approval requires the latest result of every final verification command to pass,
+including a full suite; historical failures do not invalidate successful recovery.
 
 An upgraded profileless `EXECUTING` run that predates `metrics.md` is resumed as
 strict and receives an explicit incomplete-instrumentation bootstrap header at
@@ -344,8 +369,9 @@ every PLAN task, and returns
 with `--confirm-fast-eligible` or rejecting with
 `--reject-fast-ineligible --reason <single-line>`. Fast records implemented
 markers without checking tasks complete, uses the final reviewer as the primary
-task-by-task reviewer, and escalates one-way to strict on any verification,
-file-boundary, concern, ambiguity, marker-chain, or shared/core risk. Final full
+task-by-task reviewer, and escalates one-way to strict on unresolved verification,
+file-boundary, concern, ambiguity, or shared/core risk. An invalid marker chain
+blocks dispatch rather than guessing a range. Final full
 suite, `Verdict: Approved`, checkbox completion, metrics finalization, and
 archive gates remain unchanged.
 

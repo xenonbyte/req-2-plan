@@ -291,7 +291,7 @@ def _parse_invocation(raw: dict[str, str], number: int, header: dict[str, Any]) 
         records: list[dict[str, str]] | str = "unavailable"
     else:
         records = _parse_canonical_array(records_raw, "verification_records_json")
-        if not records:
+        if not records and status != "blocked":
             raise MetricsFormatError("successful invocation requires verification records")
         if total_raw == "unavailable":
             raise MetricsFormatError("verification total is required")
@@ -877,9 +877,6 @@ def start_execution_transaction(base_path: Path, work_id: WorkId, profile: str) 
                 existing_marker = _read_text_at(
                     execution_fd, ".start-transaction.json", missing_ok=True
                 )
-                metrics_text = _read_text_at(
-                    execution_fd, "metrics.md", missing_ok=True
-                )
                 assert progress is not None
                 semantic_progress = "\n".join(
                     line
@@ -921,6 +918,24 @@ def start_execution_transaction(base_path: Path, work_id: WorkId, profile: str) 
                     or rows != [task_id for task_id, _ in anchors]
                 ):
                     raise MetricsFormatError("executing progress does not match start contract")
+                # Once start is durable, observations are never a resume gate.
+                # An old profileless run may receive its observable bootstrap,
+                # but status/append own reporting any metrics defect thereafter.
+                if owner_marker is None and existing_marker is None:
+                    if legacy_profileless_strict:
+                        legacy_ledger = parse_execution_ledger(
+                            progress, tuple(task_id for task_id, _ in anchors)
+                        )
+                        try:
+                            if _read_text_at(execution_fd, "metrics.md", missing_ok=True) is None:
+                                _publish_new_text_at(execution_fd, "metrics.md", _legacy_metrics_text(
+                                    work_id, len(anchors), legacy_ledger.first_actionable_task(),
+                                ))
+                        except (MetricsFormatError, OSError):
+                            import warnings
+                            warnings.warn("metrics_incomplete: legacy observation bootstrap failed", RuntimeWarning)
+                    return record
+                metrics_text = _read_text_at(execution_fd, "metrics.md", missing_ok=True)
                 if metrics_text is None:
                     if not legacy_profileless_strict:
                         raise MetricsFormatError("executing run metrics.md is missing")
@@ -1166,7 +1181,16 @@ def check_prerequisite_v1(base_path: Path, work_id: WorkId, task: int) -> dict[s
     if ledger.first_actionable_task() != task:
         raise PrerequisiteError("task is not the lowest unchecked task")
     head = _execution_base(Path(base_path))
-    if task == 1:
+    if ledger.journal is not None:
+        try:
+            validate_ledger_commit_chain(
+                ledger, current_head=head,
+                resolve_commit=lambda value: _resolve_commit_or_full(Path(base_path), value),
+                is_ancestor=lambda older, newer: _is_ancestor(Path(base_path), older, newer),
+            )
+        except ExecutionProfileError as exc:
+            raise PrerequisiteError(str(exc)) from exc
+    elif task == 1:
         historical_self_host_profile = (
             str(work_id) == SELF_HOSTED_WORK_ID and bool(profile_lines)
         )
@@ -1756,7 +1780,7 @@ def _canonical_append_fields(
             except MetricsFormatError as exc:
                 raise MetricsInputError(str(exc)) from exc
         records_json = _canonical_json(records)
-        total_text = format(total, "f")
+        total_text = format(total, ".6f")
     context_kind = {
         "direct_acs": "declared_payload_bytes",
         "semantic_view": "semantic_payload_bytes",
@@ -1808,16 +1832,16 @@ def _validate_strict_role_sequence(
     start_task: int = 1,
     start_at_final: bool = False,
     require_complete: bool = False,
+    implemented_through: int = 0,
 ) -> None:
     if start_task < 1 or start_task > task_count:
         raise MetricsFormatError("role sequence start task is outside PLAN bounds")
     task = start_task
-    expected_role = "final_reviewer" if start_at_final else "implementer"
+    expected_role = "final_reviewer" if start_at_final else "task_reviewer" if start_task <= implemented_through else "implementer"
     expected_wave = 0
-    blocked = False
     complete = False
     for invocation in invocations:
-        if blocked or complete:
+        if complete:
             raise MetricsFormatError("illegal role transition after terminal role status")
         if (
             invocation["role"] != expected_role
@@ -1827,7 +1851,6 @@ def _validate_strict_role_sequence(
             raise MetricsFormatError("illegal role transition")
         status = invocation["status"]
         if status == "blocked":
-            blocked = True
             continue
         if expected_role == "implementer":
             expected_role = "task_reviewer"
@@ -1837,7 +1860,7 @@ def _validate_strict_role_sequence(
                     expected_role = "final_reviewer"
                 else:
                     task += 1
-                    expected_role = "implementer"
+                    expected_role = "task_reviewer" if task <= implemented_through else "implementer"
                 expected_wave = 0
             else:
                 expected_role = "fixer"
@@ -1850,7 +1873,7 @@ def _validate_strict_role_sequence(
                     expected_role = "final_reviewer"
                 else:
                     task += 1
-                    expected_role = "implementer"
+                    expected_role = "task_reviewer" if task <= implemented_through else "implementer"
                 expected_wave = 0
             else:
                 expected_role = "fixer"
@@ -1882,10 +1905,9 @@ def _validate_fast_role_sequence(
     task = 1
     expected_role = "implementer"
     expected_wave = 0
-    blocked = False
     complete = False
     for invocation in invocations:
-        if blocked or complete:
+        if complete:
             raise MetricsFormatError("illegal role transition after terminal role status")
         expected_task: int | str = (
             "final" if expected_role.startswith("final_") else task
@@ -1898,7 +1920,6 @@ def _validate_fast_role_sequence(
             raise MetricsFormatError("illegal role transition")
         status = invocation["status"]
         if status == "blocked":
-            blocked = True
             continue
         if expected_role == "implementer":
             if task == task_count:
@@ -1929,97 +1950,27 @@ def _validate_escalated_fast_role_sequence(
     *,
     require_complete: bool = False,
 ) -> None:
-    recovery_tasks = 0
-    for invocation in invocations:
-        if (
-            invocation["role"] == "implementer"
-            and invocation["task"] == recovery_tasks + 1
-            and invocation["fix_wave"] == 0
-        ):
-            recovery_tasks += 1
-            if invocation["status"] == "blocked":
-                if recovery_tasks != len(invocations):
-                    raise MetricsFormatError(
-                        "illegal role transition after terminal role status"
-                    )
-                if require_complete:
-                    raise MetricsFormatError("role sequence is incomplete")
-                return
-            continue
-        break
-
-    remaining = invocations[recovery_tasks:]
-    if recovery_tasks:
-        task = 1
-        expected_role = "task_reviewer"
-    else:
-        task = 1
-        expected_role = "implementer"
-    expected_wave = 0
-    blocked = False
-    complete = False
-    for invocation in remaining:
-        if blocked or complete:
-            raise MetricsFormatError("illegal role transition after terminal role status")
-        expected_task: int | str = (
-            "final" if expected_role.startswith("final_") else task
-        )
-        if (
-            invocation["role"] != expected_role
-            or invocation["task"] != expected_task
-            or invocation["fix_wave"] != expected_wave
-        ):
-            raise MetricsFormatError("illegal role transition")
-        status = invocation["status"]
-        if status == "blocked":
-            blocked = True
-            continue
-        if expected_role == "implementer":
-            expected_role = "task_reviewer"
-        elif expected_role == "task_reviewer":
-            if status == "approved":
-                if task == task_count:
-                    expected_role = "final_reviewer"
-                else:
-                    task += 1
-                    expected_role = (
-                        "task_reviewer" if task <= recovery_tasks else "implementer"
-                    )
-                expected_wave = 0
-            else:
-                expected_role = "fixer"
-                expected_wave = 1
-        elif expected_role == "fixer":
-            expected_role = "task_rereviewer"
-        elif expected_role == "task_rereviewer":
-            if status == "approved":
-                if task == task_count:
-                    expected_role = "final_reviewer"
-                else:
-                    task += 1
-                    expected_role = (
-                        "task_reviewer" if task <= recovery_tasks else "implementer"
-                    )
-                expected_wave = 0
-            else:
-                expected_role = "fixer"
-                expected_wave += 1
-        elif expected_role == "final_reviewer":
-            if status == "approved":
-                complete = True
-            else:
-                expected_role = "final_fixer"
-                expected_wave = 1
-        elif expected_role == "final_fixer":
-            expected_role = "final_rereviewer"
-        elif expected_role == "final_rereviewer":
-            if status == "approved":
-                complete = True
-            else:
-                expected_role = "final_fixer"
-                expected_wave += 1
-    if require_complete and not complete:
-        raise MetricsFormatError("role sequence is incomplete")
+    # Preserve every real fast dispatch, including a primary final review and
+    # its repair attempts, before the first strict task review. A retry of a
+    # blocked role remains at that role rather than ending the entire run.
+    boundary = next((
+        index for index, invocation in enumerate(invocations)
+        if invocation["role"] == "task_reviewer" and invocation["task"] == 1
+    ), len(invocations))
+    prefix = invocations[:boundary]
+    _validate_fast_role_sequence(prefix, task_count)
+    implemented = {
+        invocation["task"] for invocation in prefix
+        if invocation["role"] == "implementer" and invocation["status"] == "complete"
+    }
+    if boundary == len(invocations):
+        if require_complete:
+            raise MetricsFormatError("escalated role sequence is incomplete")
+        return
+    _validate_strict_role_sequence(
+        invocations[boundary:], task_count,
+        implemented_through=len(implemented), require_complete=require_complete,
+    )
 
 
 def validate_role_sequence(
@@ -2271,7 +2222,7 @@ def acknowledge_metrics_completion(
             )
         if (
             role == "implementer"
-            and parsed.header["profile"] == "fast"
+            and ledger.effective_profile is ExecutionProfile.FAST
             and status == "complete"
         ):
             marker = ledger.marker_for(task)
@@ -2320,6 +2271,18 @@ def _current_verdict(text: str) -> str | None:
     return value
 
 
+def _passing_final_verification(invocation: dict[str, Any]) -> bool:
+    """Historical red runs are observations; the final command outcomes must pass."""
+    records = invocation["verification_records"]
+    if records == "unavailable" or not records or invocation["status"] != "approved":
+        return False
+    latest = {record["command"]: record for record in records}
+    return (
+        all(record["status"] == "passed" for record in latest.values())
+        and any(record["scope"] == "full_suite" for record in latest.values())
+    )
+
+
 def _parse_finalization_ledger(
     progress: str, task_count: int
 ) -> ParsedExecutionLedger:
@@ -2361,6 +2324,13 @@ def _require_finalization_truth(
     task_count = parsed.header["task_count"]
     if not self_host_partial:
         execution_ledger = _parse_finalization_ledger(progress, task_count)
+        journal = execution_ledger.journal
+        if journal and journal.base == execution_ledger.execution_base and not legacy_partial:
+            fields = ("role", "task", "status", "fix_wave")
+            expected_roles = [tuple(event[field] for field in fields) for event in journal.events]
+            observed_roles = [tuple(invocation[field] for field in fields) for invocation in parsed.invocations]
+            if journal.inflight or expected_roles != observed_roles:
+                raise MetricsFormatError("metrics_incomplete: observations do not cover the authoritative role journal")
     semantic_progress = strip_html_comments_outside_fences(progress)
     progress_lines = [
         line for line, _, _ in unfenced_markdown_lines(semantic_progress)
@@ -2418,25 +2388,15 @@ def _require_finalization_truth(
                 require_complete=True,
             )
         final_role = parsed.invocations[-1]
-        final_records = final_role["verification_records"]
         if (
             final_role["role"] not in {"final_reviewer", "final_rereviewer"}
-            or final_role["status"] != "approved"
-            or final_records == "unavailable"
-            or not any(
-                record["scope"] == "full_suite" and record["status"] == "passed"
-                for record in final_records
-            )
+            or not _passing_final_verification(final_role)
         ):
             raise MetricsFormatError(
                 "approved final role requires passed full-suite verification evidence"
             )
     for invocation in parsed.invocations:
-        if not self_host_partial:
-            records = invocation["verification_records"]
-            if records == "unavailable" or any(item["status"] != "passed" for item in records):
-                raise MetricsFormatError("all role verification evidence must be measured and passed")
-        if invocation["status"] == "blocked":
+        if self_host_partial and invocation["status"] == "blocked":
             raise MetricsFormatError("blocked role evidence cannot be finalized")
     _require_clean_code_worktree(base_path)
     if not self_host_partial:
@@ -2778,10 +2738,9 @@ def _summarize_sample(
     for invocation in parsed.invocations:
         role = invocation["role"]
         role_counts[role] += 1
-        if invocation["status"] == "blocked":
-            completed_statuses_ok = False
         if isinstance(invocation["task"], int):
-            task_roles[(role, invocation["task"])] = task_roles.get((role, invocation["task"]), 0) + 1
+            if invocation["status"] != "blocked":
+                task_roles[(role, invocation["task"])] = task_roles.get((role, invocation["task"]), 0) + 1
             if role in {"task_reviewer", "task_rereviewer"}:
                 task_review_statuses.setdefault(invocation["task"], []).append(invocation["status"])
         elif role in {"final_reviewer", "final_rereviewer"}:
@@ -2809,17 +2768,12 @@ def _summarize_sample(
         verification_elapsed += record_total
         if record_total != Decimal(invocation["verification_total_seconds"]):
             totals_ok = False
-        has_passing_full_suite = False
         for item in records:
-            if item["status"] != "passed":
-                measured_ok = False
             if item["scope"] == "full_suite":
                 full_suite_count += 1
                 full_suite_duration += Decimal(item["elapsed_seconds"])
-                if item["status"] == "passed":
-                    has_passing_full_suite = True
         if role in {"final_reviewer", "final_rereviewer"}:
-            final_role_full_suite.append(has_passing_full_suite)
+            final_role_full_suite.append(_passing_final_verification(invocation))
         context = contexts[invocation["context_mode"]]
         context["invocation_count"] += 1
         context["context_bytes"] += invocation["context_bytes"]
@@ -2831,8 +2785,8 @@ def _summarize_sample(
             total_tokens += int(invocation["total_tokens"])
 
     coverage_ok = (
-        role_counts["implementer"] == header["task_count"]
-        and role_counts["task_reviewer"] == header["task_count"]
+        role_counts["implementer"] >= header["task_count"]
+        and role_counts["task_reviewer"] >= header["task_count"]
         and role_counts["final_reviewer"] >= 1
         and all(task_roles.get(("implementer", task)) == 1 for task in range(1, header["task_count"] + 1))
         and all(task_roles.get(("task_reviewer", task)) == 1 for task in range(1, header["task_count"] + 1))
@@ -2886,7 +2840,7 @@ def _summarize_sample(
             "approved terminal final reviewer requires passed full-suite evidence",
         ))
     if not measured_ok:
-        failures.append(_sample_failure(canonical, str(work_id), "measured_fields_complete", "required measured timing or verification fields are unavailable/failed"))
+        failures.append(_sample_failure(canonical, str(work_id), "measured_fields_complete", "required measured timing or verification fields are unavailable"))
     if not totals_ok:
         failures.append(_sample_failure(canonical, str(work_id), "metrics_totals_consistent", "verification totals are inconsistent"))
     if failures:

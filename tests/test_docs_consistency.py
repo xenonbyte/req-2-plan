@@ -133,8 +133,8 @@ REQUIRED_TEMPLATE_HARDENING_TOKENS = [
     "a non-clean code tree at a task boundary",
     # EXE-3: brief-contents lists Files + reviewer compares changed files vs the brief's Files
     "against the brief's `Files`",
-    # EXE-4: derive-on-resume BASE reconstruction from the controller-selected task.
-    "reconstruct the in-progress task's BASE",
+    # EXE-4: resume uses the persisted dispatch BASE, never guessed Git history.
+    "retains its original dispatch BASE",
     # EXE-5: compact, audit-preserving report sections; no Context-Read checklist
     "Status",
     "Commit Range",
@@ -452,11 +452,11 @@ class TestExecuteTemplateContent(unittest.TestCase):
             "tools/workflow_cli/agent_templates/codex/skills/r2p-execute/SKILL.md",
         ]
         required = (
-            "Persist the Task 1 BASE immediately in tracked execution state",
+            "Persist the Task 1 BASE immediately in durable execution state",
             "`execution/progress.md`",
             "`Execution BASE: <execution-base-commit>`",
-            "On resume, read `execution/progress.md`",
-            "Do not recalculate it from `HEAD`",
+            "Preserve the ledger's full `Execution BASE:` for final review",
+            "never capture a fresh task BASE from HEAD",
         )
         missing = []
         for rel in surfaces:
@@ -502,7 +502,7 @@ class TestExecuteTemplateContent(unittest.TestCase):
             "subagents read but do not write to the ledger",
             "r2p-task-brief --task",
             "NEEDS_CONTEXT",
-            "regenerates `logs/task-N-diff.md`",
+            "regenerate `logs/task-N-diff.md` from every returned `review_ranges` entry",
             "Pass the `review_report_path` to the fix subagent",
             "Fix all Critical and Important findings in the review report",
             "Status",
@@ -616,12 +616,12 @@ class TestExecuteTemplateContent(unittest.TestCase):
             "Profile Escalation: fast -> strict",
             "never synthesizes task-reviewer blocks",
             "primary per-task review",
-            "atomic_write_text",
+            "atomic full-file update",
             "final review clean",
             "--require-version 2",
             "prerequisite semantics version 1",
             "already contains exactly one `Execution BASE:`",
-            "replace the highest-numbered task marker's HEAD",
+            "original task ranges",
             "verification_records` and `verification_total_seconds",
             "first_actionable_task",
             "started_at`, `ended_at`, and `elapsed_seconds`",
@@ -641,6 +641,12 @@ class TestExecuteTemplateContent(unittest.TestCase):
                 text,
                 f"{surface}: resume must use the parsed first actionable task",
             )
+            for obsolete in (
+                "replace the highest-numbered task marker's HEAD",
+                "A blocked append is terminal",
+                "next role is not dispatched until the acknowledgment succeeds",
+            ):
+                self.assertNotIn(obsolete, text, f"{surface}: obsolete recovery rule")
             reviewer_section = _get_role_section(text, "### 5.")
             self.assertIn(
                 "`verification_records` and `verification_total_seconds`",
@@ -665,6 +671,27 @@ class TestExecuteTemplateContent(unittest.TestCase):
         ):
             self.assertIn(token, claude)
 
+    def test_execute_surfaces_share_authoritative_progress_protocol(self):
+        copies = []
+        for surface in EXECUTE_SURFACES:
+            text = (REPO_ROOT / surface).read_text(encoding="utf-8")
+            section = _get_role_section(text, "### Authoritative role checkpoints")
+            for token in (
+                "r2p-progress begin", "r2p-progress complete", "r2p-progress escalate",
+                "role_sequence", "recover_role_result", "review_ranges", "Execution Inflight",
+                "never automatically redispatch", "later task/final fixer commits",
+            ):
+                self.assertIn(token, section, f"{surface}: missing progress protocol")
+            copies.append(section)
+            metrics = _get_role_section(text, "### Structured metrics protocol")
+            for token in (
+                "After its authoritative progress completion succeeds",
+                "TDD red", "retries the same", "latest outcome",
+                "Missing observations cannot be finalized", "never choose a role",
+            ):
+                self.assertIn(token, metrics, f"{surface}: observation authority drift")
+        self.assertEqual(copies[0], copies[1])
+
     def test_gemini_execute_toml_mentions_in_place_and_archive(self):
         text = (REPO_ROOT / "tools/workflow_cli/agent_templates/gemini/commands/r2p-execute.toml").read_text(encoding="utf-8")
         self.assertIn("r2p-execute", text)
@@ -678,6 +705,10 @@ class TestExecuteTemplateContent(unittest.TestCase):
         self.assertIn("r2p-context-view", text)
         self.assertIn("r2p-metrics-status", text)
         self.assertIn("r2p-metrics-append", text)
+        self.assertIn("r2p-metrics-ack", text)
+        self.assertIn("r2p-progress begin", text)
+        self.assertIn("r2p-progress complete", text)
+        self.assertIn("recover_role_result", text)
         self.assertIn("r2p-metrics-finalize", text)
         self.assertIn("metrics_incomplete", text)
 

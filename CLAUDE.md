@@ -92,6 +92,8 @@ doubt, read the module, not this file.
 | `workspace.py` | Neutral `.req-to-plan/` workspace helpers (imports neither `cli.py` nor `agent_shortcuts.py`): owns the workspace `.gitignore` and the path-limited git-commit primitive used by run-close (add) and run-archive (remove) |
 | `trace.py` | Derived trace model and closure checks |
 | `gates.py` | Entry/quality gates, execution completion gate, forced-review checks |
+| `execution_profile.py` / `execution_journal.py` | Profile/marker grammar, immutable implementation ranges, ordered authoritative role checkpoints and commit-chain validation |
+| `execution_progress.py` / `execution_metrics.py` | Atomic progress begin/complete/recover/escalate transitions; separate non-authoritative metrics observation, acknowledgment, and sample validation |
 | `output.py` | Exit code constants, output formatting, JSON mode |
 | `cli.py` / `agent_shortcuts.py` | Argparse router; `r2p-*` shortcut surface + active-pointer helpers |
 | `install.py` / `install_cli.py` | Install/uninstall/status service + manifest safety; lifecycle binary |
@@ -161,11 +163,21 @@ has an active reopened run.
 - **Execution recovery protocol**: start publishes the run-level
   `.execution-start-transaction.json` owner atomically before creating
   `execution/` and removes it only after rollback or durable `EXECUTING` state.
-  Metrics append persists an exact pending completion before `metrics.md`; the
-  controller advances authoritative progress/artifacts and clears it through
-  `r2p-metrics-ack`. Missing metrics on a profileless legacy `EXECUTING` ledger
-  are initialized as an observable incomplete-instrumentation gap, never
-  fabricated as complete telemetry.
+  `r2p-progress begin/complete` atomically records dispatch/results in
+  `progress.md`; resume selects the journal's role, never metrics. Original
+  implementation ranges remain immutable; task/final repair ranges live
+  separately in the journal. An inflight role is recovered, not automatically
+  redispatched. Legacy committed implementation needs explicit DONE/BASE..HEAD
+  report evidence for `r2p-progress recover`. After authoritative completion,
+  metrics append persists its exact retry request and clears it through
+  `r2p-metrics-ack`; metrics failures never gate valid progress/resume/archive.
+  Missing legacy observations remain an explicit incomplete-instrumentation gap.
+- **Execution retries and verification**: BLOCKED retries the same role/task/fix
+  wave after resolution with a new sequence. Preserve TDD red and failed
+  historical checks; final verification requires the latest result of every
+  command to pass, including a full suite. Fully journaled metrics finalization
+  requires exact role coverage. Fast escalation can occur after its primary
+  final review; later strict implementation follows the effective profile.
 - **Execution protocol boundaries**: classify every PLAN task's prerequisite
   before start; fast requires valid v2 throughout. Prerequisite reads pin run
   directories and verify the embedded work ID. Roles use

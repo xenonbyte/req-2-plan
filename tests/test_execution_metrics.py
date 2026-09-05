@@ -593,7 +593,7 @@ def test_fast_metrics_append_uses_profile_sequence_without_synthetic_task_review
     ]
 
 
-def test_fast_metrics_append_rejects_task_reviewer_and_terminal_continuation(tmp_path):
+def test_fast_metrics_append_rejects_task_reviewer_and_skipping_blocked_role(tmp_path):
     work_id, _, execution, _ = _started_metrics_run(tmp_path, profile="fast")
     append_metrics_invocation(
         tmp_path,
@@ -632,7 +632,7 @@ def test_fast_metrics_append_rejects_task_reviewer_and_terminal_continuation(tmp
             status="blocked",
         ),
     )
-    with pytest.raises(MetricsFormatError, match="terminal"):
+    with pytest.raises(MetricsFormatError, match="role transition"):
         append_metrics_invocation(
             blocked_root,
             work_id,
@@ -2326,7 +2326,7 @@ def test_representative_samples_treat_unavailable_timing_as_unmeasured(tmp_path)
         "sample_dir": str(one),
         "work_id": "WF-20260830-time-one",
         "rule": "measured_fields_complete",
-        "message": "required measured timing or verification fields are unavailable/failed",
+        "message": "required measured timing or verification fields are unavailable",
     }]
 
 
@@ -3129,7 +3129,7 @@ def test_bootstrap_temp_cleanup_crash_retries_without_deleting_final(tmp_path, m
     assert len(list(execution.glob(".metrics-bootstrap.*.tmp"))) == 1
 
 
-def test_executing_start_rejects_metrics_for_another_work_id_without_mutation(tmp_path):
+def test_executing_start_preserves_bad_metrics_without_making_them_a_resume_gate(tmp_path):
     work_id, run_dir = _closed_run(tmp_path, "WF-20260830-start-identity")
     start_execution_transaction(tmp_path, work_id, "strict")
     execution = run_dir / "execution"
@@ -3147,8 +3147,9 @@ def test_executing_start_rejects_metrics_for_another_work_id_without_mutation(tm
     progress_before = progress_path.read_bytes()
     run_before = (run_dir / "run.md").read_bytes()
 
+    start_execution_transaction(tmp_path, work_id, "strict")
     with pytest.raises(MetricsFormatError, match="work_id|identity"):
-        start_execution_transaction(tmp_path, work_id, "strict")
+        read_metrics_status(tmp_path, work_id)
 
     assert metrics_path.read_bytes() == metrics_before
     assert progress_path.read_bytes() == progress_before
@@ -3213,6 +3214,37 @@ def test_sample_validator_accepts_matching_report_review_fix_wave_blocks(tmp_pat
 
     assert result["samples"][0]["role_counts"]["fixer"] == 1
     assert result["samples"][0]["role_counts"]["task_rereviewer"] == 1
+
+
+def test_sample_validation_and_consumer_preserve_retries_and_historical_red(review_workspace):
+    from tools.workflow_cli.execution_profile import consume_accepted_sample_evidence
+    base = review_workspace
+    one = _archived_sample(base, "WF-20260905-retried-one", 1, "single_module_code")
+    two = _archived_sample(base, "WF-20260905-retried-two", 2, "single_module_code")
+    three = _archived_sample(base, "WF-20260905-retried-three", 1, "docs_only")
+    metrics = one / "execution/metrics.md"
+    header = metrics.read_text().split("## Invocation 1", 1)[0]
+    blocks = [
+        _invocation("implementer", 1, 1).replace("status: complete", "status: blocked"),
+        _invocation("implementer", 1, 2).replace('"status":"passed"', '"status":"failed"'),
+        _invocation("task_reviewer", 1, 3).replace("status: approved", "status: changes_requested"),
+        _invocation("fixer", 1, 4, fix_wave=1).replace("status: complete", "status: blocked"),
+        _invocation("fixer", 1, 5, fix_wave=1),
+        _invocation("task_rereviewer", 1, 6, fix_wave=1),
+        _invocation("final_reviewer", "final", 7),
+    ]
+    metrics.write_text(header + "\n".join(blocks))
+    for name in ("task-1-report.md", "task-1-review.md"):
+        (one / "execution" / name).write_text("Fix Wave 1\n")
+    result = validate_representative_samples((one, two, three))
+    counts = result["samples"][0]["role_counts"]
+    assert counts["implementer"] == 2
+    assert counts["fixer"] == 2
+    assert counts["task_rereviewer"] == 1
+    assert result["samples"][0]["full_suite"]["count"] == 7
+    evidence = base / "accepted-test-evidence.json"
+    evidence.write_text(json.dumps(result))
+    assert consume_accepted_sample_evidence(evidence) == result
 
 
 @pytest.mark.parametrize(
@@ -3664,12 +3696,10 @@ def test_sample_validator_rejects_blocked_role_in_completed_fix_chain(
     with pytest.raises(RepresentativeSamplesError) as error:
         validate_representative_samples((one, two, three))
 
-    assert error.value.result["details"] == [{
-        "sample_dir": str(one),
-        "work_id": "WF-20260830-blocked-one",
-        "rule": "role_coverage",
-        "message": "required role invocation did not complete successfully",
-    }]
+    details = error.value.result["details"]
+    assert details
+    assert all(item["sample_dir"] == str(one) and item["rule"] == "role_coverage" for item in details)
+    assert any("role sequence" in item["message"] or "did not complete" in item["message"] for item in details)
 
 
 def test_start_transaction_missing_directory_fd_capability_is_zero_mutation(tmp_path, monkeypatch):

@@ -29,6 +29,7 @@ from tools.workflow_cli.markdown import (
 )
 from tools.workflow_cli.models import TierBase, TierEstimate, WorkId
 from tools.workflow_cli.stage_schema import PLAN_TASK_FIELD_RE
+from tools.workflow_cli.execution_journal import ExecutionJournal, parse_execution_journal
 
 
 class ExecutionProfile(Enum):
@@ -59,6 +60,7 @@ class ParsedExecutionLedger:
     reviewed_complete: tuple[int, ...]
     implemented: tuple[int, ...]
     untouched: tuple[int, ...]
+    journal: ExecutionJournal | None = None
 
     def marker_for(self, task: int) -> TaskMarker | None:
         return next((marker for marker in self.markers if marker.number == task), None)
@@ -277,6 +279,10 @@ def parse_execution_ledger(
             "unelevated fast complete markers must use final review clean"
         )
 
+    try:
+        journal = parse_execution_journal(text, len(plan_task_ids))
+    except ValueError as exc:
+        raise ExecutionProfileError(str(exc)) from exc
     return ParsedExecutionLedger(
         initial_profile=initial,
         effective_profile=effective,
@@ -286,6 +292,7 @@ def parse_execution_ledger(
         reviewed_complete=tuple(number for number, state in zip(expected_numbers, states) if state == "complete"),
         implemented=tuple(number for number, state in zip(expected_numbers, states) if state == "implemented"),
         untouched=tuple(number for number, state in zip(expected_numbers, states) if state == "untouched"),
+        journal=journal,
     )
 
 
@@ -419,6 +426,7 @@ def validate_ledger_commit_chain(
     current_head: str,
     resolve_commit: Callable[[str], str],
     is_ancestor: Callable[[str, str], bool],
+    allow_inflight: bool = False,
 ) -> None:
     """Check the BASE-to-HEAD chain with caller-supplied Git primitives.
 
@@ -431,7 +439,21 @@ def validate_ledger_commit_chain(
         previous_head = resolve_commit(parsed.execution_base)
         if not _FULL_SHA_RE.fullmatch(previous_head):
             raise ExecutionProfileError("Execution BASE did not resolve to a full SHA")
+        journal_tasks = {
+            event["task"] for event in parsed.journal.events
+            if event["role"] == "implementer"
+        } if parsed.journal else set()
         for marker in parsed.markers:
+            if marker.number in journal_tasks:
+                implementations = [event for event in parsed.journal.events if event["task"] == marker.number and event["role"] == "implementer"]
+                if (
+                    resolve_commit(marker.base) != implementations[0]["base"]
+                    or resolve_commit(marker.head) != implementations[-1]["head"]
+                    or implementations[-1]["status"] != "complete"
+                    or implementations[0]["base"] == implementations[-1]["head"]
+                ):
+                    raise ExecutionProfileError("task marker does not match its implementation journal")
+                continue
             marker_base = resolve_commit(marker.base)
             marker_head = resolve_commit(marker.head)
             if marker_base != previous_head:
@@ -443,6 +465,18 @@ def validate_ledger_commit_chain(
             if not _FULL_SHA_RE.fullmatch(marker_head) or not is_ancestor(previous_head, marker_head):
                 raise ExecutionProfileError("task marker head is not an ordered descendant")
             previous_head = marker_head
+        if parsed.journal:
+            if previous_head != parsed.journal.base:
+                raise ExecutionProfileError("journal BASE does not continue the legacy marker chain")
+            for event in parsed.journal.events:
+                if event["base"] != previous_head or not is_ancestor(previous_head, event["head"]):
+                    raise ExecutionProfileError("role journal commit chain is discontinuous")
+                previous_head = event["head"]
+            if parsed.journal.inflight:
+                if parsed.journal.inflight["base"] != previous_head:
+                    raise ExecutionProfileError("inflight role BASE is not the recorded boundary")
+                if allow_inflight and is_ancestor(previous_head, current_head):
+                    return
     except ExecutionProfileError:
         raise
     except Exception as exc:  # Git adapter errors must fail closed at the pure boundary.
@@ -528,11 +562,11 @@ def _canonical_sample(sample: Any) -> bool:
     ):
         return False
     if (
-        role_counts["implementer"] != sample["task_count"]
-        or role_counts["task_reviewer"] != sample["task_count"]
+        role_counts["implementer"] < sample["task_count"]
+        or role_counts["task_reviewer"] < sample["task_count"]
         or role_counts["final_reviewer"] < 1
-        or role_counts["fixer"] != role_counts["task_rereviewer"]
-        or role_counts["final_fixer"] != role_counts["final_rereviewer"]
+        or (role_counts["fixer"] == 0) != (role_counts["task_rereviewer"] == 0)
+        or (role_counts["final_fixer"] == 0) != (role_counts["final_rereviewer"] == 0)
         or sum(role_counts.values()) != sample["invocation_count"]
     ):
         return False

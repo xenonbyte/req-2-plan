@@ -1772,7 +1772,11 @@ class TestInstallOpencode:
             "Profile Escalation: fast -> strict",
             "never synthesizes task-reviewer blocks",
             "primary per-task review",
-            "atomic_write_text",
+            "atomic full-file update",
+            "r2p-progress begin",
+            "r2p-progress complete",
+            "recover_role_result",
+            "review_ranges",
             "--require-version 2",
         ):
             assert token in content

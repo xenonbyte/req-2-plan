@@ -41,6 +41,7 @@ from tools.workflow_cli.execution_metrics import (
     start_execution_transaction,
 )
 from tools.workflow_cli.markdown import plan_task_anchors, strip_nonsemantic_markdown
+from tools.workflow_cli.execution_progress import resume_execution_progress
 from tools.workflow_cli.workspace import ensure_workspace_gitignore
 
 ACTIVE_POINTER_FILE = ".workflow-active"
@@ -1355,9 +1356,20 @@ def _cmd_execute(ns: argparse.Namespace, base_path: Path) -> None:
                     f"reason: {exc}\n"
                 )
             sys.exit(EXIT_CONFLICT)
+        first_actionable_task = parsed_profile.first_actionable_task()
+        role_state = {}
+        if parsed_profile.journal is not None:
+            try:
+                role_state = resume_execution_progress(base_path, WorkId(work_id))
+            except (ExecutionProfileError, MetricsFormatError, OSError) as exc:
+                if is_json_mode():
+                    print(json.dumps({"status": "error", "reason": "invalid_execution_progress", "exit_code": EXIT_CONFLICT, "message": str(exc)}, indent=2))
+                else:
+                    print(f"blocked: invalid_execution_progress\nreason: {exc}\n")
+                sys.exit(EXIT_CONFLICT)
+            first_actionable_task = role_state["task"] if isinstance(role_state["task"], int) else None
         _ensure_workspace_gitignore_or_exit(base_path, work_id)
         write_active_pointer(base_path, work_id, reason="execute_resume")
-        first_actionable_task = parsed_profile.first_actionable_task()
         if first_actionable_task is None:
             resume_point = "continue at final review; no PLAN task remains actionable"
         else:
@@ -1368,6 +1380,11 @@ def _cmd_execute(ns: argparse.Namespace, base_path: Path) -> None:
         next_step = (
             f"{resume_point}, then r2p-archive --work-id {work_id} when done"
         )
+        if role_state:
+            next_step = (
+                f"{role_state['result']}: {role_state['next_role'] or 'archive'}; "
+                "use the durable role_sequence and review_ranges; metrics do not select the role"
+            )
         if is_json_mode():
             print(
                 json.dumps(
@@ -1380,6 +1397,7 @@ def _cmd_execute(ns: argparse.Namespace, base_path: Path) -> None:
                         "ledger": str(ledger),
                         "effective_profile": effective_profile,
                         "first_actionable_task": first_actionable_task,
+                        **role_state,
                         "next": next_step,
                     },
                     indent=2,
@@ -1395,6 +1413,8 @@ def _cmd_execute(ns: argparse.Namespace, base_path: Path) -> None:
             f"first_actionable_task: {first_actionable_task if first_actionable_task is not None else 'none'}\n"
             f"next: {next_step}\n"
         )
+        if role_state:
+            print("role_state: " + json.dumps(role_state, sort_keys=True))
         sys.exit(0)
 
     print(f"blocked: plan_not_ready\nwork_id: {work_id}\nstatus: {record.status.value}\nnext: r2p-continue\n")
