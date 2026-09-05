@@ -1000,6 +1000,68 @@ class TestRunClose:
 
 
 class TestRunReopen:
+    @pytest.mark.parametrize("json_mode", [False, True])
+    @pytest.mark.parametrize(
+        ("target", "defect"),
+        [
+            ("source", "status"), ("source", "identity"),
+            ("source", "lineage"), ("source", "legacy_lineage"),
+            ("sibling", "status"), ("sibling", "stage"),
+            ("sibling", "identity"),
+        ],
+    )
+    def test_reopen_rejects_malformed_records_before_mutation(
+        self, capsys, monkeypatch, json_mode, target, defect
+    ):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = "WF-20260605-malformed"
+            record = create_run_record(WorkId(source))
+            record.status = RunStatus.CLOSED_AT_PLAN_CHECKPOINT
+            record.current_stage = Stage.CLOSED
+            save_record(root, record)
+            sibling = f"{source}-r1"
+            save_record(root, create_run_record(WorkId(sibling)))
+            target_id = source if target == "source" else sibling
+            path = root / ".req-to-plan" / target_id / "run.md"
+            text = path.read_text(encoding="utf-8")
+            if defect == "status":
+                text, changes = re.subn(r"(## Status\n\s*)\S+", r"\1invalid_status", text)
+                assert changes == 1
+            elif defect == "stage":
+                text, changes = re.subn(r"(## Current Stage\n\s*)\S+", r"\1invalid_stage", text)
+                assert changes == 1
+            elif defect == "identity":
+                text = text.replace(f"# Workflow Run: {target_id}", "# Missing identity")
+            else:
+                record.reopen_lineage = (
+                    "lineage_root: invalid-root; reopened_from: ignored@plan_checkpoint"
+                    if defect == "lineage" else
+                    "reopened_from: invalid-parent@plan_checkpoint reason: test"
+                )
+                save_record(root, record)
+                text = path.read_text(encoding="utf-8")
+            path.write_text(text, encoding="utf-8")
+            before = {p.relative_to(root): p.read_bytes() for p in root.rglob("*") if p.is_file()}
+            directories = {p.relative_to(root) for p in root.rglob("*") if p.is_dir()}
+            monkeypatch.setenv("R2P_JSON", "1" if json_mode else "0")
+
+            invoke(
+                ["run-reopen", "--from", source, "--stage", "plan", "--reason", "repair"],
+                base_path=root, expect_exit=6,
+            )
+
+            output = capsys.readouterr()
+            assert not output.err
+            assert "Traceback" not in output.out
+            assert target_id in output.out
+            assert "run.md" in output.out
+            assert "Invalid reopen" in output.out
+            if json_mode:
+                assert json.loads(output.out)["exit_code"] == 6
+            assert {p.relative_to(root): p.read_bytes() for p in root.rglob("*") if p.is_file()} == before
+            assert {p.relative_to(root) for p in root.rglob("*") if p.is_dir()} == directories
+
     def test_reopen_auto_archives_closed_source_after_child_is_durable(self, tmp_path):
         source = "WF-20260605-auto-archive"
         invoke(

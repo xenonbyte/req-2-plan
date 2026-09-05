@@ -704,6 +704,22 @@ def _reopen_lineage_root(work_id: str, reopen_lineage: str | None = None) -> str
     return work_id
 
 
+def _load_reopen_run(work_id: str, base_path: Path | None):
+    """Reject malformed source/sibling records before any reopen mutation."""
+    try:
+        return _load_run(work_id, base_path)
+    except UnsafeRegularFileError:
+        raise
+    except ValueError:
+        print_and_exit(
+            format_error(
+                f"Invalid reopen run record: {work_id}/run.md",
+                exit_code=EXIT_CONFLICT,
+            ),
+            EXIT_CONFLICT,
+        )
+
+
 def _active_reopen_lineage_runs(
     base_path: Path,
     source_id: str,
@@ -724,7 +740,7 @@ def _active_reopen_lineage_runs(
     for candidate in sorted(workspace.iterdir(), key=lambda path: path.name):
         if candidate.name == source_id or candidate.name not in lineage_names:
             continue
-        record, _, _ = _load_run(candidate.name, base_path)
+        record, _, _ = _load_reopen_run(candidate.name, base_path)
         if record.status not in {
             RunStatus.CLOSED_AT_PLAN_CHECKPOINT,
             RunStatus.ARCHIVED,
@@ -833,7 +849,7 @@ def _cmd_run_reopen(args):
 
     # Load source run through the shared guard so reopen cannot follow a
     # symlinked .req-to-plan/<work-id> outside the workspace.
-    source_record, source_mgr, source_dir = _load_run(source_id, args.base_path)
+    source_record, source_mgr, source_dir = _load_reopen_run(source_id, args.base_path)
 
     # --reason is interpolated verbatim into reopen_lineage, a raw line under the
     # last run.md section; a line boundary there could inject a "## "-prefixed
@@ -857,9 +873,16 @@ def _cmd_run_reopen(args):
         )
 
     base_path = args.base_path or Path.cwd()
-    lineage_root = _reopen_lineage_root(
-        source_id, source_record.reopen_lineage
-    )
+    try:
+        lineage_root = _reopen_lineage_root(source_id, source_record.reopen_lineage)
+    except ValueError:
+        print_and_exit(
+            format_error(
+                f"Invalid reopen lineage in {source_id}/run.md",
+                exit_code=EXIT_CONFLICT,
+            ),
+            EXIT_CONFLICT,
+        )
     active_lineage_runs = _active_reopen_lineage_runs(
         base_path, source_id, source_record.reopen_lineage
     )

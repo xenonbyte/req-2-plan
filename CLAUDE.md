@@ -88,7 +88,7 @@ doubt, read the module, not this file.
 | `context_pack.py` | Project Context Pack: deps, test commands, entrypoints, config, source dirs |
 | `link_expander.py` | Local relative-link expansion for requirement intake |
 | `stage_schema.py` / `stage_templates.py` | Required headings per stage/tier + structural seed templates; `stage_templates.py` also seeds PLAN's optional, removable **non-gate** sections (`## Execution Readiness`, `## Risk Handling`) — absent from `STAGE_SCHEMA`/`PLAN_TASK_FIELDS`, so deleting them still passes the quality gate. There is no per-task "defer" field: a decomposition stage may not push requirement content to a later run (see R20) |
-| `markdown.py` / `atomic.py` | Fence-aware Markdown helpers (incl. offset-preserving `strip_nonsemantic_markdown` / `strip_html_comments_outside_fences`); atomic text writes + symlink-safe `read_regular_text` |
+| `markdown.py` / `atomic.py` | Fence-aware Markdown filtering: compact `strip_nonsemantic_markdown` and source-offset-preserving `mask_nonsemantic_markdown` / `strip_html_comments_outside_fences`; atomic text writes + symlink-safe `read_regular_text` |
 | `workspace.py` | Neutral `.req-to-plan/` workspace helpers (imports neither `cli.py` nor `agent_shortcuts.py`): owns the workspace `.gitignore` and the path-limited git-commit primitive used by run-close (add) and run-archive (remove) |
 | `trace.py` | Derived trace model and closure checks |
 | `gates.py` | Entry/quality gates, execution completion gate, forced-review checks |
@@ -120,7 +120,8 @@ archived -> none
 Open-state transitions to `archived` are owned only by explicit `r2p-abandon`.
 Successful `r2p-reopen` archives its direct closed/executing source after the
 child is durable and refuses to create another child while the lineage already
-has an active reopened run.
+has an active reopened run. Malformed source or same-lineage run records block
+reopen with exit `6` before child/archive writes; never skip an unreadable sibling.
 
 ## Invariants (verify against code before changing)
 
@@ -203,8 +204,12 @@ has an active reopened run.
   artifact text with `strip_nonsemantic_markdown` — seeded read-only sections
   removed **and** HTML comments masked to spaces (offset-preserving, so removal
   can't concatenate adjacent IDs/fields; fence-aware, so fenced examples stay
-  verbatim). So commented-out headings, PLAN-TASK fields, trace IDs, and fenced
-  snippets neither satisfy nor trip a gate. Trace-ID matching (`SPEC_ID_RE`,
+  verbatim). Progress edits use `mask_nonsemantic_markdown`, which shares the
+  read-only boundaries but blanks them in place to preserve all original
+  character offsets and every `str.splitlines()` boundary, including Unicode
+  separators in read-only text and comments; compact output offsets must not be
+  used to edit source text. So commented-out headings, PLAN-TASK fields, trace
+  IDs, and fenced snippets neither satisfy nor trip a gate. Trace-ID matching (`SPEC_ID_RE`,
   `_SCOPE_IN_ID_RE`, `_ID_RE`, and the closure-vicinity search in
   `gates._find_ids_without_closure`) is token-boundary-aware: `SPEC-…-1` is not
   closed by `SPEC-…-10`, and a line bearing only a suffixed/typo'd variant

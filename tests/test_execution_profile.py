@@ -510,6 +510,44 @@ def test_commit_chain_rejects_unrecorded_descendant_without_task_marker():
         )
 
 
+@pytest.mark.parametrize("adapter", ["resolve", "ancestry"])
+@pytest.mark.parametrize("error_type", [ValueError, OSError, TypeError, AttributeError])
+def test_commit_chain_preserves_adapter_failure_classification(adapter, error_type):
+    parsed = parse_execution_ledger(
+        ledger(*(f"- [ ] {task_id}" for task_id in TASK_IDS)), TASK_IDS,
+    )
+    error = error_type("injected adapter failure")
+
+    def fail(*args):
+        raise error
+
+    expected = ExecutionProfileError if error_type in {ValueError, OSError} else error_type
+    with pytest.raises(expected) as failure:
+        validate_ledger_commit_chain(
+            parsed, current_head=BASE,
+            resolve_commit=fail if adapter == "resolve" else lambda sha: sha,
+            is_ancestor=fail if adapter == "ancestry" else lambda older, newer: True,
+        )
+    if expected is ExecutionProfileError:
+        message = "commit resolution failed" if adapter == "resolve" else "commit ancestry check failed"
+        assert message in str(failure.value)
+        assert failure.value.__cause__ is error
+    else:
+        assert failure.value is error
+
+
+def test_commit_chain_does_not_reclassify_malformed_ledger_as_git_failure():
+    from dataclasses import replace
+    parsed = parse_execution_ledger(
+        ledger(*(f"- [ ] {task_id}" for task_id in TASK_IDS)), TASK_IDS,
+    )
+    with pytest.raises(AttributeError):
+        validate_ledger_commit_chain(
+            replace(parsed, markers=(None,)), current_head=BASE,
+            resolve_commit=lambda sha: sha, is_ancestor=lambda older, newer: True,
+        )
+
+
 def test_commit_chain_rejects_unrecorded_descendant_after_task_marker():
     parsed = parse_execution_ledger(
         ledger(
@@ -603,6 +641,61 @@ Task 3: implemented (commits 7654321..0123456, verification recorded)""",
     assert nonsemantic in migrated
     assert migrated.count("- [x] PLAN-TASK-") == 3
     assert migrated.count("final review clean") == 3
+
+
+@pytest.mark.parametrize("ending", ["\n", "\r\n"])
+def test_fast_migration_preserves_original_offsets_with_copied_headings_and_comments(ending):
+    nonsemantic = (
+        "## Project Context (read-only)\n# Copied artifact\n"
+        "- [ ] PLAN-TASK-001 — copied\n<!-- /r2p-read-only -->\n"
+        "<!--\n```\n- [ ] PLAN-TASK-001 — comment\n-->\n"
+        "~~~markdown\n- [ ] PLAN-TASK-001 — fenced\n~~~\n"
+    )
+    task = "- [ ] PLAN-TASK-001 — 真实任务\n"
+    marker = "Task 1: implemented (commits abcdef0..1234567, verification recorded)"
+    prefix = f"# Progress\nExecution BASE: {BASE}\nExecution Profile: fast\n"
+    progress = (prefix + nonsemantic + task + marker).replace("\n", ending)
+    expected = (
+        prefix + nonsemantic + task.replace("- [ ]", "- [x]")
+        + "Task 1: complete (commits abcdef0..1234567, final review clean)"
+    ).replace("\n", ending)
+    assert finalize_fast_ledger(progress, (TASK_IDS[0],)) == expected
+
+
+@pytest.mark.parametrize("ending", ["\r\n", *"\n\r\v\f\x1c\x1d\x1e\x85\u2028\u2029"])
+def test_fast_migration_preserves_readonly_splitlines_boundaries(ending):
+    prefix = f"# Progress\nExecution BASE: {BASE}\nExecution Profile: fast\n"
+    readonly = (
+        f"## Project Context (read-only){ending}Copied context α{ending}"
+        f"<!-- /r2p-read-only -->{ending}"
+    )
+    example = "```text\n- [ ] PLAN-TASK-001 example\n<!-- literal comment -->\n```\n"
+    checkbox = "- [ ] PLAN-TASK-001 real task\n"
+    marker = "Task 1: implemented (commits abcdef0..1234567, verification recorded)\n"
+    content = prefix + readonly + example + checkbox + marker
+    expected = (
+        prefix + readonly + example + checkbox.replace("- [ ]", "- [x]")
+        + "Task 1: complete (commits abcdef0..1234567, final review clean)\n"
+    )
+    assert finalize_fast_ledger(content, (TASK_IDS[0],)).encode("utf-8") == expected.encode("utf-8")
+
+
+@pytest.mark.parametrize("size", [100, 200, 400])
+def test_semantic_source_scan_bounds_total_markdown_input(monkeypatch, size):
+    import tools.workflow_cli.markdown as markdown
+    content = "visible α\n" * size
+    scanned = []
+    real_mask = markdown._mask_html_comments_outside_fences
+
+    def counted_mask(text, **kwargs):
+        scanned.append(len(text))
+        return real_mask(text, **kwargs)
+
+    monkeypatch.setattr(markdown, "_mask_html_comments_outside_fences", counted_mask)
+    lines = list(execution_profile._semantic_source_lines(content))
+    assert len(lines) == size
+    assert all(content[start:end] == line for line, start, end in lines)
+    assert sum(scanned) <= 3 * len(content)
 
 
 _SAMPLE_ROLES = (

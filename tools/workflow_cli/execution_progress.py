@@ -223,9 +223,9 @@ def _operate(root, work_id, *, action=None, sequence=None, status=None, head=Non
             _validate_chain(root, ledger, allow_inflight=bool(ledger.journal and ledger.journal.inflight))
             if updated != progress:
                 _replace_text_at(execution_fd, "progress.md", updated)
-            progress = updated
-        ledger, _ = _parse(progress, plan)
-        _validate_chain(root, ledger, allow_inflight=bool(ledger.journal and ledger.journal.inflight))
+        else:
+            ledger, _ = _parse(progress, plan)
+            _validate_chain(root, ledger, allow_inflight=bool(ledger.journal and ledger.journal.inflight))
         return _result(root, work_id, ledger, result)
     finally:
         if lock_fd is not None:

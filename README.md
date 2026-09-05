@@ -186,7 +186,10 @@ off.
 the direct source is moved to `.req-to-plan/archive/`. If another active reopened
 draft already exists, reopen stops instead of silently replacing it; use
 `r2p-abandon --work-id <id> --reason "<text>"` only after explicitly deciding
-that the draft is no longer needed.
+that the draft is no longer needed. In existing workspaces, a successful reopen
+therefore removes the source from its former active path. A malformed source or
+same-lineage run record blocks reopen with exit `6` before any child or archive
+write; repair that record before retrying.
 
 Most runs only need `r2p-start` and repeated `r2p-continue`. Use the specialized
 commands when the workflow prints them or when you intentionally need to switch,
@@ -293,6 +296,13 @@ with its exact current HEAD and a durable report explicitly recording DONE and
 the original BASE..HEAD. Missing or contradictory evidence blocks recovery;
 the CLI does not infer ownership from commit history.
 
+**Existing-run compatibility.** Starting execution requires a clean Git worktree
+outside `.req-to-plan/`: tracked changes and untracked, non-ignored files there
+cause `run-execute-start` to stop with exit `6`. Resolve those changes before
+starting. Older reopen operations could leave `execution/` behind on a closed
+run; archiving such a run now requires an explicit `--force`, just as archiving
+unfinished execution does.
+
 **Execution metrics (Phase 0).**
 
 Normal `run-execute-start` creates `execution/metrics.md` alongside progress.
@@ -349,7 +359,10 @@ deterministically filtered output. The controller does not read or forward that
 content and no persistent context bundle is created. The human output includes
 an aggregate `semantic_bytes` integer (excluding the stats prefix); every role
 returns that integer inline for the controller's `context_bytes`. JSON mode
-includes the same count. These are auditable byte
+includes the same count. The aggregate measures the full delivered UTF-8 payload,
+including each `===== path =====` heading and the separators between sources.
+Per-source `semantic_bytes` measures only that source's filtered content, so
+summing those values excludes the assembly overhead. These are auditable byte
 measurements, not a claim about model-consumed context or Token usage.
 
 Role reports and reviews are compact audit records: `Status`, `Commit Range`,

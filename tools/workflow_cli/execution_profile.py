@@ -23,6 +23,7 @@ from tools.workflow_cli.markdown import (
     PLAN_TASK_ANCHOR_RE,
     PLAN_TASK_CHECKBOX_RE,
     heading_bounded_bodies,
+    mask_nonsemantic_markdown,
     plan_task_anchors,
     strip_nonsemantic_markdown,
     unfenced_markdown_lines,
@@ -154,19 +155,8 @@ def _semantic_lines(text: str) -> list[str]:
 
 
 def _semantic_source_lines(text: str):
-    """Yield semantic lines together with their offsets in the original text.
-
-    ``strip_nonsemantic_markdown`` removes read-only blocks but masks comments,
-    so offsets in its result are not source offsets. Applying that exact mask to
-    each source-line prefix preserves the source positions needed for an atomic
-    migration without reimplementing either non-semantic rule here.
-    """
-    for _line, start, end in unfenced_markdown_lines(text):
-        before = strip_nonsemantic_markdown(text[:start])
-        through = strip_nonsemantic_markdown(text[:end])
-        if not through.startswith(before):
-            raise ExecutionProfileError("non-semantic Markdown mask is inconsistent")
-        yield through[len(before):], start, end
+    """Yield semantic lines at original character offsets in bounded passes."""
+    yield from unfenced_markdown_lines(mask_nonsemantic_markdown(text))
 
 
 def parse_execution_ledger(
@@ -432,56 +422,69 @@ def validate_ledger_commit_chain(
 
     Keeping Git calls outside this helper preserves a deterministic profile core
     while ensuring callers never substitute ``HEAD~1`` for a marker boundary.
+    Adapters report expected Git failures with ValueError or OSError; only those
+    call boundaries translate errors, leaving ledger/programming faults intact.
     """
+    def resolve(value: str) -> str:
+        try:
+            return resolve_commit(value)
+        except ExecutionProfileError:
+            raise
+        except (ValueError, OSError) as exc:
+            raise ExecutionProfileError("ledger commit resolution failed") from exc
+
+    def ancestor(older: str, newer: str) -> bool:
+        try:
+            return is_ancestor(older, newer)
+        except ExecutionProfileError:
+            raise
+        except (ValueError, OSError) as exc:
+            raise ExecutionProfileError("ledger commit ancestry check failed") from exc
+
     if not _FULL_SHA_RE.fullmatch(current_head):
         raise ExecutionProfileError("current HEAD must be a full SHA")
-    try:
-        previous_head = resolve_commit(parsed.execution_base)
-        if not _FULL_SHA_RE.fullmatch(previous_head):
-            raise ExecutionProfileError("Execution BASE did not resolve to a full SHA")
-        journal_tasks = {
-            event["task"] for event in parsed.journal.events
-            if event["role"] == "implementer"
-        } if parsed.journal else set()
-        for marker in parsed.markers:
-            if marker.number in journal_tasks:
-                implementations = [event for event in parsed.journal.events if event["task"] == marker.number and event["role"] == "implementer"]
-                if (
-                    resolve_commit(marker.base) != implementations[0]["base"]
-                    or resolve_commit(marker.head) != implementations[-1]["head"]
-                    or implementations[-1]["status"] != "complete"
-                    or implementations[0]["base"] == implementations[-1]["head"]
-                ):
-                    raise ExecutionProfileError("task marker does not match its implementation journal")
-                continue
-            marker_base = resolve_commit(marker.base)
-            marker_head = resolve_commit(marker.head)
-            if marker_base != previous_head:
-                raise ExecutionProfileError("task marker BASE chain is discontinuous")
-            if marker_head == previous_head:
-                raise ExecutionProfileError(
-                    "task marker commit range is empty; every task must contain a commit"
-                )
-            if not _FULL_SHA_RE.fullmatch(marker_head) or not is_ancestor(previous_head, marker_head):
-                raise ExecutionProfileError("task marker head is not an ordered descendant")
-            previous_head = marker_head
-        if parsed.journal:
-            if previous_head != parsed.journal.base:
-                raise ExecutionProfileError("journal BASE does not continue the legacy marker chain")
-            for event in parsed.journal.events:
-                if event["base"] != previous_head or not is_ancestor(previous_head, event["head"]):
-                    raise ExecutionProfileError("role journal commit chain is discontinuous")
-                previous_head = event["head"]
-            if parsed.journal.inflight:
-                if parsed.journal.inflight["base"] != previous_head:
-                    raise ExecutionProfileError("inflight role BASE is not the recorded boundary")
-                if allow_inflight and is_ancestor(previous_head, current_head):
-                    return
-    except ExecutionProfileError:
-        raise
-    except Exception as exc:  # Git adapter errors must fail closed at the pure boundary.
-        raise ExecutionProfileError("ledger commit abbreviation is unresolved") from exc
-    if not is_ancestor(previous_head, current_head):
+    previous_head = resolve(parsed.execution_base)
+    if not _FULL_SHA_RE.fullmatch(previous_head):
+        raise ExecutionProfileError("Execution BASE did not resolve to a full SHA")
+    journal_tasks = {
+        event["task"] for event in parsed.journal.events
+        if event["role"] == "implementer"
+    } if parsed.journal else set()
+    for marker in parsed.markers:
+        if marker.number in journal_tasks:
+            implementations = [event for event in parsed.journal.events if event["task"] == marker.number and event["role"] == "implementer"]
+            if (
+                resolve(marker.base) != implementations[0]["base"]
+                or resolve(marker.head) != implementations[-1]["head"]
+                or implementations[-1]["status"] != "complete"
+                or implementations[0]["base"] == implementations[-1]["head"]
+            ):
+                raise ExecutionProfileError("task marker does not match its implementation journal")
+            continue
+        marker_base = resolve(marker.base)
+        marker_head = resolve(marker.head)
+        if marker_base != previous_head:
+            raise ExecutionProfileError("task marker BASE chain is discontinuous")
+        if marker_head == previous_head:
+            raise ExecutionProfileError(
+                "task marker commit range is empty; every task must contain a commit"
+            )
+        if not _FULL_SHA_RE.fullmatch(marker_head) or not ancestor(previous_head, marker_head):
+            raise ExecutionProfileError("task marker head is not an ordered descendant")
+        previous_head = marker_head
+    if parsed.journal:
+        if previous_head != parsed.journal.base:
+            raise ExecutionProfileError("journal BASE does not continue the legacy marker chain")
+        for event in parsed.journal.events:
+            if event["base"] != previous_head or not ancestor(previous_head, event["head"]):
+                raise ExecutionProfileError("role journal commit chain is discontinuous")
+            previous_head = event["head"]
+        if parsed.journal.inflight:
+            if parsed.journal.inflight["base"] != previous_head:
+                raise ExecutionProfileError("inflight role BASE is not the recorded boundary")
+            if allow_inflight and ancestor(previous_head, current_head):
+                return
+    if not ancestor(previous_head, current_head):
         raise ExecutionProfileError("current HEAD diverges from the ledger chain")
     if current_head != previous_head:
         raise ExecutionProfileError("current HEAD is not the recorded ledger boundary")

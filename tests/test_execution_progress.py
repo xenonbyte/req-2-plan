@@ -223,6 +223,70 @@ def test_progress_rejects_unsafe_completion_without_mutation(workspace, mutation
     assert (execution / "progress.md").read_bytes() == before
 
 
+@pytest.mark.parametrize("label", ["Gap", "Unresolved"])
+def test_later_task_reraised_concern_blocks_until_a_new_semantic_resolution(workspace, label):
+    work_id, _, execution, _ = _started_metrics_run(workspace, task_count=2)
+    path = execution / "progress.md"
+    for task in (1, 2):
+        dispatch = begin(workspace, work_id)
+        head = _commit_paths(workspace, (f"src/task{task}.py",))
+        finish(workspace, work_id, execution, dispatch, "complete", head)
+        review = begin(workspace, work_id)
+        if task == 1:
+            path.write_text(path.read_text() + "\nGap: repeated concern\nResolved: repeated concern\n")
+            finish(workspace, work_id, execution, review, "approved", head)
+    path.write_text(
+        path.read_text() + f"\n{label}: repeated concern\n"
+        "```text\nResolved: repeated concern\n```\n"
+        "<!--\nResolved: repeated concern\n-->\n"
+        "## Project Context (read-only)\n# Copied heading\n"
+        "Resolved: repeated concern\n<!-- /r2p-read-only -->\n"
+    )
+    Path(review["report_path"]).write_text("Approved\n")
+    before = path.read_bytes()
+    with pytest.raises(ExecutionProfileError, match="unresolved task review concerns"):
+        record_execution_progress(workspace, work_id, "complete", review["role_sequence"], status="approved", head=head)
+    assert path.read_bytes() == before
+    path.write_text(path.read_text() + "\nResolved: repeated concern\n")
+    result = record_execution_progress(workspace, work_id, "complete", review["role_sequence"], status="approved", head=head)
+    assert result["next_role"] == "final_reviewer"
+
+
+def test_resume_and_exact_retry_revalidate_after_head_changes(workspace):
+    work_id, _, execution, _ = _started_metrics_run(workspace)
+    dispatch = begin(workspace, work_id)
+    head = _commit_paths(workspace, ("src/task.py",))
+    finish(workspace, work_id, execution, dispatch, "complete", head)
+    before = (execution / "progress.md").read_bytes()
+    _commit_paths(workspace, ("src/unrecorded.py",))
+    with pytest.raises(ExecutionProfileError, match="recorded ledger boundary"):
+        resume_execution_progress(workspace, work_id)
+    with pytest.raises(ExecutionProfileError, match="recorded ledger boundary"):
+        record_execution_progress(workspace, work_id, "complete", dispatch["role_sequence"], status="complete", head=head)
+    assert (execution / "progress.md").read_bytes() == before
+
+
+@pytest.mark.parametrize("ending", ["\r\n", *"\n\r\v\f\x1c\x1d\x1e\x85\u2028\u2029"])
+def test_strict_completion_preserves_readonly_splitlines_boundaries(workspace, ending):
+    work_id, _, execution, _ = _started_metrics_run(workspace)
+    progress = execution / "progress.md"
+    readonly = (
+        f"## Project Context (read-only){ending}Copied context α{ending}"
+        f"<!-- /r2p-read-only -->{ending}"
+    )
+    before = progress.read_bytes().decode("utf-8")
+    position = before.index("- [ ] PLAN-TASK-001")
+    progress.write_bytes((before[:position] + readonly + before[position:]).encode("utf-8"))
+    dispatch = begin(workspace, work_id)
+    head = _commit_paths(workspace, ("src/task.py",))
+    finish(workspace, work_id, execution, dispatch, "complete", head)
+    result = finish(workspace, work_id, execution, begin(workspace, work_id), "approved", head)
+    after = progress.read_bytes()
+    assert readonly.encode("utf-8") in after
+    assert b"- [x] PLAN-TASK-001" in after
+    assert result["next_role"] == "final_reviewer"
+
+
 def test_completion_atomic_failure_and_exact_retry(workspace, monkeypatch):
     import tools.workflow_cli.execution_progress as progress_module
     work_id, _, execution, _ = _started_metrics_run(workspace)
@@ -248,6 +312,64 @@ def test_completion_atomic_failure_and_exact_retry(workspace, monkeypatch):
     after = (execution / "progress.md").read_bytes()
     record_execution_progress(workspace, work_id, "complete", 1, status="complete", head=head)
     assert (execution / "progress.md").read_bytes() == after
+
+
+@pytest.mark.parametrize(
+    ("operation", "expected_checks"),
+    [("resume", 1), ("begin", 2), ("complete", 2), ("retry", 1)],
+)
+def test_progress_validates_each_required_boundary_once(
+    workspace, monkeypatch, operation, expected_checks
+):
+    import tools.workflow_cli.execution_progress as progress_module
+    work_id, _, execution, _ = _started_metrics_run(workspace)
+    if operation in {"complete", "retry"}:
+        begin(workspace, work_id)
+        head = _commit_paths(workspace, ("src/task.py",))
+        (execution / "task-1-report.md").write_text("report\n")
+        if operation == "retry":
+            record_execution_progress(workspace, work_id, "complete", 1, status="complete", head=head)
+    real_validate = progress_module.validate_ledger_commit_chain
+    checks = []
+
+    def counted_validate(*args, **kwargs):
+        checks.append(kwargs["current_head"])
+        return real_validate(*args, **kwargs)
+
+    monkeypatch.setattr(progress_module, "validate_ledger_commit_chain", counted_validate)
+    if operation == "resume":
+        result = resume_execution_progress(workspace, work_id)
+    elif operation == "begin":
+        result = record_execution_progress(workspace, work_id, "begin", 1)
+    else:
+        result = record_execution_progress(workspace, work_id, "complete", 1, status="complete", head=head)
+    assert len(checks) == expected_checks
+    assert result["next_role"] == ("task_reviewer" if operation in {"complete", "retry"} else "implementer")
+
+
+def test_late_strict_begin_bounds_git_subprocess_cost(workspace, monkeypatch):
+    work_id, _, execution, _ = _started_metrics_run(workspace, task_count=9)
+    for task in range(1, 10):
+        dispatch = begin(workspace, work_id)
+        head = _commit_paths(workspace, (f"src/task{task}.py",))
+        Path(dispatch["report_path"]).write_text("report\n")
+        record_execution_progress(workspace, work_id, "complete", dispatch["role_sequence"], status="complete", head=head)
+        review = begin(workspace, work_id)
+        Path(review["report_path"]).write_text("Approved\n")
+        record_execution_progress(workspace, work_id, "complete", review["role_sequence"], status="approved", head=head)
+    real_run = subprocess.run
+    git_commands = []
+
+    def counted_run(command, *args, **kwargs):
+        if command[0] == "git":
+            git_commands.append(command)
+        return real_run(command, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", counted_run)
+    dispatch = record_execution_progress(workspace, work_id, "begin", 19)
+    assert dispatch["next_role"] == "final_reviewer"
+    assert dispatch["inflight"]
+    assert len(git_commands) <= 81
 
 
 def test_resume_shortcut_survives_missing_observation_file(workspace, monkeypatch):
