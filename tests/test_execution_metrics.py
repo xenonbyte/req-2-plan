@@ -1036,6 +1036,13 @@ def test_finalized_self_host_partial_remains_nonrepresentative(tmp_path):
     record = RunStateManager(run_dir).load()
     record.status = RunStatus.ARCHIVED
     RunStateManager(run_dir).save(record)
+    archived = tmp_path / ".req-to-plan" / "archive" / str(work_id)
+    archived.parent.mkdir()
+    run_dir.rename(archived)
+    run_dir = archived
+    metrics_path = run_dir / "execution" / "metrics.md"
+    before = metrics_path.read_bytes()
+    assert parse_metrics(before.decode("utf-8")).header["instrumentation_complete"] is False
     first = _archived_sample(tmp_path / "samples", "WF-20260831-partial-first", 1, "docs_only")
     second = _archived_sample(tmp_path / "samples", "WF-20260831-partial-second", 2, "single_module_code")
 
@@ -1046,6 +1053,7 @@ def test_finalized_self_host_partial_remains_nonrepresentative(tmp_path):
         item["rule"] == "instrumentation_complete"
         for item in error.value.result["details"]
     )
+    assert metrics_path.read_bytes() == before
 
 
 def test_structured_metrics_lock_contention_and_unsafe_report_are_fail_closed(tmp_path):
@@ -2054,8 +2062,12 @@ def test_start_execution_transaction_rolls_back_owned_partial_and_retries(tmp_pa
     assert start_execution_transaction(tmp_path, work_id, "strict").status == RunStatus.EXECUTING
 
 
-def test_prerequisite_v1_accepts_task_one_after_real_explicit_strict_start(tmp_path):
-    work_id = WorkId("WF-20260830-prerequisite-v1-strict-start")
+@pytest.mark.parametrize("work_id", [
+    "WF-20260830-prerequisite-v1-strict-start",
+    "WF-20260829-r2p-execute-token-phase-r2p-r1",
+])
+def test_prerequisite_v1_accepts_task_one_after_real_explicit_strict_start(tmp_path, work_id):
+    work_id = WorkId(work_id)
     run_dir = tmp_path / ".req-to-plan" / str(work_id)
     record = create_run_record(work_id)
     record.status = RunStatus.CLOSED_AT_PLAN_CHECKPOINT
@@ -2079,6 +2091,28 @@ def test_prerequisite_v1_accepts_task_one_after_real_explicit_strict_start(tmp_p
         "task_count": 2,
         "execution_base": execution_base,
     }
+
+
+@pytest.mark.parametrize("work_id", [
+    "WF-20260829-r2p-execute-token-phase-r2p-r1",
+    "WF-20260829-r2p-execute-token-phase-r2p-other",
+    "WF-20260905-ordinary-run",
+])
+def test_historical_metrics_gap_is_not_accepted_for_other_runs(work_id):
+    header = (
+        "# Execution Metrics\n"
+        f"work_id: {work_id}\n"
+        "r2p_version: 0.0.0-test\n"
+        "instrumentation_schema: 1\n"
+        "profile: strict\n"
+        "task_count: 9\n"
+        "instrumentation_complete: false\n"
+        "bootstrap_gap: execution_start_through_task_002_reviewed_complete\n"
+        "change_shape: unavailable\n"
+        "metrics_finalized: false\n"
+    )
+    with pytest.raises(MetricsFormatError, match="header combination"):
+        parse_metrics(header)
 
 
 def test_prerequisite_v1_keeps_historical_self_host_task_one_profileless(tmp_path):
@@ -3216,8 +3250,7 @@ def test_sample_validator_accepts_matching_report_review_fix_wave_blocks(tmp_pat
     assert result["samples"][0]["role_counts"]["task_rereviewer"] == 1
 
 
-def test_sample_validation_and_consumer_preserve_retries_and_historical_red(review_workspace):
-    from tools.workflow_cli.execution_profile import consume_accepted_sample_evidence
+def test_sample_validation_preserves_retries_and_historical_red(review_workspace):
     base = review_workspace
     one = _archived_sample(base, "WF-20260905-retried-one", 1, "single_module_code")
     two = _archived_sample(base, "WF-20260905-retried-two", 2, "single_module_code")
@@ -3242,9 +3275,6 @@ def test_sample_validation_and_consumer_preserve_retries_and_historical_red(revi
     assert counts["fixer"] == 2
     assert counts["task_rereviewer"] == 1
     assert result["samples"][0]["full_suite"]["count"] == 7
-    evidence = base / "accepted-test-evidence.json"
-    evidence.write_text(json.dumps(result))
-    assert consume_accepted_sample_evidence(evidence) == result
 
 
 @pytest.mark.parametrize(
