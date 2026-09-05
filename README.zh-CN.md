@@ -291,6 +291,7 @@ commit 历史推断。缺少 profile 和指标的旧 run 以 strict 恢复，并
 |---|---|
 | `ModuleNotFoundError: No module named 'yaml'` | 将 `pyyaml` 安装到 agent shell 选择的 Python，检查其 `PATH`，尤其是使用虚拟环境时。 |
 | 安装状态正常，但 run 停住了 | `r2p status` 检查集成；使用 `r2p-status` 并按 run 打印的 `next:` 动作处理。 |
+| 启动、进度、前置条件或指标命令返回 exit `7` 或 `6` | `7` 表示选定的 workspace/run 目录不存在；执行启动也用它表示 PLAN 缺失。`6` 表示路径不安全或已有执行状态损坏，包括恢复文件缺失。核对 work ID 并恢复所需状态。 |
 | 执行因工作区不干净而停止 | 检查 `git status --short -- ':!.req-to-plan'`，处理代码改动后再重试。 |
 | 恢复返回 `recover_role_result` | 恢复已记录 invocation 的结果；任何重试前先确认它是否仍在运行。 |
 | Fast preflight 拒绝 run | 处理资格检查发现，或显式选择 `strict`；结构检查通过不代表任务语义已获批。 |

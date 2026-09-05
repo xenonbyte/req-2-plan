@@ -5342,6 +5342,105 @@ class TestExecutionPhaseZeroIntegration:
         assert "role sequence is invalid" in rendered
 
 
+@pytest.mark.parametrize("json_mode", [False, True])
+@pytest.mark.parametrize("command", [
+    ["run-execute-start"],
+    ["execution-progress", "begin", "--expected-sequence", "1"],
+    ["execution-prerequisite-check", "--task", "1", "--require-version", "1"],
+    ["execution-prerequisite-check", "--task", "1", "--require-version", "2"],
+    ["execution-metrics-bootstrap", "--profile", "strict", "--self-hosted-gap-through-task", "2"],
+    ["execution-metrics-status"],
+    ["execution-metrics-append", "--record-json", "{}"],
+    ["execution-metrics-ack", "--expected-sequence", "1"],
+    ["execution-metrics-finalize", "--expected-invocation-count", "0"],
+])
+class TestExecutionRunErrors:
+    # Bootstrap accepts only this historical ID; the other commands accept it too.
+    WORK_ID = "WF-20260829-r2p-execute-token-phase-r2p"
+
+    @pytest.mark.parametrize("workspace_exists", [False, True])
+    def test_missing_run_is_not_found(self, tmp_path, monkeypatch, capsys, command, json_mode, workspace_exists):
+        workspace = tmp_path / ".req-to-plan"
+        if workspace_exists:
+            workspace.mkdir()
+        monkeypatch.setenv("R2P_JSON", "1" if json_mode else "0")
+
+        invoke([*command, "--work-id", self.WORK_ID], base_path=tmp_path.resolve(), expect_exit=7)
+
+        output = capsys.readouterr().out
+        assert self.WORK_ID in output
+        if json_mode:
+            assert json.loads(output)["exit_code"] == 7
+        assert workspace.exists() == workspace_exists
+        assert not (workspace / self.WORK_ID).exists()
+
+    @pytest.mark.parametrize("unsafe_component", ["workspace", "run"])
+    @pytest.mark.parametrize("source_kind", ["file", "symlink", "dangling_symlink"])
+    def test_unsafe_run_path_is_conflict(self, tmp_path, monkeypatch, capsys, command, json_mode, unsafe_component, source_kind):
+        workspace = tmp_path / ".req-to-plan"
+        if unsafe_component == "run":
+            workspace.mkdir()
+        target = workspace if unsafe_component == "workspace" else workspace / self.WORK_ID
+        outside = tmp_path / "outside"
+        if source_kind == "file":
+            target.write_text("sentinel", encoding="utf-8")
+        else:
+            if source_kind == "symlink":
+                outside.mkdir()
+            target.symlink_to(outside, target_is_directory=True)
+        monkeypatch.setenv("R2P_JSON", "1" if json_mode else "0")
+
+        invoke([*command, "--work-id", self.WORK_ID], base_path=tmp_path.resolve(), expect_exit=6)
+
+        output = capsys.readouterr().out
+        if json_mode:
+            assert json.loads(output)["exit_code"] == 6
+        if source_kind == "file":
+            assert target.read_text(encoding="utf-8") == "sentinel"
+        else:
+            assert target.is_symlink()
+            assert not outside.exists() or not list(outside.iterdir())
+
+    @pytest.mark.parametrize("record_kind", ["missing", "unreadable", "invalid_id", "invalid_status", "wrong_id"])
+    def test_invalid_existing_run_is_conflict(self, tmp_path, monkeypatch, capsys, command, json_mode, record_kind):
+        run_dir = tmp_path / ".req-to-plan" / self.WORK_ID
+        run_dir.mkdir(parents=True)
+        record_path = run_dir / "run.md"
+        if record_kind != "missing":
+            record = create_run_record(WorkId(self.WORK_ID))
+            RunStateManager(run_dir).save(record)
+            text = record_path.read_text(encoding="utf-8")
+            if record_kind == "invalid_id":
+                text = text.replace(self.WORK_ID, "WF-invalid")
+            elif record_kind == "invalid_status":
+                text = text.replace(record.status.value, "not_a_status")
+            elif record_kind == "wrong_id":
+                text = text.replace(self.WORK_ID, "WF-20260905-other")
+            record_path.write_text(text, encoding="utf-8")
+        before = record_path.read_bytes() if record_path.exists() else None
+        if record_kind == "unreadable":
+            from tools.workflow_cli import execution_metrics
+            read_text_at = execution_metrics._read_text_at
+
+            def denied_record(parent_fd, name, **kwargs):
+                if name == "run.md":
+                    raise PermissionError("permission denied reading run.md")
+                return read_text_at(parent_fd, name, **kwargs)
+
+            monkeypatch.setattr(execution_metrics, "_read_text_at", denied_record)
+        monkeypatch.setenv("R2P_JSON", "1" if json_mode else "0")
+
+        invoke([*command, "--work-id", self.WORK_ID], base_path=tmp_path.resolve(), expect_exit=6)
+
+        output = capsys.readouterr().out
+        if record_kind == "unreadable":
+            assert "run.md" in output
+        if json_mode:
+            assert json.loads(output)["exit_code"] == 6
+        assert (record_path.read_bytes() if record_path.exists() else None) == before
+        assert not (run_dir / "execution").exists()
+
+
 class TestRunExecuteStart:
     _PLAN_WITH_READONLY_PHANTOM_TASK = (
         "# Plan\n\n## Tasks\n"

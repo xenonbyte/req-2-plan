@@ -50,6 +50,8 @@ from tools.workflow_cli.version import R2P_VERSION
 
 INSTRUMENTATION_SCHEMA = 1
 PREREQUISITE_IMPLEMENTATION_VERSION = 2
+# Historical schema-1 compatibility; archival does not end read support.
+# Removal requires the migration/support decision in docs/execution-compatibility.md.
 SELF_HOSTED_WORK_ID = "WF-20260829-r2p-execute-token-phase-r2p"
 SELF_HOSTED_BOOTSTRAP_GAP = "execution_start_through_task_002_reviewed_complete"
 _LEGACY_BOOTSTRAP_GAP_RE = re.compile(
@@ -93,6 +95,10 @@ class PlanNotFoundError(FileNotFoundError):
     """Only the PLAN read boundary may report a missing PLAN."""
 
 
+class RunNotFoundError(FileNotFoundError):
+    """The pinned workspace/run directory lookup found no selected run."""
+
+
 class RepresentativeSamplesError(MetricsFormatError):
     """Representative sample validation failed with a stable error payload."""
 
@@ -109,6 +115,11 @@ class _CommittedWriteError(OSError):
 class ParsedMetrics:
     header: dict[str, Any]
     invocations: tuple[dict[str, Any], ...]
+
+
+def _is_historical_self_host(work_id: str | WorkId) -> bool:
+    """Match the original run only; reopened descendants use ordinary rules."""
+    return str(work_id) == SELF_HOSTED_WORK_ID
 
 
 def quantize_elapsed_seconds(start_ns: int, end_ns: int) -> str:
@@ -202,7 +213,7 @@ def _parse_header(lines: list[str]) -> dict[str, Any]:
         (complete and gap == "none")
         or (
             not complete
-            and work_id == SELF_HOSTED_WORK_ID
+            and _is_historical_self_host(work_id)
             and gap == SELF_HOSTED_BOOTSTRAP_GAP
         )
         or (
@@ -652,15 +663,24 @@ def _replace_text_at(parent_fd: int, name: str, content: str) -> None:
 
 
 def _parse_record_at(run_fd: int, expected_work_id: WorkId) -> RunRecord:
-    text = _read_text_at(run_fd, "run.md")
+    try:
+        text = _read_text_at(run_fd, "run.md")
+    except FileNotFoundError as exc:
+        raise MetricsFormatError("run record missing: run.md") from exc
+    except OSError as exc:
+        raise MetricsFormatError(f"run record unreadable: run.md: {exc}") from exc
     assert text is not None
     match = re.search(r"# Workflow Run: (WF-\S+)", text)
     if not match:
         raise MetricsFormatError("cannot parse work_id from run.md")
-    embedded = WorkId(match.group(1))
+    try:
+        embedded = WorkId(match.group(1))
+        record = parse_run_record(text, embedded)
+    except ValueError as exc:
+        raise MetricsFormatError(f"invalid run record: {exc}") from exc
     if embedded != expected_work_id:
         raise MetricsFormatError("run record work_id does not match request")
-    return parse_run_record(text, embedded)
+    return record
 
 
 def _plan_at(run_fd: int) -> str:
@@ -681,12 +701,14 @@ def _open_run(base_path: Path, work_id: WorkId) -> tuple[int, int, int]:
         workspace_fd = _open_dir_at(repo_fd, ".req-to-plan")
         run_fd = _open_dir_at(workspace_fd, str(work_id))
         return repo_fd, workspace_fd, run_fd
-    except Exception:
+    except Exception as exc:
         if run_fd is not None:
             os.close(run_fd)
         if workspace_fd is not None:
             os.close(workspace_fd)
         os.close(repo_fd)
+        if isinstance(exc, MetricsFormatError) and isinstance(exc.__cause__, FileNotFoundError):
+            raise RunNotFoundError(f"Run not found: {work_id}") from exc
         raise
 
 
@@ -1130,6 +1152,8 @@ def _read_prerequisite_inputs(
         progress = _read_text_at(execution_fd, "progress.md")
         assert progress is not None
         return record, plan, progress
+    except RunNotFoundError:
+        raise
     except (MetricsFormatError, OSError) as exc:
         raise PrerequisiteError(str(exc)) from exc
     finally:
@@ -1161,7 +1185,7 @@ def check_prerequisite_v1(base_path: Path, work_id: WorkId, task: int) -> dict[s
         raise PrerequisiteError("PLAN must have contiguous task anchors")
     if task < 1 or task > len(anchors):
         raise PrerequisiteError("task is outside PLAN bounds")
-    if task in {1, 2} and str(work_id) == SELF_HOSTED_WORK_ID and len(anchors) != 9:
+    if task in {1, 2} and _is_historical_self_host(work_id) and len(anchors) != 9:
         raise PrerequisiteError("self-hosted PLAN must have exactly nine task anchors")
     progress = _semantic_progress(progress)
     profile_lines = re.findall(r"^Execution Profile: (\S+)$", progress, re.MULTILINE)
@@ -1192,7 +1216,7 @@ def check_prerequisite_v1(base_path: Path, work_id: WorkId, task: int) -> dict[s
             raise PrerequisiteError(str(exc)) from exc
     elif task == 1:
         historical_self_host_profile = (
-            str(work_id) == SELF_HOSTED_WORK_ID and bool(profile_lines)
+            _is_historical_self_host(work_id) and bool(profile_lines)
         )
         if (
             ledger.reviewed_complete
@@ -1339,7 +1363,7 @@ def _validate_bootstrap_retry_state(
 
 def bootstrap_self_hosted_metrics(base_path: Path, work_id: WorkId, through_task: int) -> ParsedMetrics:
     """Crash-idempotently publish or validate the self-hosted metrics ledger."""
-    if str(work_id) != SELF_HOSTED_WORK_ID or through_task != 2:
+    if not _is_historical_self_host(work_id) or through_task != 2:
         raise PrerequisiteError("self-hosted bootstrap arguments are not canonical")
     repo_fd = workspace_fd = run_fd = execution_fd = None
     logs_fd = lock_fd = None
@@ -1661,7 +1685,7 @@ def _validate_current_metrics(
 def _is_self_host_partial(parsed: ParsedMetrics) -> bool:
     """Return whether this is the one non-representative self-host observation."""
     return (
-        parsed.header["work_id"] == SELF_HOSTED_WORK_ID
+        _is_historical_self_host(parsed.header["work_id"])
         and not parsed.header["instrumentation_complete"]
         and parsed.header["bootstrap_gap"] == SELF_HOSTED_BOOTSTRAP_GAP
     )
@@ -2668,7 +2692,7 @@ def _summarize_sample(
             "identity_unique",
             "metrics work_id does not match the pinned sample identity",
         ))
-    if record.status != RunStatus.ARCHIVED or header["profile"] != "strict" or str(work_id) == SELF_HOSTED_WORK_ID:
+    if record.status != RunStatus.ARCHIVED or header["profile"] != "strict" or _is_historical_self_host(work_id):
         failures.append(_sample_failure(canonical, str(work_id), "archived_strict", "sample must be an archived strict non-self-hosted run"))
     if (
         header["instrumentation_schema"] != INSTRUMENTATION_SCHEMA

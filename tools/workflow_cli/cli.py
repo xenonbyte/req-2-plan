@@ -88,6 +88,7 @@ from tools.workflow_cli.execution_metrics import (
     PlanNotFoundError,
     PrerequisiteError,
     RepresentativeSamplesError,
+    RunNotFoundError,
     _canonical_json,
     acknowledge_metrics_completion,
     append_metrics_invocation,
@@ -1182,6 +1183,8 @@ def _cmd_run_execute_start(args):
         record = start_execution_transaction(
             (args.base_path or Path.cwd()).resolve(), work_id, args.profile
         )
+    except RunNotFoundError as exc:
+        print_and_exit(format_error(str(exc), exit_code=EXIT_NOT_FOUND), EXIT_NOT_FOUND)
     except PlanNotFoundError:
         print_and_exit(
             format_error(
@@ -1223,6 +1226,8 @@ def _cmd_execution_prerequisite_check(args):
             args.task,
             require_version=args.require_version,
         )
+    except RunNotFoundError as exc:
+        print_and_exit(format_error(str(exc), exit_code=EXIT_NOT_FOUND), EXIT_NOT_FOUND)
     except (MetricsFormatError, PrerequisiteError) as exc:
         print_and_exit(format_error(str(exc), exit_code=EXIT_CONFLICT), EXIT_CONFLICT)
     print_and_exit(
@@ -1241,6 +1246,8 @@ def _cmd_execution_progress(args):
             args.action, args.expected_sequence, status=args.status,
             head=args.head, reason=args.reason,
         )
+    except RunNotFoundError as exc:
+        print_and_exit(format_error(str(exc), exit_code=EXIT_NOT_FOUND), EXIT_NOT_FOUND)
     except (ExecutionProfileError, MetricsFormatError, OSError) as exc:
         print_and_exit(format_error(str(exc), exit_code=EXIT_CONFLICT), EXIT_CONFLICT)
     print_and_exit(format_success(result, message=result["result"]), EXIT_OK)
@@ -1256,6 +1263,8 @@ def _cmd_execution_metrics_bootstrap(args):
         parsed = bootstrap_self_hosted_metrics(
             args.base_path or Path.cwd(), _validate_work_id(args.work_id), args.self_hosted_gap_through_task
         )
+    except RunNotFoundError as exc:
+        print_and_exit(format_error(str(exc), exit_code=EXIT_NOT_FOUND), EXIT_NOT_FOUND)
     except (MetricsFormatError, PrerequisiteError) as exc:
         print_and_exit(format_error(str(exc), exit_code=EXIT_CONFLICT), EXIT_CONFLICT)
     print_and_exit(
@@ -1275,6 +1284,8 @@ def _cmd_execution_metrics_bootstrap(args):
 def _metrics_result_or_exit(operation, *values):
     try:
         result = operation(*values)
+    except RunNotFoundError as exc:
+        print_and_exit(format_error(str(exc), exit_code=EXIT_NOT_FOUND), EXIT_NOT_FOUND)
     except MetricsInputError as exc:
         print_and_exit(format_error(str(exc), exit_code=EXIT_CLI_ERR), EXIT_CLI_ERR)
     except (MetricsFormatError, PrerequisiteError, OSError) as exc:

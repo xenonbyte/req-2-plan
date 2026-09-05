@@ -330,6 +330,7 @@ paths safe.
 |---|---|
 | `ModuleNotFoundError: No module named 'yaml'` | Install `pyyaml` into the Python selected by the agent's shell; check its `PATH`, especially when using a virtual environment. |
 | Installation looks healthy, but a run is paused | `r2p status` checks integrations. Use `r2p-status` and follow the run's printed `next:` action. |
+| Start, progress, prerequisite, or metrics commands return exit `7` or `6` | `7` means the selected workspace/run directory is absent; execution start also uses it for a missing PLAN. `6` covers unsafe paths and damaged existing execution state, including missing recovery files. Check the work ID and restore the required state. |
 | Execution stops with a dirty-worktree conflict | Inspect `git status --short -- ':!.req-to-plan'` and resolve your code changes before retrying. |
 | Resume returns `recover_role_result` | Recover the recorded invocation's result; establish whether it is still running before any retry. |
 | Fast preflight rejects the run | Address the eligibility finding or explicitly choose `strict`; structural eligibility alone cannot approve task semantics. |

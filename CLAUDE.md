@@ -137,6 +137,16 @@ Symlinked or non-directory execution paths remain unsafe even with `--force`.
 
 - **Exit codes** (`output.py`): `0` ok · `2` cli error · `3` gate fail · `4` dry
   run · `5` review required · `6` conflict · `7` not found.
+- **Execution lookup errors**: missing workspace/run directories return `7` at
+  the pinned lookup boundary. Existing run directories with missing recovery
+  files, malformed records, or unsafe sources remain `6`; execution start
+  retains `7` for a missing PLAN. See [execution compatibility](docs/execution-compatibility.md).
+- **Historical self-host compatibility**: route exact work-ID checks through
+  `execution_metrics._is_historical_self_host`; reopened descendants use
+  ordinary rules. Keep archived ledgers readable and the original observation
+  non-representative. Remove compatibility only after the explicit
+  support/migration conditions in [execution compatibility](docs/execution-compatibility.md),
+  not merely when a run is archived.
 - **Terminal-for-open-run scanning**: `agent_shortcuts.is_terminal()` treats
   `CLOSED_AT_PLAN_CHECKPOINT` and `ARCHIVED` as terminal. `EXECUTING` blocks
   starting a new run; `CLOSED_AT_PLAN_CHECKPOINT` is non-blocking and is
