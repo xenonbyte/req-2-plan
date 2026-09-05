@@ -29,6 +29,7 @@ from tools.workflow_cli.markdown import (
     heading_level,
     plan_task_anchors,
     PLAN_TASK_ANCHOR_RE as _PLAN_TASK_RE,
+    PLAN_TASK_CHECKBOX_RE,
     strip_html_comments_outside_fences,
     strip_nonsemantic_markdown,
     unfenced_markdown_lines,
@@ -1693,10 +1694,6 @@ def check_final_review_recorded(run_dir: Path) -> GateResult:
 # Execution Completion Gate
 # ---------------------------------------------------------------------------
 
-_LEDGER_UNCHECKED_RE = re.compile(r"^\s*-\s*\[\s*\]\s*(PLAN-TASK-\d+)\b")
-_LEDGER_CHECKED_RE = re.compile(r"^\s*-\s*\[[xX]\]\s*(PLAN-TASK-\d+)\b")
-
-
 def _read_regular_text_no_symlink(path: Path) -> tuple[str | None, str | None]:
     """Read a regular file without following a symlink where the OS supports it."""
     if path.parent.is_symlink() or path.is_symlink():
@@ -1783,11 +1780,16 @@ def check_execution_complete(run_dir: Path) -> GateResult:
     semantic_ledger = strip_html_comments_outside_fences(ledger_text)
     lines = [line for line, _, _ in unfenced_markdown_lines(semantic_ledger)]
     issues: list[str] = []
-    for line in lines:
-        if _LEDGER_UNCHECKED_RE.match(line):
+    rows = [
+        (line, match.group(1).lower(), match.group(2))
+        for line in lines
+        if (match := PLAN_TASK_CHECKBOX_RE.match(line))
+    ]
+    for line, mark, _task_id in rows:
+        if not mark:
             issues.append(f"Unfinished execution task: {line.strip()}")
     if not issues:
-        checked_ids = {m.group(1) for line in lines if (m := _LEDGER_CHECKED_RE.match(line))}
+        checked_ids = {task_id for _line, mark, task_id in rows if mark == "x"}
         # Cross-check the ledger against the frozen PLAN: every declared PLAN-TASK
         # must be checked off, so a truncated ledger (a dropped task line) cannot
         # pass as complete. Both inputs are CLI-owned artifacts; no new trust.

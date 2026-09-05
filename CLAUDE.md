@@ -11,8 +11,9 @@ update both.)
 `@xenonbyte/req-2-plan` (npm) ships a Python CLI plus an installer that generates
 per-platform agent surfaces (`claude` / `codex` / `gemini` / `opencode`) for a
 staged, gated **requirement → PLAN** workflow, and can then execute that PLAN in
-place. Runtime is Python 3.11/3.12 (stdlib + `pyyaml` only); there is no database
-and no server — all run state lives on disk under `.req-to-plan/<work-id>/`.
+place. CI targets Python 3.11/3.12; Python dependencies are stdlib + `pyyaml`
+only. There is no database and no server — all run state lives on disk under
+`.req-to-plan/<work-id>/`.
 Node 18+ is used solely by the thin launcher `bin/r2p.js`, which sets
 `PYTHONPATH` and execs `python3 -m tools.workflow_cli.install_cli`.
 
@@ -24,13 +25,15 @@ Node 18+ is used solely by the thin launcher `bin/r2p.js`, which sets
 .venv/bin/python -m pytest tests/test_cli.py -v   # one module
 .venv/bin/python -m pytest tests/test_cli.py -v -k tier_lock   # one test
 npm run test:local                                # == .venv/bin/python -m pytest
+# Docs / template contract checks
+.venv/bin/python -m pytest tests/test_docs_consistency.py tests/test_readme.py -q
 # CI shape (fresh venv w/ requirements-dev.txt, Python 3.11 + 3.12 matrix): python -m pytest -q
 
 # Run the workflow CLI directly (no npm/global install needed)
 .venv/bin/python -m tools.workflow_cli --help
 bin/r2p.js version                                # package.json `prepack` runs this
 
-# Install into a real agent home — writes real ~/.req-to-plan (NOT isolated)
+# Only when installation is requested — writes real agent homes and ~/.req-to-plan
 .venv/bin/python -m tools.workflow_cli.install_cli install --platform claude
 ```
 
@@ -80,7 +83,7 @@ doubt, read the module, not this file.
 
 | Module | Responsibility |
 |---|---|
-| `models.py` | Core types: `RunStatus`, `Stage`, `TierBase`, `TierModifier`, `TierEstimate`, `WorkId`, `ALLOWED_TRANSITIONS` |
+| `models.py` | Core types: `RunStatus`, `Stage`, `TierBase`, `TierModifier`, `TierEstimate`, `WorkId`; `ALLOWED_TRANSITIONS` and `ALLOWED_COMMANDS_BY_RUN_STATE` |
 | `state.py` | `RunStateManager`, `run.md` read/write, transition validation |
 | `artifact.py` | `ArtifactManager`, YAML frontmatter, ready/stale flags |
 | `tier.py` / `tier_keywords.yaml` | Keyword scan, tier floor computation, estimation + keyword bank |
@@ -88,10 +91,15 @@ doubt, read the module, not this file.
 | `context_pack.py` | Project Context Pack: deps, test commands, entrypoints, config, source dirs |
 | `link_expander.py` | Local relative-link expansion for requirement intake |
 | `stage_schema.py` / `stage_templates.py` | Required headings per stage/tier + structural seed templates; `stage_templates.py` also seeds PLAN's optional, removable **non-gate** sections (`## Execution Readiness`, `## Risk Handling`) — absent from `STAGE_SCHEMA`/`PLAN_TASK_FIELDS`, so deleting them still passes the quality gate. There is no per-task "defer" field: a decomposition stage may not push requirement content to a later run (see R20) |
-| `markdown.py` / `atomic.py` | Fence-aware Markdown helpers (incl. offset-preserving `strip_nonsemantic_markdown` / `strip_html_comments_outside_fences`); atomic text writes + symlink-safe `read_regular_text` |
+| `markdown.py` / `atomic.py` | Fence-aware Markdown filtering: compact `strip_nonsemantic_markdown` and source-offset-preserving `mask_nonsemantic_markdown` / `strip_html_comments_outside_fences`; atomic text writes + symlink-safe `read_regular_text` |
 | `workspace.py` | Neutral `.req-to-plan/` workspace helpers (imports neither `cli.py` nor `agent_shortcuts.py`): owns the workspace `.gitignore` and the path-limited git-commit primitive used by run-close (add) and run-archive (remove) |
 | `trace.py` | Derived trace model and closure checks |
 | `gates.py` | Entry/quality gates, execution completion gate, forced-review checks |
+| `execution_context.py` | Fixed semantic context view from a pinned run tree; per-source and aggregate UTF-8 byte counts |
+| `execution_profile.py` | Profile/marker and prerequisite grammar, fast eligibility, immutable implementation ranges, commit-chain validation |
+| `execution_journal.py` | Authoritative role checkpoints, next-role selection, and separate task/final repair ranges |
+| `execution_progress.py` | Atomic progress begin/complete/recover/escalate transitions and read-only resume validation |
+| `execution_metrics.py` | Execution-start transaction, dispatch prerequisite checks, and non-authoritative metrics append/ack/finalize/sample validation |
 | `output.py` | Exit code constants, output formatting, JSON mode |
 | `cli.py` / `agent_shortcuts.py` | Argparse router; `r2p-*` shortcut surface + active-pointer helpers |
 | `install.py` / `install_cli.py` | Install/uninstall/status service + manifest safety; lifecycle binary |
@@ -101,19 +109,29 @@ doubt, read the module, not this file.
 
 ```text
 not_started -> active_stage_draft
-active_stage_draft -> active_stage_draft | entry_gate_failed | quality_gate_failed | ready_for_checkpoint_review | upstream_gap_routing
-entry_gate_failed -> active_stage_draft | upstream_gap_routing
-quality_gate_failed -> active_stage_draft | upstream_gap_routing
-ready_for_checkpoint_review -> active_stage_draft | checkpoint_review | upstream_gap_routing
-checkpoint_review -> active_stage_draft | checkpoint_changes_requested | checkpoint_approved | upstream_gap_routing
-checkpoint_changes_requested -> active_stage_draft | quality_gate_failed | upstream_gap_routing
-upstream_gap_routing -> active_stage_draft | upstream_gap_routing | ready_for_checkpoint_review | checkpoint_approved
-checkpoint_approved -> next_stage | closed_at_plan_checkpoint | upstream_gap_routing
-next_stage -> active_stage_draft | entry_gate_failed
+active_stage_draft -> active_stage_draft | entry_gate_failed | quality_gate_failed | ready_for_checkpoint_review | upstream_gap_routing | archived
+entry_gate_failed -> active_stage_draft | upstream_gap_routing | archived
+quality_gate_failed -> active_stage_draft | upstream_gap_routing | archived
+ready_for_checkpoint_review -> active_stage_draft | checkpoint_review | upstream_gap_routing | archived
+checkpoint_review -> active_stage_draft | checkpoint_changes_requested | checkpoint_approved | upstream_gap_routing | archived
+checkpoint_changes_requested -> active_stage_draft | quality_gate_failed | upstream_gap_routing | archived
+upstream_gap_routing -> active_stage_draft | upstream_gap_routing | ready_for_checkpoint_review | checkpoint_approved | archived
+checkpoint_approved -> next_stage | closed_at_plan_checkpoint | upstream_gap_routing | archived
+next_stage -> active_stage_draft | entry_gate_failed | archived
 closed_at_plan_checkpoint -> executing | archived
 executing -> executing | closed_at_plan_checkpoint | archived
 archived -> none
 ```
+
+Open-state transitions to `archived` are owned only by explicit `r2p-abandon`.
+Successful `r2p-reopen` archives its direct closed/executing source after the
+child is durable and refuses to create another child while the lineage already
+has an active reopened run. Malformed source or same-lineage run records block
+reopen with exit `6` before child/archive writes; never skip an unreadable sibling.
+
+A closed run with `execution/` or execution-start owner residue needs recovery
+through `r2p-execute`, or explicit `--force` archive for intentional abandonment.
+Symlinked or non-directory execution paths remain unsafe even with `--force`.
 
 ## Invariants (verify against code before changing)
 
@@ -153,6 +171,48 @@ archived -> none
   the cwd **and the script's own dir** from `sys.path` before prepending the repo
   root, so `tools/workflow_cli/` modules (notably `trace`) cannot shadow their
   stdlib namesakes. Do not revert to `-I` or drop the sys.path surgery.
+- **Execution recovery protocol**: start rejects code-tree changes outside
+  `.req-to-plan/` before capturing `Execution BASE`. It publishes the run-level
+  `.execution-start-transaction.json` owner atomically before creating
+  `execution/` and removes it only after rollback or durable `EXECUTING` state.
+  `r2p-progress begin/complete` atomically records dispatch/results in
+  `progress.md` using `--expected-sequence`; resume selects the journal's role,
+  never metrics. Original implementation ranges remain immutable; task/final
+  repair ranges live
+  separately in the journal and reviewers consume the returned `review_ranges`.
+  An inflight role is recovered, not automatically redispatched. Legacy
+  committed implementation needs explicit DONE/BASE..HEAD
+  report evidence for `r2p-progress recover`. After authoritative completion,
+  metrics append persists its exact retry request and clears it through
+  `r2p-metrics-ack`; metrics failures never gate valid progress/resume/archive.
+  Missing legacy observations remain an explicit incomplete-instrumentation gap.
+- **Execution retries and verification**: BLOCKED retries the same role/task/fix
+  wave after resolution with a new sequence. Preserve TDD red and failed
+  historical checks; final verification requires the latest result of every
+  command to pass, including a full suite. Fully journaled metrics finalization
+  requires exact role coverage. Fast escalation can occur after its primary
+  final review; later strict implementation follows the effective profile.
+- **Execution profiles and prerequisites**: `strict` is the default. `fast` is
+  explicit opt-in after a LIGHT/no-modifier preflight, valid prerequisite v2
+  across every task, and semantic eligibility confirmation; escalation is
+  one-way to strict. A PLAN with no prerequisite declarations uses legacy v1;
+  mixed or malformed declarations block start. Run the installed
+  `r2p-prerequisite-check` immediately before implementer dispatch, never as task
+  `Verification` or an ordinary post-commit reviewer/fixer check. Its reads pin
+  run directories and verify the embedded work ID.
+- **Semantic context delivery**: each role runs
+  `r2p-context-view --work-id <id> --with-stats` itself; the controller passes the
+  command, never reads/relays its content or creates a persistent context bundle.
+  `execution_context.CONTEXT_SOURCE_PATHS` pins `02-project-context.md`, stages
+  03–06, and `execution/progress.md`; the final reviewer reads `07-plan.md`
+  separately. Return aggregate `semantic_bytes` as metrics `context_bytes`: it
+  includes source headings and separators, unlike the sum of per-source counts.
+  Bytes and elapsed time are not Token measurements; unavailable telemetry stays
+  `unavailable`.
+- **Final evidence boundaries**: report paths must match their role/task.
+  Approved final ack requires every task reviewed-complete and no implemented
+  markers; metrics finalization requires an empty pending journal under the
+  metrics lock. Task fix-wave evidence is a complete unfenced `Fix Wave N` line.
 - **JSON mode**: set `R2P_JSON=1` for machine-readable output.
 - **Version**: `tools/workflow_cli/version.py` (`R2P_VERSION`) is the single
   source — never hardcode the version in docs.
@@ -170,8 +230,14 @@ archived -> none
   artifact text with `strip_nonsemantic_markdown` — seeded read-only sections
   removed **and** HTML comments masked to spaces (offset-preserving, so removal
   can't concatenate adjacent IDs/fields; fence-aware, so fenced examples stay
-  verbatim). So commented-out headings, PLAN-TASK fields, trace IDs, and fenced
-  snippets neither satisfy nor trip a gate. Trace-ID matching (`SPEC_ID_RE`,
+  verbatim). Progress edits use `mask_nonsemantic_markdown`, which shares the
+  read-only boundaries but blanks them in place to preserve all original
+  character offsets and every `str.splitlines()` boundary, including Unicode
+  separators in read-only text and comments; compact output offsets must not be
+  used to edit source text. So commented-out headings, PLAN-TASK fields, trace
+  IDs, and fenced snippets neither satisfy nor trip a gate. Reuse
+  `PLAN_TASK_CHECKBOX_RE` over `unfenced_markdown_lines` for execution checkboxes.
+  Trace-ID matching (`SPEC_ID_RE`,
   `_SCOPE_IN_ID_RE`, `_ID_RE`, and the closure-vicinity search in
   `gates._find_ids_without_closure`) is token-boundary-aware: `SPEC-…-1` is not
   closed by `SPEC-…-10`, and a line bearing only a suffixed/typo'd variant
@@ -212,38 +278,41 @@ archived -> none
 
 ## Test rules
 
-- Isolate every test with `tempfile.TemporaryDirectory` and pass
-  `base_path=Path(tmp)` to CLI/shortcut calls. **Never** touch the real
+- Isolate CLI/shortcut tests with `tempfile.TemporaryDirectory` or pytest's
+  `tmp_path` and pass the temporary directory as `base_path`. Installation tests
+  also redirect platform homes and the manifest root. **Never** touch the real
   `~/.req-to-plan/` or the repo's own `.req-to-plan/`.
-- New behavior gets a focused test first (red → green → commit). Keep the full
+- New behavior gets a focused test first (red → green). Keep the full
   suite green; describe its size qualitatively, never with a frozen number.
 - `print_and_exit` calls `sys.exit`; tests that call `cli.main()` must catch
   `SystemExit`.
-- `tests/test_docs_consistency.py` guards two things you can silently break when
-  editing docs/templates:
+- `tests/test_docs_consistency.py` guards documentation and agent-template
+  contracts:
   - **This file (`CLAUDE.md`) must contain no hardcoded test count** (e.g.
     "NN passing", "baseline: NN"). Describe the suite qualitatively.
-  - Agent-template surfaces must carry required tokens — `r2p-continue` →
-    "unresolved ambiguity" / "undecided point"; `r2p-execute` → the SDD set
-    (in-place on `current branch`, `Pre-flight`, `Verification`,
-    `fresh implementer subagent`, `task-reviewer`, `whole-branch review`,
-    `NEEDS_CONTEXT`, dirty-tree block `stop before dispatching Task 1` /
-    `Do not commit unrelated work` / `git status --short -- ':!.req-to-plan'`,
-    plus the FR-A additions `Model Selection`, `HEAD~1`,
-    `execution/final-review.md`, `Verdict: Approved`,
-    `re-run the full verification suite`) — and `r2p-execute` templates must
-    **not** mention `r2p-gap-open` (execution runs are `closed`, so upstream
-    defects go through reopen/human repair, not gap routing). A separate guard,
-    `test_execute_surfaces_carry_template_hardening_tokens`, pins the EXE-1..EXE-5
-    execution-protocol prose with distinctive load-bearing tokens that must appear
-    on **both** `r2p-execute` surfaces (claude command + codex SKILL) in lockstep;
-    deleting any from either surface fails the test.
+  - PLAN-author surfaces carry ambiguity/no-deferral rules and prerequisite v2
+    guidance. Both execution surfaces carry SDD, EXE-1..EXE-5, semantic-context,
+    authoritative-progress, and metrics/recovery contracts in lockstep;
+    execution templates must **not** mention `r2p-gap-open`. Use the test's token
+    sets as the detailed checklist.
+- `tests/test_readme.py` keeps `README.md` and `README.zh-CN.md` headings,
+  commands, and key literals aligned; update both when public behavior changes.
+- Wrapper/distribution changes need `tests/test_install.py`,
+  `tests/test_bootstrap.py`, `tests/test_npm_package.py`, and, for the context
+  wrapper, `tests/test_context_view_wrapper.py`. These isolated checks do not
+  install into real agent homes.
 
 ## Extending
 
 - **Add a CLI command**: add the handler to `cli.py`, register it in the relevant
   `_register_*_commands` function, use the constants from `output.py`, and add
   tests following the local `invoke()` helper pattern.
+- **Expose an agent command**: add the executable `tools/r2p-*` wrapper and use
+  `{{R2P_BIN_DIR}}/r2p-*` in templates; an internal argparse command alone is not
+  an installed entrypoint. Preserve bootstrap isolation and argument forwarding.
+  Update Claude/Codex contracts together and Gemini's corresponding guidance;
+  verify derived OpenCode commands through install tests, not a new template
+  directory.
 - **Extend tier keywords**: edit `tools/workflow_cli/tier_keywords.yaml`; keep the
   modifier groups (`migration`, `cross_project`, `safety`, `dependency`,
   `scope_expanding`), add English and Chinese variants when applicable, and run
@@ -253,7 +322,8 @@ archived -> none
 
 - `.req-to-plan/` run dirs (`<work-id>/`) are **tracked** — close/archive commit
   them via the path-scoped commit; only `.req-to-plan/archive`, `.workflow-active`,
-  `<work-id>/logs/`, and `<work-id>/execution/` are ignored (see
+  `<work-id>/logs/`, `<work-id>/execution/`, and the transient
+  `<work-id>/.execution-start-transaction.json` owner are ignored (see
   `.req-to-plan/.gitignore`). `execution/` is ignored like `logs/` because the
   SDD execution ledger/reports/reviews are local audit trail, never shared git
   history — the durable outputs are the per-task code commits plus the archived

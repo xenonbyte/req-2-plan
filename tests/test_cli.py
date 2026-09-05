@@ -27,7 +27,7 @@ from tools.workflow_cli.models import (
     TierModifier,
     WorkId,
 )
-from tools.workflow_cli.state import RunStateManager
+from tools.workflow_cli.state import RunStateManager, create_run_record
 
 
 # ---------------------------------------------------------------------------
@@ -1000,6 +1000,206 @@ class TestRunClose:
 
 
 class TestRunReopen:
+    @pytest.mark.parametrize("json_mode", [False, True])
+    @pytest.mark.parametrize(
+        ("target", "defect"),
+        [
+            ("source", "status"), ("source", "identity"),
+            ("source", "lineage"), ("source", "legacy_lineage"),
+            ("sibling", "status"), ("sibling", "stage"),
+            ("sibling", "identity"),
+        ],
+    )
+    def test_reopen_rejects_malformed_records_before_mutation(
+        self, capsys, monkeypatch, json_mode, target, defect
+    ):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = "WF-20260605-malformed"
+            record = create_run_record(WorkId(source))
+            record.status = RunStatus.CLOSED_AT_PLAN_CHECKPOINT
+            record.current_stage = Stage.CLOSED
+            save_record(root, record)
+            sibling = f"{source}-r1"
+            save_record(root, create_run_record(WorkId(sibling)))
+            target_id = source if target == "source" else sibling
+            path = root / ".req-to-plan" / target_id / "run.md"
+            text = path.read_text(encoding="utf-8")
+            if defect == "status":
+                text, changes = re.subn(r"(## Status\n\s*)\S+", r"\1invalid_status", text)
+                assert changes == 1
+            elif defect == "stage":
+                text, changes = re.subn(r"(## Current Stage\n\s*)\S+", r"\1invalid_stage", text)
+                assert changes == 1
+            elif defect == "identity":
+                text = text.replace(f"# Workflow Run: {target_id}", "# Missing identity")
+            else:
+                record.reopen_lineage = (
+                    "lineage_root: invalid-root; reopened_from: ignored@plan_checkpoint"
+                    if defect == "lineage" else
+                    "reopened_from: invalid-parent@plan_checkpoint reason: test"
+                )
+                save_record(root, record)
+                text = path.read_text(encoding="utf-8")
+            path.write_text(text, encoding="utf-8")
+            before = {p.relative_to(root): p.read_bytes() for p in root.rglob("*") if p.is_file()}
+            directories = {p.relative_to(root) for p in root.rglob("*") if p.is_dir()}
+            monkeypatch.setenv("R2P_JSON", "1" if json_mode else "0")
+
+            invoke(
+                ["run-reopen", "--from", source, "--stage", "plan", "--reason", "repair"],
+                base_path=root, expect_exit=6,
+            )
+
+            output = capsys.readouterr()
+            assert not output.err
+            assert "Traceback" not in output.out
+            assert target_id in output.out
+            assert "run.md" in output.out
+            assert "Invalid reopen" in output.out
+            if json_mode:
+                assert json.loads(output.out)["exit_code"] == 6
+            assert {p.relative_to(root): p.read_bytes() for p in root.rglob("*") if p.is_file()} == before
+            assert {p.relative_to(root) for p in root.rglob("*") if p.is_dir()} == directories
+
+    def test_reopen_auto_archives_closed_source_after_child_is_durable(self, tmp_path):
+        source = "WF-20260605-auto-archive"
+        invoke(
+            ["run-start", "--work-id", source, "--requirement", "repair plan"],
+            base_path=tmp_path,
+        )
+        record = load_record(tmp_path, source)
+        record.status = RunStatus.CLOSED_AT_PLAN_CHECKPOINT
+        record.current_stage = Stage.CLOSED
+        record.approved_checkpoints = [plan_checkpoint()]
+        save_record(tmp_path, record)
+
+        invoke(
+            [
+                "run-reopen",
+                "--from", source,
+                "--stage", "plan",
+                "--reason", "repair plan",
+            ],
+            base_path=tmp_path,
+        )
+
+        child = f"{source}-r1"
+        assert (tmp_path / ".req-to-plan" / child / "run.md").is_file()
+        child_record = load_record(tmp_path, child)
+        assert child_record.resume_context.last_completed_operation == "reopen_run"
+        assert child_record.resume_context.next_allowed_operation == "produce_stage_artifact"
+        assert child_record.resume_context.active_item == "plan"
+        assert not (tmp_path / ".req-to-plan" / source).exists()
+        archived = RunStateManager(
+            tmp_path / ".req-to-plan" / "archive" / source
+        ).load()
+        assert archived.status == RunStatus.ARCHIVED
+        assert archived.resume_context.last_completed_operation == "reopen_superseded"
+        assert archived.resume_context.next_allowed_operation == f"continue_reopened_run:{child}"
+        assert archived.resume_context.resume_reason == f"superseded_by:{child}"
+
+    def test_reopen_blocks_when_same_lineage_has_active_child(self, tmp_path, capsys):
+        source = "WF-20260605-active-child"
+        invoke(
+            ["run-start", "--work-id", source, "--requirement", "repair plan"],
+            base_path=tmp_path,
+        )
+        record = load_record(tmp_path, source)
+        record.status = RunStatus.CLOSED_AT_PLAN_CHECKPOINT
+        record.current_stage = Stage.CLOSED
+        record.approved_checkpoints = [plan_checkpoint()]
+        save_record(tmp_path, record)
+
+        child = f"{source}-r1"
+        child_dir = tmp_path / ".req-to-plan" / child
+        child_dir.mkdir()
+        child_record = create_run_record(WorkId(child))
+        child_record.reopen_lineage = (
+            f"reopened_from: {source}@plan_checkpoint reason: first draft"
+        )
+        RunStateManager(child_dir).save(child_record)
+
+        invoke(
+            [
+                "run-reopen",
+                "--from", source,
+                "--stage", "plan",
+                "--reason", "replace first draft",
+            ],
+            base_path=tmp_path,
+            expect_exit=6,
+        )
+
+        assert "active reopened run already exists" in capsys.readouterr().out
+        assert (tmp_path / ".req-to-plan" / source / "run.md").is_file()
+        assert (child_dir / "run.md").is_file()
+        assert not (tmp_path / ".req-to-plan" / f"{source}-r2").exists()
+
+    def test_reopen_archive_collision_rolls_back_child(self, tmp_path):
+        source = "WF-20260605-archive-collision"
+        invoke(
+            ["run-start", "--work-id", source, "--requirement", "repair plan"],
+            base_path=tmp_path,
+        )
+        record = load_record(tmp_path, source)
+        record.status = RunStatus.CLOSED_AT_PLAN_CHECKPOINT
+        record.current_stage = Stage.CLOSED
+        record.approved_checkpoints = [plan_checkpoint()]
+        save_record(tmp_path, record)
+        archive_dir = tmp_path / ".req-to-plan" / "archive" / source
+        archive_dir.mkdir(parents=True)
+        (archive_dir / "sentinel.txt").write_text("keep\n", encoding="utf-8")
+
+        invoke(
+            [
+                "run-reopen",
+                "--from", source,
+                "--stage", "plan",
+                "--reason", "repair plan",
+            ],
+            base_path=tmp_path,
+            expect_exit=6,
+        )
+
+        assert (tmp_path / ".req-to-plan" / source / "run.md").is_file()
+        assert not (tmp_path / ".req-to-plan" / f"{source}-r1").exists()
+        assert (archive_dir / "sentinel.txt").read_text(encoding="utf-8") == "keep\n"
+
+    def test_reopen_rejects_unsafe_execution_residue_before_child_write(
+        self, tmp_path, capsys
+    ):
+        source = "WF-20260605-unsafe-execution"
+        invoke(
+            ["run-start", "--work-id", source, "--requirement", "repair plan"],
+            base_path=tmp_path,
+        )
+        record = load_record(tmp_path, source)
+        record.status = RunStatus.EXECUTING
+        record.current_stage = Stage.CLOSED
+        save_record(tmp_path, record)
+        run_dir = tmp_path / ".req-to-plan" / source
+        outside = tmp_path / "outside-execution"
+        outside.mkdir()
+        (run_dir / "execution").symlink_to(outside, target_is_directory=True)
+
+        invoke(
+            [
+                "run-reopen",
+                "--from", source,
+                "--stage", "plan",
+                "--reason", "repair plan",
+            ],
+            base_path=tmp_path,
+            expect_exit=6,
+        )
+
+        assert "unsafe execution residue" in capsys.readouterr().out.lower()
+        assert (run_dir / "run.md").is_file()
+        assert (run_dir / "execution").is_symlink()
+        assert not (tmp_path / ".req-to-plan" / f"{source}-r1").exists()
+        assert not (tmp_path / ".req-to-plan" / "archive" / source).exists()
+
     @pytest.mark.parametrize(
         ("source_name", "target_stage"),
         [
@@ -1061,13 +1261,13 @@ class TestRunReopen:
         record.approved_checkpoints = [plan_checkpoint()]
         save_record(tmp_path, record)
 
-        source_dir = tmp_path / ".req-to-plan" / source
         invoke(
             ["run-reopen", "--from", source, "--stage", "plan", "--reason", "repair plan"],
             base_path=tmp_path,
         )
 
         reopened_dir = tmp_path / ".req-to-plan" / f"{source}-r1"
+        source_dir = tmp_path / ".req-to-plan" / "archive" / source
         for context_file in ("02-project-context.json", "02-project-context.md"):
             assert (reopened_dir / context_file).read_text(encoding="utf-8") == (
                 source_dir / context_file
@@ -1087,12 +1287,24 @@ class TestRunReopen:
                 ["run-reopen", "--from", source, "--stage", "spec", "--reason", "fix gap"],
                 base_path=tmp,
             )
+            first_child = f"{source}-r1"
+            first_record = load_record(tmp, first_child)
+            first_record.status = RunStatus.CLOSED_AT_PLAN_CHECKPOINT
+            first_record.current_stage = Stage.CLOSED
+            first_record.approved_checkpoints = [plan_checkpoint()]
+            save_record(tmp, first_record)
             invoke(
-                ["run-reopen", "--from", source, "--stage", "spec", "--reason", "fix another gap"],
+                [
+                    "run-reopen",
+                    "--from", first_child,
+                    "--stage", "spec",
+                    "--reason", "fix another gap",
+                ],
                 base_path=tmp,
             )
 
-            assert (Path(tmp) / ".req-to-plan" / f"{source}-r1").exists()
+            assert (Path(tmp) / ".req-to-plan" / "archive" / source).exists()
+            assert (Path(tmp) / ".req-to-plan" / "archive" / first_child).exists()
             assert (Path(tmp) / ".req-to-plan" / f"{source}-r2").exists()
 
     def test_reopen_truncates_long_slug_to_leave_room_for_suffix(self, tmp_path):
@@ -1114,6 +1326,62 @@ class TestRunReopen:
 
         expected = f"WF-20260605-{'a' * 37}-r1"
         assert (tmp_path / ".req-to-plan" / expected / "run.md").is_file()
+        reopened = load_record(tmp_path, expected)
+        assert f"lineage_root: {source}" in (reopened.reopen_lineage or "")
+
+    @pytest.mark.parametrize("suffix", (1, 10))
+    def test_reopen_retry_detects_durable_truncated_child_before_source_archive(
+        self, tmp_path, capsys, suffix
+    ):
+        from tools.workflow_cli.cli import _reopen_candidate_work_id
+
+        lineage_root = f"WF-20260605-{'a' * 40}"
+        source = (
+            lineage_root
+            if suffix == 1
+            else str(_reopen_candidate_work_id(lineage_root, suffix - 1))
+        )
+        invoke(
+            ["run-start", "--work-id", source, "--requirement", "foo"],
+            base_path=tmp_path,
+        )
+        source_record = load_record(tmp_path, source)
+        source_record.status = RunStatus.CLOSED_AT_PLAN_CHECKPOINT
+        source_record.current_stage = Stage.CLOSED
+        source_record.approved_checkpoints = [plan_checkpoint()]
+        if suffix > 1:
+            source_record.reopen_lineage = (
+                f"lineage_root: {lineage_root}; "
+                "reopened_from: prior@plan_checkpoint reason: earlier reopen"
+            )
+        save_record(tmp_path, source_record)
+
+        child = str(_reopen_candidate_work_id(lineage_root, suffix))
+        child_dir = tmp_path / ".req-to-plan" / child
+        child_dir.mkdir()
+        child_record = create_run_record(WorkId(child))
+        child_record.reopen_lineage = (
+            f"lineage_root: {lineage_root}; "
+            f"reopened_from: {source}@plan_checkpoint reason: interrupted after save"
+        )
+        RunStateManager(child_dir).save(child_record)
+
+        invoke(
+            [
+                "run-reopen",
+                "--from", source,
+                "--stage", "plan",
+                "--reason", "retry after interruption",
+            ],
+            base_path=tmp_path,
+            expect_exit=6,
+        )
+
+        assert "active reopened run already exists" in capsys.readouterr().out
+        assert (tmp_path / ".req-to-plan" / source / "run.md").is_file()
+        assert (child_dir / "run.md").is_file()
+        next_child = str(_reopen_candidate_work_id(lineage_root, suffix + 1))
+        assert not (tmp_path / ".req-to-plan" / next_child).exists()
 
     def test_reopen_skips_suffix_reserved_by_archived_run(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1332,9 +1600,8 @@ class TestRunReopen:
             source_rec = load_record(base, source)
             assert source_rec.status == RunStatus.EXECUTING
 
-    def test_reopen_from_executing_normal_path_unchanged(self):
-        """SPEC-STATE-001: normal reopen from EXECUTING still creates new run and
-        transitions source to CLOSED_AT_PLAN_CHECKPOINT (existing behaviour)."""
+    def test_reopen_from_executing_auto_archives_source(self):
+        """A successful reopen preserves the executing source in archive."""
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
             source = "WF-20260527-exec-normal"
@@ -1364,9 +1631,13 @@ class TestRunReopen:
             assert new_run_dir.exists(), "New run dir must exist after normal reopen"
             assert (new_run_dir / "run.md").exists(), "New run.md must exist"
 
-            source_rec = load_record(base, source)
-            assert source_rec.status == RunStatus.CLOSED_AT_PLAN_CHECKPOINT, (
-                f"Source must be CLOSED_AT_PLAN_CHECKPOINT, got {source_rec.status}"
+            assert not (base / ".req-to-plan" / source).exists()
+            source_rec = RunStateManager(
+                base / ".req-to-plan" / "archive" / source
+            ).load()
+            assert source_rec.status == RunStatus.ARCHIVED
+            assert source_rec.resume_context.resume_reason == (
+                f"superseded_by:{source}-r1"
             )
 
 
@@ -3935,6 +4206,140 @@ class TestContextBuildCommand:
 
 
 # ---------------------------------------------------------------------------
+# context-view command
+# ---------------------------------------------------------------------------
+
+
+class TestContextViewCommand:
+    """SPEC-CONTEXT-011: expose the pinned semantic view through the internal CLI."""
+
+    WORK_ID = "WF-20260830-context-cli"
+
+    @staticmethod
+    def _seed_executing_context_run(base: Path, *, status=RunStatus.EXECUTING) -> Path:
+        from tools.workflow_cli.execution_context import CONTEXT_SOURCE_PATHS
+        from tools.workflow_cli.state import create_run_record
+
+        run_dir = base / ".req-to-plan" / TestContextViewCommand.WORK_ID
+        (run_dir / "execution").mkdir(parents=True)
+        record = create_run_record(WorkId(TestContextViewCommand.WORK_ID))
+        record.status = status
+        record.current_stage = Stage.CLOSED
+        RunStateManager(run_dir).save(record)
+
+        source_text = {
+            "02-project-context.md": "# Context\n你好 <!-- masked -->\n",
+            "03-requirement-brief.md": "brief\n",
+            "04-risk-discovery.md": "risk\n",
+            "05-design.md": "design\n",
+            "06-spec.md": "spec\n",
+            "execution/progress.md": "progress\n",
+        }
+        for relative_path in CONTEXT_SOURCE_PATHS:
+            path = run_dir / relative_path
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(source_text[relative_path], encoding="utf-8")
+        return run_dir
+
+    def test_context_view_emits_exact_human_content_and_json_shape(self, tmp_path, capsys, monkeypatch):
+        run_dir = self._seed_executing_context_run(tmp_path)
+        expected_content = (
+            "===== 02-project-context.md =====\n# Context\n你好\n\n"
+            "===== 03-requirement-brief.md =====\nbrief\n\n"
+            "===== 04-risk-discovery.md =====\nrisk\n\n"
+            "===== 05-design.md =====\ndesign\n\n"
+            "===== 06-spec.md =====\nspec\n\n"
+            "===== execution/progress.md =====\nprogress\n"
+        )
+
+        invoke(["context-view", "--work-id", self.WORK_ID], base_path=tmp_path)
+        assert capsys.readouterr().out == expected_content
+
+        monkeypatch.setenv("R2P_JSON", "1")
+        invoke(["context-view", "--work-id", self.WORK_ID], base_path=tmp_path)
+        payload = json.loads(capsys.readouterr().out)
+        assert set(payload) == {
+            "status", "message", "work_id", "sources", "raw_bytes", "semantic_bytes", "content"
+        }
+        assert payload["status"] == "ok"
+        assert payload["work_id"] == self.WORK_ID
+        assert payload["content"] == expected_content
+        assert [item["path"] for item in payload["sources"]] == [
+            "02-project-context.md",
+            "03-requirement-brief.md",
+            "04-risk-discovery.md",
+            "05-design.md",
+            "06-spec.md",
+            "execution/progress.md",
+        ]
+        assert payload["raw_bytes"] == sum(
+            len(path.read_bytes())
+            for path in (
+                run_dir / "02-project-context.md",
+                run_dir / "03-requirement-brief.md",
+                run_dir / "04-risk-discovery.md",
+                run_dir / "05-design.md",
+                run_dir / "06-spec.md",
+                run_dir / "execution/progress.md",
+            )
+        )
+        assert payload["semantic_bytes"] == len(expected_content.encode("utf-8"))
+
+    def test_context_view_with_stats_exposes_exact_bytes_without_json_env(self, tmp_path, capsys, monkeypatch):
+        self._seed_executing_context_run(tmp_path)
+        monkeypatch.delenv("R2P_JSON", raising=False)
+        invoke(["context-view", "--work-id", self.WORK_ID], base_path=tmp_path)
+        content = capsys.readouterr().out
+
+        invoke(["context-view", "--work-id", self.WORK_ID, "--with-stats"], base_path=tmp_path)
+
+        assert capsys.readouterr().out == (
+            f"semantic_bytes: {len(content.encode('utf-8'))}\n\n{content}"
+        )
+
+    def test_context_view_invalid_argument_exits_cli_error(self, tmp_path):
+        self._seed_executing_context_run(tmp_path)
+        invoke(["context-view", "--work-id", "../../outside"], base_path=tmp_path, expect_exit=2)
+
+    def test_context_view_missing_source_exits_not_found_without_partial_content(self, tmp_path, capsys, monkeypatch):
+        run_dir = self._seed_executing_context_run(tmp_path)
+        (run_dir / "06-spec.md").unlink()
+        monkeypatch.setenv("R2P_JSON", "1")
+
+        invoke(["context-view", "--work-id", self.WORK_ID], base_path=tmp_path, expect_exit=7)
+
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["status"] == "error"
+        assert payload["exit_code"] == 7
+        assert "content" not in payload
+        assert "sources" not in payload
+
+    def test_context_view_unsafe_source_and_wrong_status_exit_conflict_without_partial_content(self, tmp_path, capsys, monkeypatch):
+        run_dir = self._seed_executing_context_run(tmp_path)
+        outside = tmp_path / "outside.md"
+        outside.write_text("outside", encoding="utf-8")
+        (run_dir / "04-risk-discovery.md").unlink()
+        (run_dir / "04-risk-discovery.md").symlink_to(outside)
+        monkeypatch.setenv("R2P_JSON", "1")
+
+        invoke(["context-view", "--work-id", self.WORK_ID], base_path=tmp_path, expect_exit=6)
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["status"] == "error"
+        assert payload["exit_code"] == 6
+        assert "content" not in payload
+        assert "sources" not in payload
+
+        run_dir = self._seed_executing_context_run(tmp_path / "closed", status=RunStatus.CLOSED_AT_PLAN_CHECKPOINT)
+        monkeypatch.delenv("R2P_JSON")
+        invoke(
+            ["context-view", "--work-id", self.WORK_ID],
+            base_path=tmp_path / "closed",
+            expect_exit=6,
+        )
+        assert "===== " not in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
 # run-start: Context Pack + link expansion
 # ---------------------------------------------------------------------------
 
@@ -4300,6 +4705,642 @@ class TestRunArchive:
             rec = RunStateManager(run_dir).load()
             assert rec.status.value == "closed_at_plan_checkpoint"
 
+    def test_closed_archive_rejects_execution_residue_without_force(self, capsys):
+        from tools.workflow_cli.state import RunStateManager
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            run_dir = self._closed_run(base, "WF-20260101-arch")
+            exec_dir = run_dir / "execution"
+            exec_dir.mkdir()
+            (exec_dir / "progress.md").write_text("# Execution Progress\n", encoding="utf-8")
+
+            with pytest.raises(SystemExit) as exc:
+                main(["--base-path", str(base), "run-archive", "--work-id", "WF-20260101-arch"])
+
+            assert exc.value.code == 6
+            out = capsys.readouterr().out
+            assert "execution residue" in out
+            assert "r2p-execute" in out
+            assert "--force" in out
+            assert run_dir.exists()
+            assert not (base / ".req-to-plan" / "archive" / "WF-20260101-arch").exists()
+            assert RunStateManager(run_dir).load().status.value == "closed_at_plan_checkpoint"
+
+    def test_closed_archive_rejects_empty_execution_directory_without_force(self, capsys):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            run_dir = self._closed_run(base, "WF-20260101-arch")
+            (run_dir / "execution").mkdir()
+
+            with pytest.raises(SystemExit) as exc:
+                main(["--base-path", str(base), "run-archive", "--work-id", "WF-20260101-arch"])
+
+            assert exc.value.code == 6
+            assert "execution residue" in capsys.readouterr().out
+            assert run_dir.exists()
+            assert not (base / ".req-to-plan" / "archive" / "WF-20260101-arch").exists()
+
+    def test_closed_archive_rejects_start_transaction_owner_without_force(self, capsys):
+        from tools.workflow_cli.execution_metrics import START_TRANSACTION_OWNER
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            run_dir = self._closed_run(base, "WF-20260101-arch")
+            (run_dir / START_TRANSACTION_OWNER).write_text("{}\n", encoding="utf-8")
+
+            with pytest.raises(SystemExit) as exc:
+                main(["--base-path", str(base), "run-archive", "--work-id", "WF-20260101-arch"])
+
+            assert exc.value.code == 6
+            assert "execution residue" in capsys.readouterr().out
+            assert run_dir.exists()
+            assert not (base / ".req-to-plan" / "archive" / "WF-20260101-arch").exists()
+
+    def test_closed_archive_rejects_unsafe_start_owner_even_with_force(self, capsys):
+        from tools.workflow_cli.execution_metrics import START_TRANSACTION_OWNER
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            run_dir = self._closed_run(base, "WF-20260101-arch")
+            outside = base / "outside-owner"
+            outside.write_text("do not touch\n", encoding="utf-8")
+            (run_dir / START_TRANSACTION_OWNER).symlink_to(outside)
+
+            with pytest.raises(SystemExit) as exc:
+                main([
+                    "--base-path", str(base), "run-archive",
+                    "--work-id", "WF-20260101-arch", "--force",
+                ])
+
+            assert exc.value.code == 6
+            assert "unsafe execution residue" in capsys.readouterr().out.lower()
+            assert outside.read_text(encoding="utf-8") == "do not touch\n"
+            assert run_dir.exists()
+
+    def test_closed_archive_rejects_unsafe_execution_path_even_with_force(self, capsys):
+        from tools.workflow_cli.state import RunStateManager
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            run_dir = self._closed_run(base, "WF-20260101-arch")
+            outside = base / "outside-execution"
+            outside.mkdir()
+            (run_dir / "execution").symlink_to(outside, target_is_directory=True)
+
+            with pytest.raises(SystemExit) as exc:
+                main([
+                    "--base-path", str(base), "run-archive",
+                    "--work-id", "WF-20260101-arch", "--force",
+                ])
+
+            assert exc.value.code == 6
+            assert "unsafe execution residue" in capsys.readouterr().out.lower()
+            assert run_dir.exists()
+            assert (run_dir / "execution").is_symlink()
+            assert not (base / ".req-to-plan" / "archive" / "WF-20260101-arch").exists()
+            assert RunStateManager(run_dir).load().status.value == "closed_at_plan_checkpoint"
+
+    def test_closed_archive_rejects_non_directory_execution_path_even_with_force(self, capsys):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            run_dir = self._closed_run(base, "WF-20260101-arch")
+            (run_dir / "execution").write_text("not a directory\n", encoding="utf-8")
+
+            with pytest.raises(SystemExit) as exc:
+                main([
+                    "--base-path", str(base), "run-archive",
+                    "--work-id", "WF-20260101-arch", "--force",
+                ])
+
+            assert exc.value.code == 6
+            assert "unsafe execution residue" in capsys.readouterr().out.lower()
+            assert run_dir.exists()
+            assert not (base / ".req-to-plan" / "archive" / "WF-20260101-arch").exists()
+
+    def test_closed_archive_force_overrides_real_execution_residue(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            run_dir = self._closed_run(base, "WF-20260101-arch")
+            (run_dir / "execution").mkdir()
+
+            with pytest.raises(SystemExit) as exc:
+                main([
+                    "--base-path", str(base), "run-archive",
+                    "--work-id", "WF-20260101-arch", "--force",
+                ])
+
+            assert exc.value.code == 0
+            assert not run_dir.exists()
+            assert (base / ".req-to-plan" / "archive" / "WF-20260101-arch" / "execution").is_dir()
+
+
+class TestRunAbandon:
+    def test_abandon_archives_active_draft_with_reason(self, tmp_path):
+        work_id = "WF-20260605-abandoned-draft"
+        invoke(
+            ["run-start", "--work-id", work_id, "--requirement", "draft work"],
+            base_path=tmp_path,
+        )
+
+        invoke(
+            [
+                "run-abandon",
+                "--work-id", work_id,
+                "--reason", "superseded by a corrected reopen",
+            ],
+            base_path=tmp_path,
+        )
+
+        assert not (tmp_path / ".req-to-plan" / work_id).exists()
+        archived = RunStateManager(
+            tmp_path / ".req-to-plan" / "archive" / work_id
+        ).load()
+        assert archived.status == RunStatus.ARCHIVED
+        assert archived.resume_context.last_completed_operation == "abandon_run"
+        assert archived.resume_context.next_allowed_operation == "none"
+        assert archived.resume_context.resume_reason == "superseded by a corrected reopen"
+
+    def test_abandon_rejects_unsafe_execution_residue(self, tmp_path, capsys):
+        work_id = "WF-20260605-unsafe-abandon"
+        invoke(
+            ["run-start", "--work-id", work_id, "--requirement", "draft work"],
+            base_path=tmp_path,
+        )
+        run_dir = tmp_path / ".req-to-plan" / work_id
+        outside = tmp_path / "outside-execution"
+        outside.mkdir()
+        (run_dir / "execution").symlink_to(outside, target_is_directory=True)
+
+        invoke(
+            ["run-abandon", "--work-id", work_id, "--reason", "not needed"],
+            base_path=tmp_path,
+            expect_exit=6,
+        )
+
+        assert "unsafe execution residue" in capsys.readouterr().out.lower()
+        assert (run_dir / "run.md").is_file()
+        assert (run_dir / "execution").is_symlink()
+        assert not (tmp_path / ".req-to-plan" / "archive" / work_id).exists()
+
+    @pytest.mark.parametrize(
+        "status",
+        [RunStatus.CLOSED_AT_PLAN_CHECKPOINT, RunStatus.EXECUTING],
+    )
+    def test_abandon_rejects_closed_or_executing_run(self, tmp_path, status):
+        work_id = "WF-20260605-not-a-draft"
+        invoke(
+            ["run-start", "--work-id", work_id, "--requirement", "work"],
+            base_path=tmp_path,
+        )
+        record = load_record(tmp_path, work_id)
+        record.status = status
+        record.current_stage = Stage.CLOSED
+        save_record(tmp_path, record)
+
+        invoke(
+            ["run-abandon", "--work-id", work_id, "--reason", "not needed"],
+            base_path=tmp_path,
+            expect_exit=6,
+        )
+
+        assert (tmp_path / ".req-to-plan" / work_id / "run.md").is_file()
+        assert not (tmp_path / ".req-to-plan" / "archive" / work_id).exists()
+
+    def test_abandon_rejects_multiline_reason_without_mutation(self, tmp_path):
+        work_id = "WF-20260605-bad-reason"
+        invoke(
+            ["run-start", "--work-id", work_id, "--requirement", "work"],
+            base_path=tmp_path,
+        )
+
+        invoke(
+            ["run-abandon", "--work-id", work_id, "--reason", "line one\nline two"],
+            base_path=tmp_path,
+            expect_exit=2,
+        )
+
+        assert (tmp_path / ".req-to-plan" / work_id / "run.md").is_file()
+        assert not (tmp_path / ".req-to-plan" / "archive" / work_id).exists()
+
+
+class TestExecutionPhaseZeroIntegration:
+    def test_structured_metrics_commands_format_stable_results_and_reject_duplicate_json_keys(
+        self, monkeypatch
+    ):
+        from tools.workflow_cli import cli
+
+        base_result = {
+            "work_id": "WF-20260101-exec",
+            "profile": "strict",
+            "instrumentation_schema": 1,
+            "result": "status",
+            "invocation_count": 0,
+            "next_sequence": 1,
+            "metrics_finalized": False,
+            "change_shape": "unavailable",
+        }
+        monkeypatch.setattr(cli, "read_metrics_status", lambda *args: base_result, raising=False)
+        monkeypatch.setattr(
+            cli,
+            "append_metrics_invocation",
+            lambda *args: dict(
+                base_result,
+                result="appended",
+                invocation_count=1,
+                next_sequence=2,
+                sequence=1,
+                role="implementer",
+                task=1,
+                fix_wave=0,
+            ),
+            raising=False,
+        )
+        monkeypatch.setattr(
+            cli,
+            "finalize_metrics",
+            lambda *args: dict(
+                base_result,
+                result="finalized",
+                metrics_finalized=True,
+                change_shape="single_module_code",
+            ),
+            raising=False,
+        )
+
+        commands = [
+            ["execution-metrics-status", "--work-id", "WF-20260101-exec"],
+            [
+                "execution-metrics-append", "--work-id", "WF-20260101-exec",
+                "--record-json", '{"expected_sequence":1}',
+            ],
+            [
+                "execution-metrics-finalize", "--work-id", "WF-20260101-exec",
+                "--expected-invocation-count", "1",
+            ],
+        ]
+        for command in commands:
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output), pytest.raises(SystemExit) as exc:
+                main(["--base-path", "/tmp/metrics", *command])
+            assert exc.value.code == 0
+            assert "work_id: WF-20260101-exec" in output.getvalue()
+            assert "next_sequence:" in output.getvalue()
+
+        with pytest.raises(SystemExit) as exc:
+            main([
+                "execution-metrics-append", "--work-id", "WF-20260101-exec",
+                "--record-json", '{"expected_sequence":1,"expected_sequence":2}',
+            ])
+        assert exc.value.code == 2
+
+        with pytest.raises(SystemExit) as exc:
+            main([
+                "execution-metrics-finalize", "--work-id", "WF-20260101-exec",
+                "--expected-invocation-count", "-1",
+            ])
+        assert exc.value.code == 2
+
+        from tools.workflow_cli.execution_metrics import MetricsInputError
+        monkeypatch.setattr(
+            cli,
+            "append_metrics_invocation",
+            lambda *args: (_ for _ in ()).throw(MetricsInputError("unknown record key")),
+        )
+        with pytest.raises(SystemExit) as exc:
+            main([
+                "execution-metrics-append", "--work-id", "WF-20260101-exec",
+                "--record-json", '{"surprise":true}',
+            ])
+        assert exc.value.code == 2
+
+    def test_execute_start_defaults_to_strict_transaction_and_formats_human_result(self, monkeypatch):
+        from tools.workflow_cli import cli
+        from tools.workflow_cli.models import WorkId
+        from types import SimpleNamespace
+
+        calls = []
+        record = SimpleNamespace(work_id=WorkId("WF-20260101-exec"), status=RunStatus.EXECUTING)
+
+        def transaction(base_path, work_id, profile):
+            calls.append((base_path, work_id, profile))
+            return record
+
+        monkeypatch.setattr(cli, "start_execution_transaction", transaction, raising=False)
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output), pytest.raises(SystemExit) as exc:
+            main([
+                "--base-path", "/tmp/phase-zero", "run-execute-start",
+                "--work-id", "WF-20260101-exec",
+            ])
+
+        assert exc.value.code == 0
+        assert calls == [(Path("/tmp/phase-zero").resolve(), WorkId("WF-20260101-exec"), "strict")]
+        assert "Execution started: WF-20260101-exec" in output.getvalue()
+        assert "profile: strict" in output.getvalue()
+
+        monkeypatch.setenv("R2P_JSON", "1")
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output), pytest.raises(SystemExit) as exc:
+            main([
+                "--base-path", "/tmp/phase-zero", "run-execute-start",
+                "--work-id", "WF-20260101-exec",
+            ])
+        assert exc.value.code == 0
+        payload = json.loads(output.getvalue())
+        assert payload["status"] == "executing"
+        assert payload["profile"] == "strict"
+
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output), pytest.raises(SystemExit) as exc:
+            main([
+                "--base-path", "/tmp/phase-zero", "run-execute-start",
+                "--work-id", "WF-20260101-exec", "--profile", "fast",
+            ])
+        assert exc.value.code == 0
+        assert calls[-1] == (
+            Path("/tmp/phase-zero").resolve(),
+            WorkId("WF-20260101-exec"),
+            "fast",
+        )
+
+    def test_execution_prerequisite_check_dispatches_requested_compatible_version(self, monkeypatch):
+        from tools.workflow_cli import cli
+
+        calls = []
+
+        def prerequisite(base_path, work_id, task, *, require_version):
+            calls.append((base_path, work_id, task, require_version))
+            return {
+                "work_id": str(work_id),
+                "task": task,
+                "implementation_version": 2,
+                "semantics_version": require_version,
+                "effective_profile": "fast" if require_version == 2 else "strict",
+                "prerequisite": "PLAN-TASK-002",
+                "satisfied": True,
+            }
+
+        monkeypatch.setattr(cli, "check_prerequisite", prerequisite, raising=False)
+
+        for requested in (1, 2):
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output), pytest.raises(SystemExit) as exc:
+                main([
+                    "--base-path", "/tmp/phase-zero", "execution-prerequisite-check",
+                    "--work-id", "WF-20260101-exec", "--task", "3",
+                    "--require-version", str(requested),
+                ])
+            assert exc.value.code == 0
+            assert "prerequisite_satisfied" in output.getvalue()
+            assert "implementation_version: 2" in output.getvalue()
+            assert f"semantics_version: {requested}" in output.getvalue()
+
+        assert [call[-1] for call in calls] == [1, 2]
+
+    def test_bootstrap_and_samples_commands_preserve_core_result_shapes(self, monkeypatch):
+        from tools.workflow_cli import cli
+        from types import SimpleNamespace
+
+        monkeypatch.setattr(
+            cli,
+            "bootstrap_self_hosted_metrics",
+            lambda *args: SimpleNamespace(header={"profile": "strict", "task_count": 9}, invocations=()),
+            raising=False,
+        )
+        monkeypatch.setattr(
+            cli,
+            "validate_representative_samples",
+            lambda paths: {
+                "status": "ok",
+                "message": "representative_metrics_accepted",
+                "samples": [],
+                "aggregate": {
+                    "sample_count": 0,
+                    "work_ids": [],
+                    "task_counts": [],
+                    "change_shapes": [],
+                    "task_count_diverse": False,
+                    "change_shape_diverse": False,
+                    "representative": False,
+                },
+            },
+            raising=False,
+        )
+
+        bootstrap = io.StringIO()
+        with contextlib.redirect_stdout(bootstrap), pytest.raises(SystemExit) as exc:
+            main([
+                "--base-path", "/tmp/phase-zero", "execution-metrics-bootstrap",
+                "--work-id", "WF-20260829-r2p-execute-token-phase-r2p",
+                "--profile", "strict", "--self-hosted-gap-through-task", "002",
+            ])
+        assert exc.value.code == 0
+        assert "metrics_bootstrapped" in bootstrap.getvalue()
+
+        samples = io.StringIO()
+        with contextlib.redirect_stdout(samples), pytest.raises(SystemExit) as exc:
+            main([
+                "execution-samples-validate",
+                "--sample-dir", "/tmp/WF-20260101-one",
+                "--sample-dir", "/tmp/WF-20260101-two",
+                "--sample-dir", "/tmp/WF-20260101-three",
+            ])
+        assert exc.value.code == 0
+        assert "representative_metrics_accepted" in samples.getvalue()
+
+    def test_samples_validator_json_uses_canonical_writer_for_success_and_failure(self, monkeypatch):
+        from tools.workflow_cli import cli
+        from tools.workflow_cli.execution_metrics import RepresentativeSamplesError
+
+        success = {
+            "status": "ok",
+            "message": "representative_metrics_accepted",
+            "samples": [{"work_id": "WF-20260101-one"}],
+            "aggregate": {"token_comparison": "unavailable"},
+        }
+        monkeypatch.setattr(cli, "validate_representative_samples", lambda paths: success, raising=False)
+        monkeypatch.setenv("R2P_JSON", "1")
+
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output), pytest.raises(SystemExit) as exc:
+            main([
+                "execution-samples-validate",
+                "--sample-dir", "/tmp/WF-20260101-one",
+                "--sample-dir", "/tmp/WF-20260101-two",
+                "--sample-dir", "/tmp/WF-20260101-three",
+            ])
+        assert exc.value.code == 0
+        assert output.getvalue() == (
+            '{"aggregate":{"token_comparison":"unavailable"},"message":"representative_metrics_accepted",'
+            '"samples":[{"work_id":"WF-20260101-one"}],"status":"ok"}\n'
+        )
+
+        failure = {
+            "status": "blocked",
+            "message": "representative_metrics_missing",
+            "details": [{"message": "sample is incomplete", "sample": "WF-20260101-one"}],
+        }
+        monkeypatch.setattr(
+            cli,
+            "validate_representative_samples",
+            lambda paths: (_ for _ in ()).throw(RepresentativeSamplesError(failure)),
+            raising=False,
+        )
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output), pytest.raises(SystemExit) as exc:
+            main([
+                "execution-samples-validate",
+                "--sample-dir", "/tmp/WF-20260101-one",
+                "--sample-dir", "/tmp/WF-20260101-two",
+                "--sample-dir", "/tmp/WF-20260101-three",
+            ])
+        assert exc.value.code == 3
+        assert output.getvalue() == (
+            '{"details":[{"message":"sample is incomplete","sample":"WF-20260101-one"}],'
+            '"message":"representative_metrics_missing","status":"blocked"}\n'
+        )
+
+    def test_samples_validator_human_success_renders_complete_audit_and_status_last(self, monkeypatch):
+        from tools.workflow_cli import cli
+
+        sample = {
+            "path": "/samples/WF-20260101-one",
+            "work_id": "WF-20260101-one",
+            "r2p_version": "1.2.3",
+            "instrumentation_schema": 1,
+            "profile": "strict",
+            "task_count": 2,
+            "change_shape": "single_module_code",
+            "instrumentation_complete": True,
+            "bootstrap_gap": "none",
+            "metrics_finalized": True,
+            "plan_complete": True,
+            "final_verdict": "Approved",
+            "invocation_count": 5,
+            "role_counts": {
+                "implementer": 2,
+                "task_reviewer": 2,
+                "fixer": 0,
+                "task_rereviewer": 0,
+                "final_reviewer": 1,
+                "final_fixer": 0,
+                "final_rereviewer": 0,
+            },
+            "role_elapsed_total_seconds": "1.000000",
+            "verification_total_seconds": "0.500000",
+            "report_bytes_total": 123,
+            "full_suite": {"count": 1, "duration_seconds": "0.250000"},
+            "context_totals": {
+                "direct_acs": {
+                    "invocation_count": 5,
+                    "context_bytes_kind": "declared_payload_bytes",
+                    "context_bytes": 456,
+                },
+                "semantic_view": {
+                    "invocation_count": 0,
+                    "context_bytes_kind": "semantic_payload_bytes",
+                    "context_bytes": 0,
+                },
+            },
+            "token_totals": {
+                "status": "unavailable",
+                "input_tokens": "unavailable",
+                "output_tokens": "unavailable",
+                "total_tokens": "unavailable",
+            },
+            "rules": [
+                {"rule": "path_safety", "status": "passed", "details": []},
+                {"rule": "role_coverage", "status": "passed", "details": []},
+            ],
+        }
+        monkeypatch.setattr(
+            cli,
+            "validate_representative_samples",
+            lambda paths: {
+                "status": "ok",
+                "message": "representative_metrics_accepted",
+                "samples": [sample],
+                "aggregate": {
+                    "sample_count": 1,
+                    "work_ids": [sample["work_id"]],
+                    "task_counts": [2],
+                    "change_shapes": ["single_module_code"],
+                    "task_count_diverse": False,
+                    "change_shape_diverse": False,
+                    "representative": True,
+                },
+            },
+            raising=False,
+        )
+
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output), pytest.raises(SystemExit) as exc:
+            main([
+                "execution-samples-validate",
+                "--sample-dir", "/samples/WF-20260101-one",
+                "--sample-dir", "/samples/WF-20260101-two",
+                "--sample-dir", "/samples/WF-20260101-three",
+            ])
+
+        assert exc.value.code == 0
+        lines = output.getvalue().splitlines()
+        for expected in (
+            "sample 1:",
+            "path: /samples/WF-20260101-one",
+            "work_id: WF-20260101-one",
+            "instrumentation_schema: 1",
+            "final_verdict: Approved",
+            "role_counts:",
+            "implementer: 2",
+            "full_suite:",
+            "context_totals:",
+            "token_totals:",
+            "rules:",
+            "path_safety: passed",
+            "role_coverage: passed",
+            "aggregate:",
+            "representative: True",
+        ):
+            assert any(expected in line for line in lines), expected
+        assert lines[-1] == "status: representative_metrics_accepted"
+
+    def test_samples_validator_human_failure_preserves_sample_identity_and_rule(self, monkeypatch):
+        from tools.workflow_cli import cli
+        from tools.workflow_cli.execution_metrics import RepresentativeSamplesError
+
+        failure = {
+            "status": "error",
+            "message": "BLOCKED: representative_metrics_missing",
+            "exit_code": 3,
+            "details": [{
+                "sample_dir": "/samples/WF-20260101-two",
+                "work_id": "WF-20260101-two",
+                "rule": "role_coverage",
+                "message": "role sequence is invalid",
+            }],
+        }
+        monkeypatch.setattr(
+            cli,
+            "validate_representative_samples",
+            lambda paths: (_ for _ in ()).throw(RepresentativeSamplesError(failure)),
+            raising=False,
+        )
+
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output), pytest.raises(SystemExit) as exc:
+            main([
+                "execution-samples-validate",
+                "--sample-dir", "/samples/WF-20260101-one",
+                "--sample-dir", "/samples/WF-20260101-two",
+                "--sample-dir", "/samples/WF-20260101-three",
+            ])
+
+        assert exc.value.code == 3
+        rendered = output.getvalue()
+        assert "/samples/WF-20260101-two" in rendered
+        assert "WF-20260101-two" in rendered
+        assert "role_coverage" in rendered
+        assert "role sequence is invalid" in rendered
+
 
 class TestRunExecuteStart:
     _PLAN_WITH_READONLY_PHANTOM_TASK = (
@@ -4315,6 +5356,11 @@ class TestRunExecuteStart:
         from tools.workflow_cli.state import RunStateManager, create_run_record
         from tools.workflow_cli.models import RunStatus, Stage, WorkId
         from tools.workflow_cli.artifact import write_artifact
+        if not (base / ".git").exists():
+            subprocess.run(["git", "init", "-q"], cwd=base, check=True)
+            subprocess.run(["git", "config", "user.email", "tests@example.invalid"], cwd=base, check=True)
+            subprocess.run(["git", "config", "user.name", "Tests"], cwd=base, check=True)
+            subprocess.run(["git", "commit", "--allow-empty", "-qm", "test base"], cwd=base, check=True)
         wid = WorkId(wid_str)
         run_dir = base / ".req-to-plan" / wid_str
         run_dir.mkdir(parents=True)
@@ -4343,6 +5389,51 @@ class TestRunExecuteStart:
             ledger = (run_dir / "execution" / "progress.md").read_text(encoding="utf-8")
             assert "- [ ] PLAN-TASK-001 first task" in ledger
             assert "- [ ] PLAN-TASK-002 second task" in ledger
+
+    def test_execute_start_maps_missing_plan_to_not_found(self):
+        from tools.workflow_cli.state import RunStateManager
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            run_dir = self._closed_run_with_plan(
+                base,
+                "WF-20260101-missing-plan",
+                "# Plan\n\n## Tasks\n### PLAN-TASK-001: first task\n",
+            )
+            (run_dir / "07-plan.md").unlink()
+
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output), pytest.raises(SystemExit) as exc:
+                main([
+                    "--base-path", str(base),
+                    "run-execute-start", "--work-id", "WF-20260101-missing-plan",
+                ])
+
+            assert exc.value.code == 7
+            assert "PLAN not found" in output.getvalue()
+            assert RunStateManager(run_dir).load().status == RunStatus.CLOSED_AT_PLAN_CHECKPOINT
+            assert not (run_dir / "execution").exists()
+
+    @pytest.mark.parametrize("missing_file", ["progress.md", "run.md"])
+    @pytest.mark.parametrize("json_mode", [False, True])
+    def test_execute_start_missing_recovery_file_is_conflict(self, missing_file, json_mode, monkeypatch, capsys):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            work_id = "WF-20260101-recovery-missing"
+            run_dir = self._closed_run_with_plan(base, work_id, "### PLAN-TASK-001: task\n")
+            invoke(["run-execute-start", "--work-id", work_id], base_path=base)
+            capsys.readouterr()
+            path = run_dir / missing_file if missing_file == "run.md" else run_dir / "execution" / missing_file
+            path.unlink()
+            monkeypatch.setenv("R2P_JSON", "1" if json_mode else "0")
+
+            invoke(["run-execute-start", "--work-id", work_id], base_path=base, expect_exit=6)
+
+            output = capsys.readouterr().out
+            assert "PLAN not found" not in output
+            assert missing_file in output
+            if json_mode:
+                assert json.loads(output)["exit_code"] == 6
 
     def test_execute_start_ignores_readonly_plan_task_headings(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -4396,8 +5487,9 @@ class TestRunExecuteStart:
             run_dir = self._closed_run_with_plan(base, "WF-20260101-exec", plan)
             (run_dir / "execution").write_text("not a directory", encoding="utf-8")
 
-            with pytest.raises(FileExistsError):
+            with pytest.raises(SystemExit) as exc:
                 main(["--base-path", str(base), "run-execute-start", "--work-id", "WF-20260101-exec"])
+            assert exc.value.code == 6
 
             rec = RunStateManager(run_dir).load()
             assert rec.status.value == "closed_at_plan_checkpoint"
@@ -4531,19 +5623,33 @@ class TestRunExecuteStart:
 
             assert exc.value.code == 0
             assert (base / ".req-to-plan" / "WF-20260101-exec-r1" / "run.md").exists()
-            assert load_record(base, "WF-20260101-exec").status == RunStatus.CLOSED_AT_PLAN_CHECKPOINT
+            source = RunStateManager(
+                base / ".req-to-plan" / "archive" / "WF-20260101-exec"
+            ).load()
+            assert source.status == RunStatus.ARCHIVED
+            assert source.resume_context.next_allowed_operation == (
+                "continue_reopened_run:WF-20260101-exec-r1"
+            )
             from tools.workflow_cli.agent_shortcuts import scan_open_runs
             assert scan_open_runs(base) == ["WF-20260101-exec-r1"]
 
     def test_execute_start_refuses_when_not_closed(self):
+        from tools.workflow_cli.artifact import write_artifact
         from tools.workflow_cli.state import RunStateManager, create_run_record
-        from tools.workflow_cli.models import WorkId
+        from tools.workflow_cli.models import Stage, WorkId
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
             wid = WorkId("WF-20260101-open")
             run_dir = base / ".req-to-plan" / "WF-20260101-open"
             run_dir.mkdir(parents=True)
             RunStateManager(run_dir).save(create_run_record(wid))  # ACTIVE_STAGE_DRAFT
+            write_artifact(
+                run_dir,
+                Stage.PLAN,
+                "# Plan\n\n### PLAN-TASK-001: task\n",
+                version=1,
+                status="approved",
+            )
             with pytest.raises(SystemExit) as exc:
                 main(["--base-path", str(base), "run-execute-start", "--work-id", "WF-20260101-open"])
             assert exc.value.code == 6  # EXIT_CONFLICT
@@ -4939,6 +6045,11 @@ class TestExecuteStartDoesNotSeedFinalReview:
         from tools.workflow_cli.state import RunStateManager, create_run_record
         from tools.workflow_cli.models import RunStatus, Stage, WorkId
         from tools.workflow_cli.artifact import write_artifact
+        if not (base / ".git").exists():
+            subprocess.run(["git", "init", "-q"], cwd=base, check=True)
+            subprocess.run(["git", "config", "user.email", "tests@example.invalid"], cwd=base, check=True)
+            subprocess.run(["git", "config", "user.name", "Tests"], cwd=base, check=True)
+            subprocess.run(["git", "commit", "--allow-empty", "-qm", "test base"], cwd=base, check=True)
         wid = WorkId(wid_str)
         run_dir = base / ".req-to-plan" / wid_str
         run_dir.mkdir(parents=True)

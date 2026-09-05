@@ -6,298 +6,367 @@ English | [简体中文](README.zh-CN.md)
 [![node](https://img.shields.io/node/v/%40xenonbyte%2Freq-2-plan.svg)](https://nodejs.org)
 [![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
 
-> Turn a raw requirement into an approved, executor-neutral implementation PLAN - then execute that PLAN in place - across Claude Code, Codex, Gemini, and opencode.
+> Turn a raw requirement into a reviewed implementation PLAN, then execute it on your current branch.
 
-`req-2-plan` installs the `r2p` workflow for AI coding agents, and it works in
-two phases. **Plan:** it takes a rough requirement through a staged, gated
-process - **requirement brief**, **risk discovery**, **DESIGN**, **SPEC**, and
-**PLAN** - so the final plan is grounded, reviewed, and ready to execute.
-**Execute:** `r2p-execute` then drives that approved PLAN through an in-place,
-subagent-orchestrated implementation loop on your current branch - one
-implementer per task, a reviewer after each, a whole-branch final review, then
-auto-archive - so the same tool that planned the change can also land it.
+`req-2-plan` gives AI coding agents a staged workflow: clarify scope, surface
+risks, record design decisions, define a SPEC, and produce an approved PLAN.
+You can use the PLAN independently or run `r2p-execute` to implement, test,
+review, and archive the change.
 
-The npm package is the lifecycle installer. It currently supports four agent
-platforms - **Claude Code**, **Codex**, **Gemini**, and **opencode**. From one
-shared source it generates platform-specific agent surfaces, installs the shared
-`r2p-*` wrappers, and keeps an owned manifest so uninstall only removes files
-managed by `r2p`.
+The npm package installs the shared Python CLI and agent integrations for
+**Claude Code**, **Codex**, **Gemini**, and **opencode**. Run state stays in local
+Markdown files; no database or server is required.
 
-**Contents:** [Why r2p](#why-r2p) · [Features](#features) · [Installation](#installation) · [Quick start](#quick-start) · [Workflow commands](#workflow-commands) · [Executing a PLAN](#executing-a-plan) · [Development](#development)
+**Contents:** [Installation](#installation) · [Quick start](#quick-start) · [Workflow commands](#workflow-commands) · [Executing a PLAN](#executing-a-plan) · [Run storage and recovery](#run-storage-and-recovery) · [Troubleshooting](#troubleshooting) · [Development](#development)
 
 ## Why r2p
 
-AI agents are fast at implementation, but weak requirements tend to leak into
-ambiguous plans, hidden scope choices, and repeated rework. `r2p` makes the
-planning phase explicit:
+Use `r2p` for changes that need scope decisions, risk analysis, or a durable
+handoff between agents. The original requirement remains available throughout
+the workflow, and each stage passes an entry gate, a quality gate, and a human
+checkpoint before the next stage begins.
 
-- the requirement is preserved as the source of truth;
-- risks and unknowns are surfaced before implementation planning;
-- DESIGN, SPEC, and PLAN each pass structural quality gates;
-- human decisions are recorded instead of guessed;
-- execution runs straight from the PLAN - by hand or via `r2p-execute` - without re-deciding scope.
-
-Use it when the requirement is more than a one-line edit, when a change touches
-important behavior, or when you want a durable handoff between agents.
+The agent writes the requirement analysis and artifact prose. The CLI manages
+state, structural templates, and validation; it does not generate the semantic
+content or replace human judgment.
 
 ## Features
 
-- **Staged requirement-to-PLAN workflow**: requirement brief, risk discovery, DESIGN, SPEC, and PLAN.
-- **Quality gates and checkpoints**: each stage must clear validation before handoff.
-- **Four supported platforms**: installs matching surfaces for Claude Code (`claude`), Codex (`codex`), Gemini (`gemini`), and opencode (`opencode`).
-- **One lifecycle CLI**: `r2p install`, `r2p uninstall`, `r2p status`, `r2p version`, and `r2p help`.
-- **Manifest-backed install safety**: pre-existing files are backed up, and uninstall removes only managed paths.
-- **Project Context Pack**: real repository facts (the current directory by default, or `--repo-path <dir>`) ground tiering and PLAN checks.
-- **Repair paths**: reopen closed runs, route upstream gaps, and resolve repaired decisions.
-- **In-place PLAN execution**: `r2p-execute` runs the approved PLAN on your current branch through a subagent-driven SDD loop - a fresh implementer per task, a task-reviewer and fix loop after each, then a whole-branch final review that re-runs the full verification suite before the run auto-archives. Subagent dispatch is required, and it never pushes or opens pull requests.
+- **Repository context:** scan the target repository to ground tier estimates and the Project Context Pack in actual code, dependencies, and test commands.
+- **Traceable planning:** connect scope, risks, DESIGN, SPEC, and PLAN tasks; declare exclusions in the requirement brief.
+- **Gated handoffs:** record decisions and review evidence before advancing; reopen a run or route an upstream gap when a decision needs repair.
+- **Reviewed execution:** use the default `strict` task review loop, or explicitly request `fast` for eligible mechanical work; both require final review and full verification.
+- **Durable recovery:** resume from authoritative role checkpoints, with separate implementation and repair commit ranges.
+- **Managed installation:** share executable wrappers across platforms, back up pre-existing user files, and uninstall only managed paths.
 
 ## Supported platforms
 
 `r2p` currently supports 4 platforms. Use the platform ID with `--platform`.
+Paths below are relative to each platform's default home.
 
-| Agent platform | Platform ID | Installed surface |
-|---|---|---|
-| Claude Code | `claude` | `skills/r2p/SKILL.md` plus `commands/r2p-*.md` |
-| Codex | `codex` | `skills/r2p-*/SKILL.md` |
-| Gemini | `gemini` | `commands/r2p-*.toml` |
-| opencode | `opencode` | `commands/r2p-*.md` |
+| Agent platform | Platform ID | Default home | Installed surface |
+|---|---|---|---|
+| Claude Code | `claude` | `~/.claude/` | `skills/r2p/SKILL.md` and `commands/r2p-*.md` |
+| Codex | `codex` | `~/.codex/` | `skills/r2p-*/SKILL.md` |
+| Gemini | `gemini` | `~/.gemini/` | `commands/r2p-*.toml` |
+| opencode | `opencode` | `~/.config/opencode/` | `commands/r2p-*.md`, derived from Claude templates |
+
+Shared wrappers are installed under `~/.req-to-plan/bin`.
 
 ## Installation
 
-Requirements:
+You need Node.js 18+, Python available as `python3` or `python`, and Bash for
+the workflow wrappers. Python 3.11 and 3.12 are tested in CI. PLAN execution
+also requires Git and an agent host that can dispatch subagents.
 
-- Node.js 18+
-- Python 3 as `python3` or `python`
+Install `pyyaml` into the Python environment used by your agent's shell.
+For a Python installation that supports user-site packages:
 
-Install the package globally:
+```bash
+python3 -m pip install --user "pyyaml>=6.0"
+```
+
+Then install the npm package and your chosen integration:
 
 ```bash
 npm install -g @xenonbyte/req-2-plan
-```
-
-Check the lifecycle CLI:
-
-```bash
-r2p version
+r2p install --platform codex
 r2p status
-r2p help
 ```
 
-> [!NOTE]
-> Lifecycle commands use only the Python standard library. Daily workflow
-> wrappers use `pyyaml`; from a checkout, install it with
-> `python3 -m pip install --user -r requirements.txt`, or directly with
-> `python3 -m pip install --user "pyyaml>=6.0"`.
-
-Install all supported agent integrations. This is the default when `--platform`
-is omitted:
+Use a comma-separated list to select several platforms, or omit `--platform`
+to install all supported integrations:
 
 ```bash
+r2p install --platform claude,codex,gemini,opencode
 r2p install
 ```
 
-Install only selected platforms with `--platform`:
+> [!NOTE]
+> Lifecycle commands use only the Python standard library; successful
+> `r2p version` or `r2p status` does not verify that workflow dependencies are
+> available. Wrappers prefer `python3` on `PATH`, then `python`. If you use a
+> virtual environment, launch the agent with that environment on its `PATH`.
 
-```bash
-r2p install --platform claude
-r2p install --platform claude,codex,gemini,opencode
-```
-
-> [!WARNING]
-> `r2p install` overwrites an existing `r2p` install for the selected platform(s).
-> Existing user files are backed up first, and `r2p uninstall` removes only paths
-> recorded in the install manifest.
+Reinstalling a platform refreshes its managed files. Existing user files are
+backed up before overwrite and restored on uninstall. After upgrading the npm
+package, rerun `r2p install` for the integrations you use.
 
 ## Quick start
 
-Install the platform skills, then start a workflow from your agent:
+Open your agent in the project workspace and invoke the installed `r2p-start`
+command or skill. For hosts with slash commands:
 
 ```text
 /r2p-start "Add rate limiting"
 /r2p-continue
 ```
 
-Start from a requirement file instead of inline text:
+Or start from a requirement file:
 
 ```text
 /r2p-start --file change-req.md
 ```
 
-Tier estimation and the Project Context Pack are grounded in the current
-directory by default. Pass `--repo-path <dir>` to ground them in a different
-repository instead - for example, a target repository for cross-project work.
+The current repository supplies context by default; `--repo-path <dir>` selects
+a different repository for tier estimation and the Project Context Pack.
 
-The workflow stops whenever it needs a human or agent action: tier lock,
-artifact content, quality-gate repair, checkpoint approval, subagent review, or
-gap resolution. Run the printed `next:` command exactly, then resume with
-`r2p-continue`.
+Follow the printed `next:` action to lock the tier, fill an artifact, repair a
+gate, or review a checkpoint. Continue with `r2p-continue` until the PLAN is
+approved. You can stop there or explicitly invoke `r2p-execute` to implement it.
 
-> [!TIP]
-> Add `~/.req-to-plan/bin` to your `PATH` to run the wrappers directly:
->
-> ```bash
-> export PATH="$HOME/.req-to-plan/bin:$PATH"
-> ```
+To inspect or drive the shared wrappers from a terminal, add their directory
+to `PATH`:
+
+```bash
+export PATH="$HOME/.req-to-plan/bin:$PATH"
+r2p-status
+```
+
+The terminal wrappers manage workflow state and print the next action; the
+agent integration supplies the artifact-writing and execution instructions.
 
 ## Workflow commands
 
-After installation, the agent-facing commands call shared wrappers under
-`~/.req-to-plan/bin`. Each command, its purpose, and its parameters - optional
-parameters show their default; `—` means you must supply the value:
+These commands operate on runs in the current workspace. Brackets denote
+optional arguments; `r2p-continue` usually supplies the exact next command.
 
-| Command | Purpose | Parameter | Required / optional | Default |
-|---|---|---|---|---|
-| `r2p-start` | Start a new run and propose a tier from a repo scan. | `<requirement>` or `--file <path>` | one required | — |
-| | | `--repo-path <dir>` | optional | current directory |
-| | | `--separate` | optional | off |
-| `r2p-continue` | Advance the active run and print the exact `next:` action. | *(none)* | — | — |
-| `r2p-status` | Inspect runs without changing state. | `--all` | optional | off |
-| `r2p-switch` | Point the active-run marker at another run. | `--work-id <id>` | required | — |
-| `r2p-tier-lock` | Lock the active run's complexity tier. | `--work-id <id>` | required | — |
-| | | `--base light\|standard` | required | — |
-| | | `--confirm` | required | — |
-| | | `--modifiers <a,b,…>` | optional | none |
-| | | `--override-floor` | optional | off |
-| `r2p-reopen` | Reopen a closed or executing run to repair an upstream artifact. | `--from <work-id>` | required | — |
-| | | `--stage <stage>` | required | — |
-| | | `--reason <text>` | required | — |
-| `r2p-gap-open` | Route an upstream decision gap on an open run back to its owner stage. | `--work-id <id>` | required | — |
-| | | `--owner-stage <stage>` | required | — |
-| | | `--required-action "<text>"` | required | — |
-| `r2p-gap-resolve` | Close a repaired upstream-gap route. | `--work-id <id>` | required | — |
-| | | `--route-id <id>` | required | — |
-| `r2p-archive` | Archive a closed run out of the active workspace. | `--work-id <id>` | optional | active run |
-| | | `--force` | optional | off |
-| `r2p-execute` | Execute a closed PLAN in place, run a whole-branch review, then archive. | `--work-id <id>` | optional | active run |
+| Command | Purpose | Arguments |
+|---|---|---|
+| `r2p-start` | Start a run from text or a file. | `"<requirement>"` or `--file <path>`; `[--repo-path <dir>] [--separate]` |
+| `r2p-continue` | Advance the active run to its next action. | None |
+| `r2p-status` | Inspect the active run, or all runs. | `[--all]` |
+| `r2p-switch` | Select another run. | `--work-id <id>` |
+| `r2p-tier-lock` | Confirm a complexity tier. | `--work-id <id> --base light\|standard --confirm`; `[--modifiers <a,b,...>] [--override-floor]` |
+| `r2p-reopen` | Create a child run at an earlier stage and archive its source. | `--from <work-id> --stage <stage> --reason "<text>"` |
+| `r2p-abandon` | Intentionally abandon and archive an unfinished open draft. | `--work-id <id> --reason "<text>"` |
+| `r2p-gap-open` | Route an upstream decision gap on an open run. | `--work-id <id> --owner-stage <stage> --required-action "<text>"` |
+| `r2p-gap-resolve` | Close a repaired gap route. | `--work-id <id> --route-id <id>` |
+| `r2p-execute` | Execute an approved PLAN, or resume execution. | `[--work-id <id>] [--profile strict\|fast]` |
+| `r2p-archive` | Archive a closed or executing run. | `[--work-id <id>] [--force]` |
 
-Notes: `--modifiers` takes a comma-separated subset of `migration`,
-`cross_project`, `safety`, `dependency`, `scope_expanding`. `--stage` and
-`--owner-stage` take a pipeline stage (`raw_requirement` … `plan`); a gap's
-`--owner-stage` must be strictly upstream of the current stage, and
-`--required-action` must be a single line. `--confirm` is what makes the tier
-lock take effect, and `--override-floor` allows locking below the computed
-floor. `--separate` starts a parallel run while another is still open. `--force`
-lets `r2p-archive` archive an executing run whose PLAN-TASKs are not all checked
-off.
+`r2p-execute` and `r2p-archive` use the active run when `--work-id` is omitted.
+A new execution defaults to `strict`; see [Executing a PLAN](#executing-a-plan)
+for the `fast` eligibility confirmation flags.
 
-Most runs only need `r2p-start` and repeated `r2p-continue`. Use the specialized
-commands when the workflow prints them or when you intentionally need to switch,
-repair, reopen, execute, or archive a run.
+Tier modifiers are `migration`, `cross_project`, `safety`, `dependency`, and
+`scope_expanding`. `--override-floor` permits an explicitly confirmed tier
+below the computed floor. `--separate` starts an independent run while another
+is still open.
 
-> [!IMPORTANT]
-> `r2p-execute` assumes the host agent can dispatch subagents. It works on the
-> current branch and does not push or open pull requests.
-
-> [!NOTE]
-> Closing a run at the PLAN checkpoint and archiving a run perform best-effort,
-> path-limited commits for that run's `.req-to-plan/<work-id>` state. They never
-> run `git add -A`, never force-add ignored paths, and never push.
+Stage values are `raw_requirement`, `requirement_brief`, `risk_discovery`,
+`design`, `spec`, and `plan`. A gap's `--owner-stage` must be strictly upstream.
+Keep `--required-action` and reopen/abandon reasons on one line; required actions
+and abandonment reasons must also be non-blank. Gap commands change run state
+once validation passes.
 
 ## Lifecycle commands
 
-Use lifecycle commands from a terminal to manage installed integrations:
+Use `r2p` from a terminal to manage installed integrations. `r2p status` checks
+installation state; `r2p-status` checks workflow runs.
+
+| Command | Purpose |
+|---|---|
+| `r2p install [--platform <id,...>]` | Install or refresh integrations; all platforms by default. |
+| `r2p uninstall [--platform <id,...>]` | Remove managed integrations and restore user backups; all platforms by default. |
+| `r2p status [--json]` | Read installed versions, missing files, and manifest issues. |
+| `r2p version` | Print the package version. |
+| `r2p help` | Show lifecycle command help. |
+
+For example, inspect machine-readable status or remove one integration:
 
 ```bash
-r2p install
-r2p install --platform codex
-
-r2p status
 r2p status --json
-
 r2p uninstall --platform claude
-r2p uninstall
-
-r2p version
-r2p help
 ```
 
-Omitting `--platform` targets all supported platforms for both `r2p install` and
-`r2p uninstall`.
-
-`r2p status` is read-only. With `--json`, it reports machine-readable platform
-state, installed version, and manifest issues.
+Use `R2P_JSON=1` for machine-readable workflow command output; lifecycle status
+uses `--json` instead.
 
 ## How the workflow works
 
-Every run lives in `.req-to-plan/<work-id>/` inside the target workspace. The
-agent writes semantic content; the CLI owns state, files, gates, and structured
-validation.
+A run advances through these artifacts under `.req-to-plan/<work-id>/`:
 
-| Stage | Output |
-|---|---|
-| Raw requirement | Original user requirement |
-| Requirement brief | Scope, goals, non-goals, and acceptance direction |
-| Risk discovery | Unknowns, constraints, dependencies, and risk areas |
-| DESIGN | Technical approach and decision requests |
-| SPEC | Detailed behavior and interfaces |
-| PLAN | Ordered implementation tasks with verification criteria |
+| Stage | Artifact | Purpose |
+|---|---|---|
+| Raw requirement | `00-raw-requirement.md` | Preserve the original request. |
+| Requirement brief | `03-requirement-brief.md` | Define scope, exclusions, and acceptance direction. |
+| Risk discovery | `04-risk-discovery.md` | Identify unknowns, constraints, and dependencies. |
+| DESIGN | `05-design.md` | Decide the technical approach. |
+| SPEC | `06-spec.md` | Define behavior and interfaces. |
+| PLAN | `07-plan.md` | Order implementation tasks and their verification. |
 
-Standard-tier DESIGN/SPEC/PLAN stages can require subagent review, especially
-when tier modifiers such as `migration`, `safety`, or `cross_project` are
-present. If a later stage discovers an upstream decision gap, use
-`r2p-gap-open`, repair the owner stage, then close the route with
-`r2p-gap-resolve`.
+`02-project-context.md` supplies repository facts. Tier and modifiers determine
+required detail and review checks. The PLAN gate checks trace closure so scope,
+SPEC items, and risks have explicit coverage. Downstream stages cannot silently
+defer work the requirement brief puts in scope.
+
+If an open run discovers a missing upstream decision, route it with
+`r2p-gap-open`, repair the owning stage, and close the route with
+`r2p-gap-resolve`. Once the PLAN checkpoint is approved, the run is
+`closed_at_plan_checkpoint`: ready for execution, reopening, or archival.
 
 ## Executing a PLAN
 
-`r2p` does not stop at the PLAN. Once a run is closed at the PLAN checkpoint,
-`r2p-execute` implements it in place on your current branch - no new branch, no
-worktree, no push. It assumes the host agent can dispatch subagents and fails
-explicitly if it cannot.
+Invoke `r2p-execute` through the agent integration after PLAN approval.
+Execution stays on the current branch and creates task commits; it does not
+create a branch or worktree, push, or open a pull request.
 
-The loop is Spec-Driven Development (SDD):
+> [!IMPORTANT]
+> Execution requires subagent dispatch and a clean code worktree outside
+> `.req-to-plan/`. Tracked changes and untracked, non-ignored files there block
+> start with exit `6`. Resolve them before starting; the workflow must not
+> commit unrelated work to clear the check.
 
-- **Pre-flight**: read the PLAN once and batch any contradiction or defect to you
-  before work starts; an upstream defect routes back to a stage reopen, never a
-  patch in execution.
-- **Per task**: a fresh implementer subagent builds exactly one PLAN-TASK under
-  TDD, commits only its own files, and reports back; a task-reviewer checks it
-  against the SPEC and the task's verification criteria, and a fix loop clears
-  Critical and Important findings before the task's checkbox flips.
-- **Whole-branch review**: once every task is done, a final reviewer on the most
-  capable model re-runs the full verification suite over the entire execution
-  range and walks the PLAN as a checklist. This review is the merge gate.
-- **Auto-archive**: a clean `Verdict: Approved` final review lets `r2p-execute`
-  archive the run. Commits stay on your current branch; `push` and pull requests
-  remain a separate, explicit request.
+The default `strict` loop follows Spec-Driven Development (SDD):
 
-Progress is tracked durably in `execution/progress.md`. If a run is interrupted,
-just run `r2p-execute` again on the same run: it detects the `executing` status,
-continues from the first unchecked task, and never re-runs completed work or
-restarts from scratch. If it cannot reconstruct where the interrupted task began,
-it stops and asks you rather than guessing.
+1. **Pre-flight:** read the PLAN and resolve contradictions before dispatch.
+2. **Implement:** a fresh subagent implements one task with TDD, verifies it,
+   and commits its own files.
+3. **Review and repair:** a task-reviewer checks SPEC coverage and code quality;
+   fix and re-review until Critical and Important findings are resolved.
+4. **Final review:** review the entire execution range and rerun the full
+   verification suite. Repeat after any final repair.
+5. **Archive:** complete the task markers and record `Verdict: Approved`, then
+   archive the run. A recorded verdict is audit evidence, not a test runner.
+
+**Optional fast profile.** Request `r2p-execute --profile fast` before starting.
+It first performs a read-only check for a locked LIGHT tier with no modifiers
+and prerequisite v2 in every task, returning `fast_profile_review`. The agent
+must also review every task for local, mechanical, unambiguous work with safe
+file boundaries and deterministic verification. It then uses
+`--profile fast --confirm-fast-eligible`, or rejects with
+`--profile fast --reject-fast-ineligible --reason "<text>"`.
+
+Fast records implemented tasks and gives the primary final reviewer the
+per-task review responsibility. It keeps the full final verification requirement
+and escalates one-way to `strict` when risk, ambiguity, or unresolved findings
+require it. Legacy PLANs without prerequisite declarations use strict v1;
+mixed or malformed declarations block start.
+
+<details>
+<summary>Execution controller protocol and metrics</summary>
+
+Agents write report prose; the controller uses CLI commands for structural
+progress and observations. These are implementation interfaces, not extra steps
+for the person running the workflow.
+
+| Wrapper | Controller responsibility |
+|---|---|
+| `r2p-task-brief` | Produce the task brief used in role handoffs. |
+| `r2p-prerequisite-check` | Validate prerequisites immediately before implementer dispatch; never put this in ordinary post-commit `Verification`. |
+| `r2p-progress` | Use `begin`, `complete`, `recover`, or `escalate` with `--expected-sequence` to persist dispatch/results, recover evidence, or escalate the profile. |
+| `r2p-context-view --work-id <id> --with-stats` | Each role reads the semantic context itself; the controller does not relay the content or persist a context bundle. |
+| `r2p-metrics-status`, `r2p-metrics-append`, `r2p-metrics-ack`, `r2p-metrics-finalize` | Observe completed roles, retry pending observations, acknowledge durable completion, and finalize coverage. |
+
+- **Progress is authoritative.** Resume returns the journal's role, task, fix
+  wave, and sequence. An inflight dispatch returns `recover_role_result`; recover
+  its result rather than automatically dispatching it again. Original task
+  commit ranges remain immutable; reviewers use every returned `review_ranges`
+  entry to include the separate task/final repairs.
+- **Retries preserve evidence.** Resolve `BLOCKED` / `NEEDS_CONTEXT`, then retry
+  that role/task/fix wave with a new sequence. Preserve TDD red and failed checks;
+  final approval requires each command's latest result to pass, including the
+  full suite. Task repair reports and reviews retain the exact unfenced
+  `Fix Wave N` line.
+- **Metrics never choose a role or gate recovery.** Append only after the
+  authoritative progress transition. The exact retry request is persisted as
+  `pending_completion.record_json`; append/ack retries are idempotent. Metrics
+  finalization requires acknowledged pending completions and exact role coverage
+  for fully journaled runs. Failures report `metrics_incomplete` and do not block
+  valid progress, resume, or archive. Missing observations stay explicit gaps.
+- **Bytes are measured separately from Tokens.** Roles return aggregate
+  `semantic_bytes` as `context_bytes`, with `context_mode=semantic_view` and
+  `semantic_payload_bytes`. The aggregate includes source headings and separators,
+  excludes the stats prefix, and differs from the sum of per-source counts.
+  Missing model, timing, or Token data stays `unavailable`; byte counts and
+  elapsed time must not be converted into claimed Token savings.
+
+</details>
+
+## Run storage and recovery
+
+Runs live in the workspace; installed integrations live in your agent home.
+
+| Workspace path | Purpose |
+|---|---|
+| `.req-to-plan/.workflow-active` | Selected run pointer. |
+| `.req-to-plan/<work-id>/run.md` | Status, stage, checkpoints, and resume context. |
+| `.req-to-plan/<work-id>/logs/` | Generated briefs, diffs, and diagnostic output. |
+| `.req-to-plan/<work-id>/execution/` | Local progress, metrics, task reports/reviews, and final-review evidence. |
+| `.req-to-plan/archive/<work-id>/` | Archived run directory. |
+
+Run artifacts are tracked. The active pointer, logs, execution evidence,
+transient `.execution-start-transaction.json` owner, and archive directory are
+gitignored. Keep the workspace's local execution evidence when moving an
+interrupted run; a Git checkout alone does not contain that audit trail.
+
+Closing the PLAN checkpoint and archiving perform best-effort commits scoped
+to `.req-to-plan/.gitignore` and that run's path. They do not run `git add -A`,
+force-add ignored files, or push. Execution's task commits remain on the branch.
+
+**Resume:** invoke `r2p-execute` again for the same run. A completed strict
+implementation resumes at review even when metrics are absent. Older committed
+work without a role checkpoint needs `r2p-progress recover` with the exact HEAD
+and a durable DONE/BASE..HEAD report; commit history alone is not sufficient.
+A profileless legacy run missing metrics resumes as strict with an explicit
+incomplete-instrumentation gap.
+
+**Reopen or abandon:** `r2p-reopen` creates a child at the requested stage, then
+archives its direct source after the child is durable. Only one active reopened
+run per lineage is allowed. Malformed source or same-lineage records block the
+operation before writes. Use `r2p-abandon` when intentionally discarding an open
+draft; closed/executing runs use `r2p-archive`.
+
+**Execution residue:** retry `r2p-execute` to recover an interrupted start or
+continue execution. A closed run with `execution/` or an execution-start owner
+cannot be archived normally; `--force` is for intentionally abandoned or
+superseded execution. It does not make symlinked or non-directory execution
+paths safe.
+
+## Troubleshooting
+
+| Symptom | Next action |
+|---|---|
+| `ModuleNotFoundError: No module named 'yaml'` | Install `pyyaml` into the Python selected by the agent's shell; check its `PATH`, especially when using a virtual environment. |
+| Installation looks healthy, but a run is paused | `r2p status` checks integrations. Use `r2p-status` and follow the run's printed `next:` action. |
+| Execution stops with a dirty-worktree conflict | Inspect `git status --short -- ':!.req-to-plan'` and resolve your code changes before retrying. |
+| Resume returns `recover_role_result` | Recover the recorded invocation's result; establish whether it is still running before any retry. |
+| Fast preflight rejects the run | Address the eligibility finding or explicitly choose `strict`; structural eligibility alone cannot approve task semantics. |
+| Archive rejects a closed run with execution residue | Resume/recover with `r2p-execute`, or intentionally archive with `--force`; do not delete the evidence just to clear the check. |
 
 ## Development
 
-Install development dependencies:
+From a source checkout, create a virtual environment and install the test
+dependencies. Reuse an existing `.venv` if one is already configured:
 
 ```bash
-python3 -m pip install -r requirements-dev.txt
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements-dev.txt
+.venv/bin/python -m pytest tests/ -q
 ```
 
-Run the test suite:
+`npm run test:local` also uses `.venv/bin/python`; `npm test` uses `python`
+from `PATH`. CI runs the suite on Python 3.11 and 3.12. A local Python 3.10
+venv skips the `tomllib`-dependent tests; those skips do not replace CI evidence.
+
+Useful checks that do not install into real agent homes:
 
 ```bash
-npm test
-# or, when using the checked-in virtual environment:
-npm run test:local
-```
-
-Useful local checks:
-
-```bash
+.venv/bin/python -m pytest tests/test_docs_consistency.py tests/test_readme.py -q
 node bin/r2p.js version
 node bin/r2p.js help
 .venv/bin/python -m tools.workflow_cli --help
 .venv/bin/python -m tools.workflow_cli.agent_shortcuts --help
 ```
 
-Project layout:
-
-| Path | Purpose |
+| Path | Responsibility |
 |---|---|
-| `bin/r2p.js` | npm binary that invokes the Python lifecycle CLI |
-| `tools/r2p-*` | installed workflow wrapper scripts |
-| `tools/workflow_cli/` | state machine, gates, templates, installer, and command routing |
-| `tools/workflow_cli/agent_templates/` | generated surfaces for Claude Code, Codex, and Gemini |
-| `tests/` | regression tests for CLI behavior, state, gates, install safety, packaging, and README consistency |
+| `bin/r2p.js` | Thin Node launcher for the Python lifecycle CLI. |
+| `tools/r2p-*` | Executable wrapper sources installed into agent homes. |
+| `tools/workflow_cli/` | State machine, gates, execution protocol, context views, and installer. |
+| `tools/workflow_cli/agent_templates/` | Source templates for Claude, Codex, and Gemini; OpenCode derives from Claude. |
+| `tests/` | Isolated CLI, recovery, installation, packaging, and documentation checks. |
+
+Keep both README languages aligned when commands or behavior change. Project
+engineering guidance lives in [AGENTS.md](AGENTS.md) and [CLAUDE.md](CLAUDE.md).

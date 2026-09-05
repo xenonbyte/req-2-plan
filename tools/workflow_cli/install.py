@@ -9,6 +9,7 @@ import os
 import secrets
 import json
 import hashlib
+import re
 import shutil
 import shlex
 import stat
@@ -43,7 +44,6 @@ KNOWN_OBSOLETE_PLATFORM_TARGETS = {
     "codex": (("skills", "r2p-adapt", "SKILL.md"),),
     "gemini": (("commands", "r2p-adapt.toml"),),
 }
-
 
 @dataclass
 class _FileSnapshot:
@@ -183,8 +183,8 @@ class InstallService:
             elif platform == "opencode":
                 # opencode custom commands use Markdown files with `description:`
                 # frontmatter and the filename as the command name. Reuse claude's
-                # command bodies, then inject opencode's argument placeholder so
-                # slash-command invocation args are not dropped.
+                # command bodies. Most commands preserve slash-command invocation
+                # args; r2p-execute is specialized below with a fixed preflight.
                 cmd_dir = self._opencode_command_source()
                 for src in sorted(cmd_dir.glob("r2p-*.md")):
                     dest = platform_home / "commands" / src.name
@@ -192,6 +192,7 @@ class InstallService:
                         src.read_text(),
                         R2P_VERSION,
                         str(bin_dir),
+                        src.name,
                     )
                     self._write_managed_file(
                         dest, content, backups, installed_paths, written, backup_dir
@@ -824,6 +825,16 @@ class InstallService:
             content = backup_path.read_text(encoding="utf-8")
         except UnicodeDecodeError:
             return False
+        source = self.repo_root / "tools" / target.name
+        try:
+            if source.is_file():
+                expected = _render_bin_script(
+                    source.read_text(encoding="utf-8"), self.repo_root
+                )
+                if content == expected:
+                    return True
+        except (OSError, UnicodeDecodeError):
+            return False
         return _looks_like_managed_bin_script(content)
 
     def _strip_path_from_manifest(self, manifest_path: Path, path_str: str) -> None:
@@ -1004,9 +1015,26 @@ def _render(content: str, version: str, bin_dir: str) -> str:
     return content
 
 
-def _render_opencode_command(content: str, version: str, bin_dir: str) -> str:
-    """Render a Markdown command with opencode invocation arguments preserved."""
+def _render_opencode_command(content: str, version: str, bin_dir: str, command_name: str) -> str:
+    """Render a Markdown command for opencode."""
     rendered = _render(content, version, bin_dir)
+    if command_name == "r2p-execute.md":
+        wrapper = shlex.quote(str(Path(bin_dir) / "r2p-execute"))
+        preflight = (
+            "\n## Deterministic OpenCode preflight\n\n"
+            f"!`{wrapper} $ARGUMENTS 2>&1; r2p_status=$?; "
+            'printf \'\\nR2P_PREFLIGHT_EXIT=%s\\n\' "$r2p_status"`\n\n'
+            "Treat `R2P_PREFLIGHT_EXIT != 0`, `blocked:`, `no_selected_run`, "
+            "or `plan_not_ready` in the preflight output as a hard stop before "
+            "any execution work. To execute a specific run, first run "
+            "`r2p-switch --work-id <id>` and invoke `/r2p-execute` again.\n"
+        )
+        if rendered.startswith("---\n"):
+            end = rendered.find("\n---\n", 4)
+            if end != -1:
+                insert_at = end + len("\n---\n")
+                return rendered[:insert_at] + preflight + rendered[insert_at:]
+        return preflight.lstrip() + "\n" + rendered
     if "$ARGUMENTS" in rendered:
         return rendered
     return (
@@ -1035,17 +1063,17 @@ def _looks_like_managed_bin_script(content: str) -> bool:
         'export PYTHONPATH="$REPO_ROOT${PYTHONPATH:+:$PYTHONPATH}"' in content
         and "-m tools.workflow_cli.agent_shortcuts" in content
     )
-    trusted_bootstrap = (
-        any(
-            f'{flag} "$REPO_ROOT/tools/workflow_cli/__main__.py"' in content
-            for flag in ("-E", "-I")
-        )
-        and (
-            "tools.workflow_cli.agent_shortcuts" in content
-            or "tools.workflow_cli.install_cli" in content
-        )
+    trusted_entrypoint = re.compile(
+        r'^[ \t]*exec python(?:3)? -(?:E|I) '
+        r'"\$REPO_ROOT/tools/workflow_cli/__main__\.py" '
+        r'(?:'
+        r'tools\.workflow_cli\.agent_shortcuts [a-z][a-z0-9-]*'
+        r'|tools\.workflow_cli\.install_cli(?: [a-z][a-z0-9-]*)?'
+        r'|tools\.workflow_cli (?:context-view|execution-progress|execution-prerequisite-check|execution-metrics-(?:status|append|ack|finalize))'
+        r') "\$@"$',
+        re.MULTILINE,
     )
-    return common and (legacy or trusted_bootstrap)
+    return common and (legacy or bool(trusted_entrypoint.search(content)))
 
 
 def _dump_manifest(manifest: dict[str, Any]) -> str:

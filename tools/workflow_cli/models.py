@@ -110,45 +110,54 @@ ALLOWED_TRANSITIONS: dict[RunStatus, set[RunStatus]] = {
         RunStatus.QUALITY_GATE_FAILED,
         RunStatus.READY_FOR_CHECKPOINT_REVIEW,
         RunStatus.UPSTREAM_GAP_ROUTING,
+        RunStatus.ARCHIVED,
     },
     RunStatus.ENTRY_GATE_FAILED: {
         RunStatus.ACTIVE_STAGE_DRAFT,
         RunStatus.UPSTREAM_GAP_ROUTING,
+        RunStatus.ARCHIVED,
     },
     RunStatus.QUALITY_GATE_FAILED: {
         RunStatus.ACTIVE_STAGE_DRAFT,
         RunStatus.UPSTREAM_GAP_ROUTING,
+        RunStatus.ARCHIVED,
     },
     RunStatus.READY_FOR_CHECKPOINT_REVIEW: {
         RunStatus.ACTIVE_STAGE_DRAFT,
         RunStatus.CHECKPOINT_REVIEW,
         RunStatus.UPSTREAM_GAP_ROUTING,
+        RunStatus.ARCHIVED,
     },
     RunStatus.CHECKPOINT_REVIEW: {
         RunStatus.ACTIVE_STAGE_DRAFT,
         RunStatus.CHECKPOINT_CHANGES_REQUESTED,
         RunStatus.CHECKPOINT_APPROVED,
         RunStatus.UPSTREAM_GAP_ROUTING,
+        RunStatus.ARCHIVED,
     },
     RunStatus.CHECKPOINT_CHANGES_REQUESTED: {
         RunStatus.ACTIVE_STAGE_DRAFT,
         RunStatus.QUALITY_GATE_FAILED,
         RunStatus.UPSTREAM_GAP_ROUTING,
+        RunStatus.ARCHIVED,
     },
     RunStatus.UPSTREAM_GAP_ROUTING: {
         RunStatus.ACTIVE_STAGE_DRAFT,
         RunStatus.UPSTREAM_GAP_ROUTING,
         RunStatus.READY_FOR_CHECKPOINT_REVIEW,
         RunStatus.CHECKPOINT_APPROVED,
+        RunStatus.ARCHIVED,
     },
     RunStatus.CHECKPOINT_APPROVED: {
         RunStatus.NEXT_STAGE,
         RunStatus.CLOSED_AT_PLAN_CHECKPOINT,
         RunStatus.UPSTREAM_GAP_ROUTING,
+        RunStatus.ARCHIVED,
     },
     RunStatus.NEXT_STAGE: {
         RunStatus.ACTIVE_STAGE_DRAFT,
         RunStatus.ENTRY_GATE_FAILED,
+        RunStatus.ARCHIVED,
     },
     RunStatus.CLOSED_AT_PLAN_CHECKPOINT: {RunStatus.EXECUTING, RunStatus.ARCHIVED},
     RunStatus.EXECUTING: {
@@ -196,6 +205,7 @@ ALLOWED_COMMANDS_BY_RUN_STATE: dict[RunStatus, set[str]] = {
         "CMD-TIER-LOCK",
         "CMD-TIER-ESCALATE",
         "CMD-TIER-STATUS",
+        "CMD-RUN-ABANDON",
     },
     RunStatus.ENTRY_GATE_FAILED: {
         "CMD-GATE-ENTRY",
@@ -206,6 +216,7 @@ ALLOWED_COMMANDS_BY_RUN_STATE: dict[RunStatus, set[str]] = {
         "CMD-TIER-ESTIMATE",
         "CMD-TIER-ESCALATE",
         "CMD-TIER-STATUS",
+        "CMD-RUN-ABANDON",
     },
     RunStatus.QUALITY_GATE_FAILED: {
         "CMD-STAGE-PRODUCE",
@@ -219,6 +230,7 @@ ALLOWED_COMMANDS_BY_RUN_STATE: dict[RunStatus, set[str]] = {
         "CMD-GAP-ROUTE",
         "CMD-TIER-ESCALATE",
         "CMD-TIER-STATUS",
+        "CMD-RUN-ABANDON",
     },
     RunStatus.READY_FOR_CHECKPOINT_REVIEW: {
         "CMD-STAGE-UPDATE",
@@ -227,6 +239,7 @@ ALLOWED_COMMANDS_BY_RUN_STATE: dict[RunStatus, set[str]] = {
         "CMD-GAP-RECORD",
         "CMD-TIER-ESCALATE",
         "CMD-TIER-STATUS",
+        "CMD-RUN-ABANDON",
     },
     RunStatus.CHECKPOINT_REVIEW: {
         "CMD-REVIEW-CHECKPOINT",
@@ -241,6 +254,7 @@ ALLOWED_COMMANDS_BY_RUN_STATE: dict[RunStatus, set[str]] = {
         "CMD-GAP-ROUTE",
         "CMD-TIER-ESCALATE",
         "CMD-TIER-STATUS",
+        "CMD-RUN-ABANDON",
     },
     RunStatus.CHECKPOINT_CHANGES_REQUESTED: {
         "CMD-STAGE-PRODUCE",
@@ -253,6 +267,7 @@ ALLOWED_COMMANDS_BY_RUN_STATE: dict[RunStatus, set[str]] = {
         "CMD-GAP-ROUTE",
         "CMD-TIER-ESCALATE",
         "CMD-TIER-STATUS",
+        "CMD-RUN-ABANDON",
     },
     RunStatus.UPSTREAM_GAP_ROUTING: {
         "CMD-GAP-RECORD",
@@ -263,16 +278,19 @@ ALLOWED_COMMANDS_BY_RUN_STATE: dict[RunStatus, set[str]] = {
         "CMD-CONFIRM-REJECT",
         "CMD-TIER-ESCALATE",
         "CMD-TIER-STATUS",
+        "CMD-RUN-ABANDON",
     },
     RunStatus.CHECKPOINT_APPROVED: {
         "CMD-RUN-CLOSE",
         "CMD-STAGE-ADVANCE",
         "CMD-TIER-STATUS",
+        "CMD-RUN-ABANDON",
     },
     RunStatus.NEXT_STAGE: {
         "CMD-GATE-ENTRY",
         "CMD-TIER-ESCALATE",
         "CMD-TIER-STATUS",
+        "CMD-RUN-ABANDON",
     },
     RunStatus.CLOSED_AT_PLAN_CHECKPOINT: {
         "CMD-RUN-REOPEN",
@@ -519,4 +537,4 @@ class RunRecord:
     resume_context: ResumeContext = field(default_factory=ResumeContext)
     tier_estimate: TierEstimate | None = None
     tier_locked: TierEstimate | None = None
-    reopen_lineage: str | None = None  # e.g. "reopened_from: WF-...-r0@plan_checkpoint"
+    reopen_lineage: str | None = None  # "lineage_root: WF-...; reopened_from: WF-...@plan_checkpoint ..."

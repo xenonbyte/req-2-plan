@@ -1,2 +1,2 @@
-description = "Reopen a closed or executing workflow run from a specific stage and select the reopened run"
+description = "Reopen a run, archive its direct source, and select the only active lineage run"
 prompt = "!{\"{{R2P_BIN_DIR}}/r2p-reopen\" {{args}}}"

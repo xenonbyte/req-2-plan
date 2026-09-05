@@ -898,6 +898,97 @@ class TestInstallService:
         svc.uninstall("codex")
         assert not bin_dir.exists(), "bin dir removed after last platform gone"
 
+    def test_uninstall_removes_context_view_wrapper_after_final_shared_platform(self, tmp_path):
+        svc, manifest_root, _ = make_service(tmp_path)
+        svc.install("codex")
+        svc.install("claude")
+        wrapper = manifest_root / "bin" / "r2p-context-view"
+        assert wrapper.exists()
+
+        svc.uninstall("claude")
+        assert wrapper.exists(), "shared wrapper must remain for codex"
+
+        svc.uninstall("codex")
+        assert not wrapper.exists(), "managed context-view wrapper must not be restored"
+        assert not (manifest_root / "bin").exists()
+
+    def test_uninstall_discards_generic_managed_wrapper_backups_from_old_checkout(self, tmp_path):
+        current, manifest_root, _ = make_service(tmp_path)
+        old_checkout = tmp_path / "old-checkout"
+        old_checkout.symlink_to(REPO_ROOT, target_is_directory=True)
+        old = InstallService(
+            repo_root=old_checkout,
+            manifest_root=manifest_root,
+            platform_homes=current.platform_homes,
+        )
+
+        old.install("claude")
+        context_wrapper = manifest_root / "bin" / "r2p-context-view"
+        metrics_wrapper = manifest_root / "bin" / "r2p-metrics-status"
+        assert f"REPO_ROOT={old_checkout}" in context_wrapper.read_text(encoding="utf-8")
+        assert f"REPO_ROOT={old_checkout}" in metrics_wrapper.read_text(encoding="utf-8")
+
+        current.install("codex")
+        current.uninstall("codex")
+        current.uninstall("claude")
+
+        assert not context_wrapper.exists()
+        assert not metrics_wrapper.exists()
+
+    def test_metrics_wrappers_are_manifest_owned_shared_and_restore_user_backup(self, tmp_path):
+        svc, manifest_root, _ = make_service(tmp_path)
+        names = (
+            "r2p-prerequisite-check",
+            "r2p-metrics-status",
+            "r2p-metrics-append",
+            "r2p-metrics-ack",
+            "r2p-metrics-finalize",
+        )
+        user_target = manifest_root / "bin" / "r2p-metrics-append"
+        user_target.parent.mkdir(parents=True)
+        user_bytes = b"#!/usr/bin/env bash\nprintf 'user metrics helper\\n'\n"
+        user_target.write_bytes(user_bytes)
+
+        claude = svc.install("claude")
+        codex = svc.install("codex")
+        for name in names:
+            target = manifest_root / "bin" / name
+            assert target.exists()
+            assert str(target) in claude["installed_paths"]
+            assert str(target) in codex["installed_paths"]
+        assert b"execution-metrics-append" in user_target.read_bytes()
+
+        svc.uninstall("claude")
+        assert all((manifest_root / "bin" / name).exists() for name in names)
+        svc.uninstall("codex")
+        assert user_target.read_bytes() == user_bytes
+        assert not (manifest_root / "bin" / "r2p-metrics-status").exists()
+        assert not (manifest_root / "bin" / "r2p-metrics-ack").exists()
+        assert not (manifest_root / "bin" / "r2p-metrics-finalize").exists()
+        assert not (manifest_root / "bin" / "r2p-prerequisite-check").exists()
+
+    def test_uninstall_restores_user_context_view_comment_script_byte_identically(self, tmp_path):
+        svc, manifest_root, _ = make_service(tmp_path)
+        wrapper = manifest_root / "bin" / "r2p-context-view"
+        wrapper.parent.mkdir(parents=True)
+        user_script = (
+            b'#!/usr/bin/env bash\n'
+            b'set -euo pipefail\n'
+            b'SCRIPT_DIR="$(cd "$(dirname "$' b'{BASH_SOURCE[0]}")" && pwd)"\n'
+            b'REPO_ROOT=/user/owned/script\n'
+            b'# exec python3 -E "$REPO_ROOT/tools/workflow_cli/__main__.py" '
+            b'tools.workflow_cli context-view "$@"\n'
+            b"printf 'user-owned wrapper\\n'\n"
+        )
+        wrapper.write_bytes(user_script)
+
+        svc.install("claude")
+        svc.install("codex")
+        svc.uninstall("claude")
+        svc.uninstall("codex")
+
+        assert wrapper.read_bytes() == user_script
+
     def test_uninstall_preserves_shared_bin_scripts_when_other_platforms_installed(self, tmp_path):
         svc, manifest_root, _ = make_service(tmp_path)
         svc.install("claude")
@@ -1127,6 +1218,7 @@ class TestInstallService:
         svc, manifest_root, ph_root = make_service(tmp_path)
         svc.install("codex")
         for command in [
+            "r2p-abandon",
             "r2p-continue",
             "r2p-reopen",
             "r2p-start",
@@ -1160,8 +1252,18 @@ class TestInstallService:
             assert "{{args}}" in content, command
             assert "!{" in content, command
 
-    @pytest.mark.parametrize("flag", ["-E", "-I"])
-    def test_trusted_and_legacy_isolated_wrappers_are_recognized_as_managed(self, flag):
+    @pytest.mark.parametrize(
+        ("flag", "target"),
+        [
+            ("-E", "tools.workflow_cli.agent_shortcuts start"),
+            ("-I", "tools.workflow_cli.agent_shortcuts start"),
+            ("-E", "tools.workflow_cli context-view"),
+            ("-I", "tools.workflow_cli execution-metrics-status"),
+        ],
+    )
+    def test_trusted_and_legacy_isolated_wrappers_are_recognized_as_managed(
+        self, flag, target
+    ):
         from tools.workflow_cli.install import _looks_like_managed_bin_script
 
         wrapper = f"""#!/usr/bin/env bash
@@ -1169,13 +1271,25 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${{BASH_SOURCE[0]}}")" && pwd)"
 REPO_ROOT=/trusted/req-to-plan
 if command -v python3 >/dev/null 2>&1; then
-    exec python3 {flag} "$REPO_ROOT/tools/workflow_cli/__main__.py" tools.workflow_cli.agent_shortcuts start "$@"
+    exec python3 {flag} "$REPO_ROOT/tools/workflow_cli/__main__.py" {target} "$@"
 else
-    exec python {flag} "$REPO_ROOT/tools/workflow_cli/__main__.py" tools.workflow_cli.agent_shortcuts start "$@"
+    exec python {flag} "$REPO_ROOT/tools/workflow_cli/__main__.py" {target} "$@"
 fi
 """
 
         assert _looks_like_managed_bin_script(wrapper)
+
+    def test_context_view_prefix_is_not_recognized_as_a_managed_wrapper(self):
+        from tools.workflow_cli.install import _looks_like_managed_bin_script
+
+        wrapper = """#!/usr/bin/env bash
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT=/trusted/req-to-plan
+exec python3 -E "$REPO_ROOT/tools/workflow_cli/__main__.py" tools.workflow_cli context-view-evil "$@"
+"""
+
+        assert not _looks_like_managed_bin_script(wrapper)
 
     # -----------------------------------------------------------------------
     # Return value shape
@@ -1230,6 +1344,16 @@ fi
             ("claude", "commands/r2p-archive.md"),
             ("codex", "skills/r2p-archive/SKILL.md"),
             ("gemini", "commands/r2p-archive.toml"),
+        ):
+            service.install(platform)
+            assert (ph_root / platform / rel).exists(), f"{platform}:{rel} not installed"
+
+    def test_install_ships_r2p_abandon_for_all_platforms(self, tmp_path):
+        service, _manifest_root, ph_root = make_service(tmp_path)
+        for platform, rel in (
+            ("claude", "commands/r2p-abandon.md"),
+            ("codex", "skills/r2p-abandon/SKILL.md"),
+            ("gemini", "commands/r2p-abandon.toml"),
         ):
             service.install(platform)
             assert (ph_root / platform / rel).exists(), f"{platform}:{rel} not installed"
@@ -1586,6 +1710,7 @@ def _claude_command_names() -> set[str]:
 
 
 OPENCODE_COMMANDS_WITH_ARGS = {
+    "r2p-abandon.md",
     "r2p-archive.md",
     "r2p-gap-open.md",
     "r2p-gap-resolve.md",
@@ -1594,6 +1719,7 @@ OPENCODE_COMMANDS_WITH_ARGS = {
     "r2p-status.md",
     "r2p-switch.md",
     "r2p-tier-lock.md",
+    "r2p-execute.md",
 }
 
 
@@ -1615,6 +1741,85 @@ class TestInstallOpencode:
         svc.install("opencode")
         opencode_names = {p.name for p in (ph_root / "opencode" / "commands").glob("r2p-*.md")}
         assert opencode_names == _claude_command_names()
+
+    def test_execute_command_derives_phase_one_protocol_from_claude(self, tmp_path):
+        svc, _, ph_root = make_service(tmp_path)
+        svc.install("opencode")
+        content = (ph_root / "opencode" / "commands" / "r2p-execute.md").read_text(encoding="utf-8")
+        for token in (
+            "brand-new zero-history subagent invocation",
+            "built-in `Task` tool without `task_id`",
+            "`task_id` resumes an existing subagent session",
+            "targeted or directly affected tests",
+            "execution/metrics.md",
+            "verification_records",
+            "r2p-context-view --work-id <id>",
+            "semantic_view",
+            "semantic_payload_bytes",
+            "⚠️ DEFER",
+            "r2p-metrics-status",
+            "r2p-metrics-append",
+            "r2p-metrics-ack",
+            "r2p-metrics-finalize",
+            "r2p-prerequisite-check",
+            "metrics_incomplete",
+            "Final Fix Wave: <N>",
+            "Final Fix Waves: none",
+            "fast_profile_review",
+            "--confirm-fast-eligible",
+            "--reject-fast-ineligible",
+            "Task N: implemented",
+            "Profile Escalation: fast -> strict",
+            "never synthesizes task-reviewer blocks",
+            "primary per-task review",
+            "atomic full-file update",
+            "r2p-progress begin",
+            "r2p-progress complete",
+            "recover_role_result",
+            "review_ranges",
+            "--require-version 2",
+        ):
+            assert token in content
+
+    def test_execute_command_passes_invocation_arguments_to_fixed_preflight(self, tmp_path):
+        svc, manifest_root, ph_root = make_service(tmp_path)
+        svc.install("opencode")
+        content = (ph_root / "opencode" / "commands" / "r2p-execute.md").read_text(encoding="utf-8")
+        expected = (
+            f"!`{manifest_root / 'bin' / 'r2p-execute'} $ARGUMENTS 2>&1; "
+            'r2p_status=$?; printf \'\\nR2P_PREFLIGHT_EXIT=%s\\n\' "$r2p_status"`'
+        )
+
+        assert expected in content
+        assert "R2P_PREFLIGHT_EXIT != 0" in content
+        assert "blocked:" in content
+        assert "no_selected_run" in content
+        assert "plan_not_ready" in content
+        assert "r2p-switch --work-id <id>" in content
+        assert "$ARGUMENTS" in content
+        shell_blocks = re.findall(r"^!`([^`]+)`", content, flags=re.MULTILINE)
+        assert shell_blocks == [
+            f"{manifest_root / 'bin' / 'r2p-execute'} $ARGUMENTS 2>&1; "
+            'r2p_status=$?; printf \'\\nR2P_PREFLIGHT_EXIT=%s\\n\' "$r2p_status"'
+        ]
+        assert all("$1" not in block and "$2" not in block for block in shell_blocks)
+
+    def test_continue_command_derives_phase_two_plan_author_protocol_from_claude(self, tmp_path):
+        svc, _, ph_root = make_service(tmp_path)
+        svc.install("opencode")
+        content = (ph_root / "opencode" / "commands" / "r2p-continue.md").read_text(encoding="utf-8")
+        for token in (
+            "phase-level cohesive slice",
+            "operation-homogeneous task group",
+            "intermediate contract",
+            "Prerequisite: none",
+            "Prerequisite: PLAN-TASK-NNN",
+            "dispatch prerequisite gate",
+            "profile-aware prerequisite semantics",
+            "must not be copied into `Verification`",
+            "Dependencies:",
+        ):
+            assert token in content
 
     def test_install_renders_placeholders(self, tmp_path):
         svc, manifest_root, ph_root = make_service(tmp_path)

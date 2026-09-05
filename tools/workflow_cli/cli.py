@@ -7,6 +7,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import shutil
@@ -80,6 +81,31 @@ from tools.workflow_cli.markdown import (
     plan_task_anchors,
     strip_nonsemantic_markdown,
 )
+from tools.workflow_cli.execution_metrics import (
+    START_TRANSACTION_OWNER,
+    MetricsFormatError,
+    MetricsInputError,
+    PlanNotFoundError,
+    PrerequisiteError,
+    RepresentativeSamplesError,
+    _canonical_json,
+    acknowledge_metrics_completion,
+    append_metrics_invocation,
+    bootstrap_self_hosted_metrics,
+    check_prerequisite,
+    finalize_metrics,
+    read_metrics_status,
+    start_execution_transaction,
+    validate_representative_samples,
+)
+from tools.workflow_cli.execution_context import (
+    ContextSourceNotFoundError,
+    ContextViewError,
+    UnsafeContextSourceError,
+    build_context_view,
+)
+from tools.workflow_cli.execution_progress import record_execution_progress
+from tools.workflow_cli.execution_profile import ExecutionProfileError
 
 
 # ---------------------------------------------------------------------------
@@ -656,13 +682,174 @@ def _copy_reopen_regular_file(source: Path, destination: Path) -> bool:
     return True
 
 
+def _reopen_lineage_root(work_id: str, reopen_lineage: str | None = None) -> str:
+    """Return the stable root persisted by reopen, with legacy derivation."""
+    if reopen_lineage:
+        explicit = re.match(r"^lineage_root: ([^;]+); ", reopen_lineage)
+        if explicit:
+            return str(WorkId(explicit.group(1)))
+        legacy_parent = re.match(r"^reopened_from: ([^@]+)@", reopen_lineage)
+        if legacy_parent:
+            parent = str(WorkId(legacy_parent.group(1)))
+            suffix_match = re.match(r"^WF-\d{8}-.+?-r([1-9][0-9]*)$", work_id)
+            if suffix_match:
+                suffix = int(suffix_match.group(1))
+                for root in (parent, re.sub(r"-r[1-9][0-9]*$", "", parent)):
+                    try:
+                        if str(_reopen_candidate_work_id(root, suffix)) == work_id:
+                            return root
+                    except ValueError:
+                        continue
+            return parent
+    return work_id
+
+
+def _load_reopen_run(work_id: str, base_path: Path | None):
+    """Reject malformed source/sibling records before any reopen mutation."""
+    try:
+        return _load_run(work_id, base_path)
+    except UnsafeRegularFileError:
+        raise
+    except ValueError:
+        print_and_exit(
+            format_error(
+                f"Invalid reopen run record: {work_id}/run.md",
+                exit_code=EXIT_CONFLICT,
+            ),
+            EXIT_CONFLICT,
+        )
+
+
+def _active_reopen_lineage_runs(
+    base_path: Path,
+    source_id: str,
+    source_lineage: str | None = None,
+) -> list[str]:
+    """Return other non-terminal active-workspace runs in the source lineage."""
+    workspace = base_path / ".req-to-plan"
+    if not workspace.is_dir():
+        return []
+    root = _reopen_lineage_root(source_id, source_lineage)
+    lineage_names = {root}
+    for suffix in range(1, 100):
+        try:
+            lineage_names.add(str(_reopen_candidate_work_id(root, suffix)))
+        except ValueError:
+            continue
+    conflicts: list[str] = []
+    for candidate in sorted(workspace.iterdir(), key=lambda path: path.name):
+        if candidate.name == source_id or candidate.name not in lineage_names:
+            continue
+        record, _, _ = _load_reopen_run(candidate.name, base_path)
+        if record.status not in {
+            RunStatus.CLOSED_AT_PLAN_CHECKPOINT,
+            RunStatus.ARCHIVED,
+        }:
+            conflicts.append(candidate.name)
+    return conflicts
+
+
+def _prepare_archive_destination(base_path: Path, work_id: str) -> Path:
+    archive_dir = base_path / ".req-to-plan" / "archive" / work_id
+    if archive_dir.exists():
+        print_and_exit(
+            format_error(
+                f"Archive target already exists: {archive_dir}",
+                exit_code=EXIT_CONFLICT,
+            ),
+            EXIT_CONFLICT,
+        )
+    _ensure_workspace_gitignore_or_exit(base_path)
+    _reject_symlink_or_exit(
+        archive_dir.parent,
+        f"Archive parent is a symlink: {archive_dir.parent}",
+    )
+    archive_dir.parent.mkdir(parents=True, exist_ok=True)
+    return archive_dir
+
+
+def _validate_execution_residue(run_dir: Path) -> bool:
+    """Return whether owned execution residue exists; reject unsafe shapes."""
+    owner_path = run_dir / START_TRANSACTION_OWNER
+    try:
+        owner_stat = owner_path.lstat()
+    except FileNotFoundError:
+        owner_exists = False
+    except OSError as exc:
+        print_and_exit(
+            format_error(
+                f"Unsafe execution residue: cannot inspect {owner_path.name}: {exc}",
+                exit_code=EXIT_CONFLICT,
+            ),
+            EXIT_CONFLICT,
+        )
+    else:
+        if not stat.S_ISREG(owner_stat.st_mode):
+            print_and_exit(
+                format_error(
+                    "Unsafe execution residue: transaction owner is not a real "
+                    "file. Resolve the unsafe path before archiving.",
+                    exit_code=EXIT_CONFLICT,
+                ),
+                EXIT_CONFLICT,
+            )
+        owner_exists = True
+
+    execution_path = run_dir / "execution"
+    try:
+        execution_stat = execution_path.lstat()
+    except FileNotFoundError:
+        return owner_exists
+    except OSError as exc:
+        print_and_exit(
+            format_error(
+                f"Unsafe execution residue: cannot inspect {execution_path.name}: {exc}",
+                exit_code=EXIT_CONFLICT,
+            ),
+            EXIT_CONFLICT,
+        )
+    if not stat.S_ISDIR(execution_stat.st_mode):
+        print_and_exit(
+            format_error(
+                "Unsafe execution residue: execution is not a real directory. "
+                "Resolve the unsafe path before archiving.",
+                exit_code=EXIT_CONFLICT,
+            ),
+            EXIT_CONFLICT,
+        )
+    return True
+
+
+def _move_run_to_archive(
+    base_path: Path,
+    record,
+    run_dir: Path,
+    archive_dir: Path,
+) -> tuple[object, Path]:
+    """Move one validated run to archive and persist its terminal record."""
+    archived_record = update_run_status(record, RunStatus.ARCHIVED)
+    shutil.move(str(run_dir), str(archive_dir))
+    try:
+        RunStateManager(archive_dir).save(archived_record)
+    except Exception:
+        if archive_dir.exists() and not run_dir.exists():
+            shutil.move(str(archive_dir), str(run_dir))
+        raise
+    commit_requirement_dir(
+        base_path,
+        str(archived_record.work_id),
+        f"chore(r2p): archive {archived_record.work_id}",
+    )
+    return archived_record, archive_dir
+
+
 def _cmd_run_reopen(args):
     source_id = str(_validate_work_id(args.from_id))
     target_stage = _parse_reopen_stage(args.stage)
 
     # Load source run through the shared guard so reopen cannot follow a
     # symlinked .req-to-plan/<work-id> outside the workspace.
-    source_record, source_mgr, source_dir = _load_run(source_id, args.base_path)
+    source_record, source_mgr, source_dir = _load_reopen_run(source_id, args.base_path)
 
     # --reason is interpolated verbatim into reopen_lineage, a raw line under the
     # last run.md section; a line boundary there could inject a "## "-prefixed
@@ -685,14 +872,40 @@ def _cmd_run_reopen(args):
             EXIT_CONFLICT,
         )
 
+    base_path = args.base_path or Path.cwd()
+    try:
+        lineage_root = _reopen_lineage_root(source_id, source_record.reopen_lineage)
+    except ValueError:
+        print_and_exit(
+            format_error(
+                f"Invalid reopen lineage in {source_id}/run.md",
+                exit_code=EXIT_CONFLICT,
+            ),
+            EXIT_CONFLICT,
+        )
+    active_lineage_runs = _active_reopen_lineage_runs(
+        base_path, source_id, source_record.reopen_lineage
+    )
+    if active_lineage_runs:
+        print_and_exit(
+            format_error(
+                "An active reopened run already exists in this lineage; "
+                "continue it or abandon it explicitly before reopening again.",
+                details=active_lineage_runs,
+                exit_code=EXIT_CONFLICT,
+            ),
+            EXIT_CONFLICT,
+        )
+    _validate_execution_residue(source_dir)
+    source_archive_dir = _prepare_archive_destination(base_path, source_id)
+
     # Determine new work_id suffix: -r1, -r2, etc.
-    base = source_id
+    base = lineage_root
     suffix = 1
-    # Remove existing -rN suffix from base if present
-    m = re.match(r"^(WF-\d{8}-.+?)-r(\d+)$", source_id)
-    if m:
-        base = m.group(1)
-        suffix = int(m.group(2)) + 1
+    # Only a run carrying lineage metadata owns a generated -rN suffix.
+    m = re.match(r"^WF-\d{8}-.+?-r(\d+)$", source_id)
+    if source_record.reopen_lineage and m:
+        suffix = int(m.group(1)) + 1
 
     new_work_id = None
     new_run_dir = None
@@ -750,8 +963,18 @@ def _cmd_run_reopen(args):
             if source_record.status == RunStatus.EXECUTING
             else "plan_checkpoint"
         )
-        new_record.reopen_lineage = f"reopened_from: {source_id}@{source_phase} reason: {args.reason}"
+        new_record.reopen_lineage = (
+            f"lineage_root: {lineage_root}; "
+            f"reopened_from: {source_id}@{source_phase} reason: {args.reason}"
+        )
         new_record.current_stage = target_stage
+        update_resume_context(
+            new_record,
+            last_operation="reopen_run",
+            next_operation="produce_stage_artifact",
+            active_item=target_stage.value,
+            reason=args.reason,
+        )
 
         # Copy approved checkpoints before target stage
         for cp in source_record.approved_checkpoints:
@@ -792,24 +1015,24 @@ def _cmd_run_reopen(args):
             shutil.rmtree(new_run_dir, ignore_errors=True)
         raise
 
-    if source_record.status == RunStatus.EXECUTING:
-        try:
-            source_record = update_run_status(source_record, RunStatus.CLOSED_AT_PLAN_CHECKPOINT)
-        except ValueError as e:
-            print_and_exit(format_error(str(e), exit_code=EXIT_CONFLICT), EXIT_CONFLICT)
-        source_record.current_stage = Stage.CLOSED
-        update_resume_context(
+    update_resume_context(
+        source_record,
+        last_operation="reopen_superseded",
+        next_operation=f"continue_reopened_run:{new_work_id}",
+        reason=f"superseded_by:{new_work_id}",
+    )
+    try:
+        _, source_archive_dir = _move_run_to_archive(
+            base_path,
             source_record,
-            last_operation="reopen_from_execution",
-            next_operation=f"continue_reopened_run:{new_work_id}",
+            source_dir,
+            source_archive_dir,
         )
-        try:
-            source_mgr.save(source_record)
-        except Exception:
-            # Roll back the just-created new run so no orphan is left and the
-            # source stays consistently EXECUTING.
-            shutil.rmtree(new_run_dir, ignore_errors=True)
-            raise
+    except Exception:
+        # The child is not authoritative until its source has been archived.
+        # Roll it back so a retry cannot leave two active lineage members.
+        shutil.rmtree(new_run_dir, ignore_errors=True)
+        raise
 
     print_and_exit(
         format_success(
@@ -818,6 +1041,7 @@ def _cmd_run_reopen(args):
                 "source_work_id": source_id,
                 "target_stage": target_stage.value,
                 "run_dir": str(new_run_dir),
+                "source_archived_to": str(source_archive_dir),
             },
             message=f"Run reopened as {new_work_id}",
         ),
@@ -825,8 +1049,69 @@ def _cmd_run_reopen(args):
     )
 
 
+_ABANDONABLE_RUN_STATUSES = {
+    RunStatus.ACTIVE_STAGE_DRAFT,
+    RunStatus.ENTRY_GATE_FAILED,
+    RunStatus.QUALITY_GATE_FAILED,
+    RunStatus.READY_FOR_CHECKPOINT_REVIEW,
+    RunStatus.CHECKPOINT_REVIEW,
+    RunStatus.CHECKPOINT_CHANGES_REQUESTED,
+    RunStatus.UPSTREAM_GAP_ROUTING,
+    RunStatus.CHECKPOINT_APPROVED,
+    RunStatus.NEXT_STAGE,
+}
+
+
+def _cmd_run_abandon(args):
+    if not args.reason.strip() or _has_line_break(args.reason):
+        print_and_exit(
+            format_error(
+                "--reason must be one non-blank line",
+                exit_code=EXIT_CLI_ERR,
+            ),
+            EXIT_CLI_ERR,
+        )
+    record, _, run_dir = _load_run(args.work_id, args.base_path)
+    if record.status not in _ABANDONABLE_RUN_STATUSES:
+        print_and_exit(
+            format_error(
+                f"Cannot abandon run in status {record.status.value!r}; "
+                "use r2p-archive for closed or executing runs",
+                exit_code=EXIT_CONFLICT,
+            ),
+            EXIT_CONFLICT,
+        )
+    base = args.base_path or Path.cwd()
+    _validate_execution_residue(run_dir)
+    archive_dir = _prepare_archive_destination(base, str(record.work_id))
+    update_resume_context(
+        record,
+        last_operation="abandon_run",
+        next_operation="none",
+        reason=args.reason,
+    )
+    archived_record, archive_dir = _move_run_to_archive(
+        base,
+        record,
+        run_dir,
+        archive_dir,
+    )
+    print_and_exit(
+        format_success(
+            {
+                "work_id": str(archived_record.work_id),
+                "status": archived_record.status.value,
+                "reason": args.reason,
+                "archived_to": str(archive_dir),
+            },
+            message=f"Run abandoned and archived: {archived_record.work_id}",
+        ),
+        EXIT_OK,
+    )
+
+
 def _cmd_run_archive(args):
-    record, mgr, run_dir = _load_run(args.work_id, args.base_path)
+    record, _, run_dir = _load_run(args.work_id, args.base_path)
     base = args.base_path or Path.cwd()
     archivable = {RunStatus.CLOSED_AT_PLAN_CHECKPOINT, RunStatus.EXECUTING}
     if record.status not in archivable:
@@ -840,7 +1125,19 @@ def _cmd_run_archive(args):
         )
     # 0. Completion gate: an executing run must show every PLAN-TASK done in its
     # ledger before it can be archived. --force overrides (abandoned/superseded run).
-    if record.status == RunStatus.EXECUTING and not args.force:
+    if record.status == RunStatus.CLOSED_AT_PLAN_CHECKPOINT:
+        has_execution_residue = _validate_execution_residue(run_dir)
+        if has_execution_residue and not args.force:
+            print_and_exit(
+                format_error(
+                    "Closed run has execution residue. Re-run r2p-execute to "
+                    "recover or resume it, or use --force only to archive an "
+                    "intentionally abandoned or superseded run.",
+                    exit_code=EXIT_CONFLICT,
+                ),
+                EXIT_CONFLICT,
+            )
+    elif record.status == RunStatus.EXECUTING and not args.force:
         gate = check_execution_complete(run_dir)
         if not gate.passed:
             detail = " ".join(gate.issues)
@@ -863,36 +1160,12 @@ def _cmd_run_archive(args):
                 ),
                 review_gate.exit_code,
             )
-    # 1. Refuse to clobber an existing archived copy before mutating state.
-    archive_dir = base / ".req-to-plan" / "archive" / str(record.work_id)
-    if archive_dir.exists():
-        print_and_exit(
-            format_error(
-                f"Archive target already exists: {archive_dir}",
-                exit_code=EXIT_CONFLICT,
-            ),
-            EXIT_CONFLICT,
-        )
-    # 2. Ensure /archive is ignored before anything lands under it.
-    _ensure_workspace_gitignore_or_exit(base)
-    # 3. Build the archived record, but do not persist it until the move succeeds.
-    try:
-        archived_record = update_run_status(record, RunStatus.ARCHIVED)
-    except ValueError as e:
-        print_and_exit(format_error(str(e), exit_code=EXIT_CONFLICT), EXIT_CONFLICT)
-    _reject_symlink_or_exit(archive_dir.parent, f"Archive parent is a symlink: {archive_dir.parent}")
-    archive_dir.parent.mkdir(parents=True, exist_ok=True)
-    # 4. Move the run dir into the (ignored) archive, then persist ARCHIVED there.
-    shutil.move(str(run_dir), str(archive_dir))
-    try:
-        RunStateManager(archive_dir).save(archived_record)
-    except Exception:
-        if archive_dir.exists() and not run_dir.exists():
-            shutil.move(str(archive_dir), str(run_dir))
-        raise
-    # 5. Commit the removal of the original path (untracks the dir). spec §4.6
-    commit_requirement_dir(
-        base, str(archived_record.work_id), f"chore(r2p): archive {archived_record.work_id}"
+    archive_dir = _prepare_archive_destination(base, str(record.work_id))
+    archived_record, archive_dir = _move_run_to_archive(
+        base,
+        record,
+        run_dir,
+        archive_dir,
     )
     print_and_exit(
         format_success(
@@ -904,56 +1177,265 @@ def _cmd_run_archive(args):
 
 
 def _cmd_run_execute_start(args):
-    record, mgr, run_dir = _load_run(args.work_id, args.base_path)
-    if record.status != RunStatus.CLOSED_AT_PLAN_CHECKPOINT:
+    work_id = _validate_work_id(args.work_id)
+    try:
+        record = start_execution_transaction(
+            (args.base_path or Path.cwd()).resolve(), work_id, args.profile
+        )
+    except PlanNotFoundError:
         print_and_exit(
             format_error(
-                f"Cannot start execution in status {record.status.value!r}; "
-                "must be closed_at_plan_checkpoint (plan_not_ready)",
-                exit_code=EXIT_CONFLICT,
+                f"PLAN not found for run: {work_id}",
+                exit_code=EXIT_NOT_FOUND,
             ),
-            EXIT_CONFLICT,
-        )
-    try:
-        plan_text = read_artifact(run_dir, Stage.PLAN)
-    except FileNotFoundError:
-        print_and_exit(
-            format_error("PLAN artifact not found; cannot start execution", exit_code=EXIT_NOT_FOUND),
             EXIT_NOT_FOUND,
         )
-    # Seed the structural progress ledger (IDs + checkboxes = structure, not
-    # semantics; the agent appends progress). CLI never generates artifact text.
-    anchors = plan_task_anchors(strip_nonsemantic_markdown(plan_text))
-    if not anchors:
+    except FileNotFoundError as exc:
         print_and_exit(
-            format_error(
-                "PLAN contains no PLAN-TASK anchors; repair PLAN with "
-                "### PLAN-TASK-NNN headings before execution",
-                exit_code=EXIT_CONFLICT,
-            ),
+            format_error(f"Execution state file missing: {exc.filename or exc}", exit_code=EXIT_CONFLICT),
             EXIT_CONFLICT,
         )
-    lines = ["# Execution Progress", "", f"work_id: {record.work_id}", ""]
-    lines += [f"- [ ] {tid} {title}".rstrip() for tid, title in anchors]
-    exec_dir = run_dir / "execution"
-    _reject_symlink_or_exit(exec_dir, "unsafe_execution_dir_symlink")
-    exec_dir.mkdir(parents=True, exist_ok=True)
-    atomic_write_text(exec_dir / "progress.md", "\n".join(lines) + "\n")
-    record = update_run_status(record, RunStatus.EXECUTING)
-    update_resume_context(record, last_operation="execute_start", next_operation="implement_tasks")
-    mgr.save(record)
+    except (MetricsFormatError, PrerequisiteError) as exc:
+        print_and_exit(
+            format_error(str(exc), exit_code=EXIT_CONFLICT),
+            EXIT_CONFLICT,
+        )
+    exec_dir = (args.base_path or Path.cwd()) / ".req-to-plan" / str(work_id) / "execution"
     print_and_exit(
         format_success(
             {
                 "work_id": str(record.work_id),
                 "status": record.status.value,
+                "profile": args.profile,
                 "ledger": str(exec_dir / "progress.md"),
-                "task_count": len(anchors),
             },
             message=f"Execution started: {record.work_id}",
         ),
         EXIT_OK,
     )
+
+
+def _cmd_execution_prerequisite_check(args):
+    try:
+        result = check_prerequisite(
+            args.base_path or Path.cwd(),
+            _validate_work_id(args.work_id),
+            args.task,
+            require_version=args.require_version,
+        )
+    except (MetricsFormatError, PrerequisiteError) as exc:
+        print_and_exit(format_error(str(exc), exit_code=EXIT_CONFLICT), EXIT_CONFLICT)
+    print_and_exit(
+        format_success(
+            result,
+            message="prerequisite_satisfied",
+        ),
+        EXIT_OK,
+    )
+
+
+def _cmd_execution_progress(args):
+    try:
+        result = record_execution_progress(
+            args.base_path or Path.cwd(), _validate_work_id(args.work_id),
+            args.action, args.expected_sequence, status=args.status,
+            head=args.head, reason=args.reason,
+        )
+    except (ExecutionProfileError, MetricsFormatError, OSError) as exc:
+        print_and_exit(format_error(str(exc), exit_code=EXIT_CONFLICT), EXIT_CONFLICT)
+    print_and_exit(format_success(result, message=result["result"]), EXIT_OK)
+
+
+def _cmd_execution_metrics_bootstrap(args):
+    if args.profile != "strict" or args.self_hosted_gap_through_task != 2:
+        print_and_exit(
+            format_error("self-hosted bootstrap arguments are not canonical", exit_code=EXIT_CONFLICT),
+            EXIT_CONFLICT,
+        )
+    try:
+        parsed = bootstrap_self_hosted_metrics(
+            args.base_path or Path.cwd(), _validate_work_id(args.work_id), args.self_hosted_gap_through_task
+        )
+    except (MetricsFormatError, PrerequisiteError) as exc:
+        print_and_exit(format_error(str(exc), exit_code=EXIT_CONFLICT), EXIT_CONFLICT)
+    print_and_exit(
+        format_success(
+            {
+                "work_id": args.work_id,
+                "profile": parsed.header["profile"],
+                "task_count": parsed.header["task_count"],
+                "invocation_count": len(parsed.invocations),
+            },
+            message="metrics_bootstrapped",
+        ),
+        EXIT_OK,
+    )
+
+
+def _metrics_result_or_exit(operation, *values):
+    try:
+        result = operation(*values)
+    except MetricsInputError as exc:
+        print_and_exit(format_error(str(exc), exit_code=EXIT_CLI_ERR), EXIT_CLI_ERR)
+    except (MetricsFormatError, PrerequisiteError, OSError) as exc:
+        print_and_exit(format_error(str(exc), exit_code=EXIT_CONFLICT), EXIT_CONFLICT)
+    print_and_exit(format_success(result, message=result["result"]), EXIT_OK)
+
+
+def _cmd_execution_metrics_status(args):
+    _metrics_result_or_exit(
+        read_metrics_status,
+        args.base_path or Path.cwd(),
+        _validate_work_id(args.work_id),
+    )
+
+
+def _json_object_without_duplicate_keys(raw: str) -> dict:
+    def pairs_hook(pairs):
+        value = {}
+        for key, item in pairs:
+            if key in value:
+                raise ValueError(f"duplicate JSON key: {key}")
+            value[key] = item
+        return value
+
+    try:
+        parsed = json.loads(
+            raw,
+            object_pairs_hook=pairs_hook,
+            parse_constant=lambda value: (_ for _ in ()).throw(
+                ValueError(f"non-finite JSON value: {value}")
+            ),
+        )
+    except (json.JSONDecodeError, ValueError) as exc:
+        print_and_exit(format_error(str(exc), exit_code=EXIT_CLI_ERR), EXIT_CLI_ERR)
+    if not isinstance(parsed, dict):
+        print_and_exit(
+            format_error("--record-json must be one JSON object", exit_code=EXIT_CLI_ERR),
+            EXIT_CLI_ERR,
+        )
+    return parsed
+
+
+def _cmd_execution_metrics_append(args):
+    record = _json_object_without_duplicate_keys(args.record_json)
+    _metrics_result_or_exit(
+        append_metrics_invocation,
+        args.base_path or Path.cwd(),
+        _validate_work_id(args.work_id),
+        record,
+    )
+
+
+def _cmd_execution_metrics_ack(args):
+    _metrics_result_or_exit(
+        acknowledge_metrics_completion,
+        args.base_path or Path.cwd(),
+        _validate_work_id(args.work_id),
+        args.expected_sequence,
+    )
+
+
+def _cmd_execution_metrics_finalize(args):
+    _metrics_result_or_exit(
+        finalize_metrics,
+        args.base_path or Path.cwd(),
+        _validate_work_id(args.work_id),
+        args.expected_invocation_count,
+    )
+
+
+def _format_representative_samples_human(result: dict) -> str:
+    """Render the validator's typed success result as a complete audit record."""
+    lines = ["samples:"]
+    role_names = (
+        "implementer",
+        "task_reviewer",
+        "fixer",
+        "task_rereviewer",
+        "final_reviewer",
+        "final_fixer",
+        "final_rereviewer",
+    )
+    sample_fields = (
+        "path",
+        "work_id",
+        "r2p_version",
+        "instrumentation_schema",
+        "profile",
+        "task_count",
+        "change_shape",
+        "instrumentation_complete",
+        "bootstrap_gap",
+        "metrics_finalized",
+        "plan_complete",
+        "final_verdict",
+        "invocation_count",
+        "role_elapsed_total_seconds",
+        "verification_total_seconds",
+        "report_bytes_total",
+    )
+    for index, sample in enumerate(result["samples"], start=1):
+        lines.append(f"sample {index}:")
+        lines.extend(f"  {field}: {sample[field]}" for field in sample_fields)
+        lines.append("  role_counts:")
+        lines.extend(f"    {role}: {sample['role_counts'][role]}" for role in role_names)
+        lines.append("  full_suite:")
+        lines.append(f"    count: {sample['full_suite']['count']}")
+        lines.append(f"    duration_seconds: {sample['full_suite']['duration_seconds']}")
+        lines.append("  context_totals:")
+        for mode in ("direct_acs", "semantic_view"):
+            context = sample["context_totals"][mode]
+            lines.append(f"    {mode}:")
+            lines.append(f"      invocation_count: {context['invocation_count']}")
+            lines.append(f"      context_bytes_kind: {context['context_bytes_kind']}")
+            lines.append(f"      context_bytes: {context['context_bytes']}")
+        lines.append("  token_totals:")
+        for field in ("status", "input_tokens", "output_tokens", "total_tokens"):
+            lines.append(f"    {field}: {sample['token_totals'][field]}")
+        lines.append("  rules:")
+        for rule in sample["rules"]:
+            lines.append(f"    {rule['rule']}: {rule['status']}")
+            details = rule["details"]
+            if details:
+                lines.extend(f"      detail: {detail}" for detail in details)
+            else:
+                lines.append("      details: none")
+
+    aggregate = result["aggregate"]
+    lines.append("aggregate:")
+    for field in (
+        "sample_count",
+        "work_ids",
+        "task_counts",
+        "change_shapes",
+        "task_count_diverse",
+        "change_shape_diverse",
+        "representative",
+    ):
+        lines.append(f"  {field}: {aggregate[field]}")
+    lines.append(f"status: {result['message']}")
+    return "\n".join(lines)
+
+
+def _cmd_execution_samples_validate(args):
+    try:
+        result = validate_representative_samples(tuple(args.sample_dir))
+    except RepresentativeSamplesError as exc:
+        if is_json_mode():
+            print_and_exit(_canonical_json(exc.result), EXIT_GATE_FAIL)
+        details = [
+            f"sample_dir={item.get('sample_dir', 'unavailable')} "
+            f"work_id={item.get('work_id', 'unavailable')} "
+            f"rule={item.get('rule', 'unavailable')}: {item['message']}"
+            for item in exc.result["details"]
+        ]
+        print_and_exit(format_error(exc.result["message"], details=details, exit_code=EXIT_GATE_FAIL), EXIT_GATE_FAIL)
+    except MetricsFormatError as exc:
+        print_and_exit(format_error(str(exc), exit_code=EXIT_CONFLICT), EXIT_CONFLICT)
+    if is_json_mode():
+        print_and_exit(_canonical_json(result), EXIT_OK)
+    print_and_exit(_format_representative_samples_human(result), EXIT_OK)
 
 
 def _cmd_gap_resolve(args):
@@ -1833,6 +2315,17 @@ def _positive_int(raw: str) -> int:
     return n
 
 
+def _nonnegative_int(raw: str) -> int:
+    """argparse type: non-negative integer; raises ArgumentTypeError -> exit 2."""
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("expected a non-negative integer") from exc
+    if value < 0:
+        raise argparse.ArgumentTypeError("expected a non-negative integer")
+    return value
+
+
 def _cmd_plan_task_brief(args):
     """Write a read-only task brief for one PLAN-TASK-NNN to logs/task-N-brief.md."""
     record, mgr, run_dir = _load_run(args.work_id, args.base_path)
@@ -1932,20 +2425,98 @@ def _register_run_commands(subparsers):
     p.add_argument("--reason", required=True, help="Reason for reopening")
     p.set_defaults(func=_cmd_run_reopen)
 
+    # run-abandon
+    p = subparsers.add_parser(
+        "run-abandon",
+        help="Explicitly abandon and archive an open workflow draft",
+    )
+    p.add_argument("--work-id", required=True)
+    p.add_argument("--reason", required=True, help="One-line abandonment reason")
+    p.set_defaults(func=_cmd_run_abandon)
+
     # run-archive
     p = subparsers.add_parser("run-archive", help="Archive a closed run out of the active workspace")
     p.add_argument("--work-id", required=True)
     p.add_argument(
         "--force",
         action="store_true",
-        help="Archive an executing run even if its execution ledger is missing or has unfinished tasks",
+        help=(
+            "Archive an unfinished executing run, or a closed run with real "
+            "execution residue that is intentionally abandoned or superseded"
+        ),
     )
     p.set_defaults(func=_cmd_run_archive)
 
     # run-execute-start
     p = subparsers.add_parser("run-execute-start", help="Begin executing a closed run's PLAN in place")
     p.add_argument("--work-id", required=True)
+    p.add_argument("--profile", choices=["strict", "fast"], default="strict")
     p.set_defaults(func=_cmd_run_execute_start)
+
+    p = subparsers.add_parser("execution-progress", help="Atomically record a role dispatch or completion in progress.md")
+    p.add_argument("action", choices=["begin", "complete", "escalate", "recover"])
+    p.add_argument("--work-id", required=True)
+    p.add_argument("--expected-sequence", type=_positive_int, required=True)
+    p.add_argument("--status", choices=["complete", "approved", "changes_requested", "blocked"])
+    p.add_argument("--head")
+    p.add_argument("--reason")
+    p.set_defaults(func=_cmd_execution_progress)
+
+    p = subparsers.add_parser(
+        "execution-prerequisite-check",
+        help="Read-only profile-aware prerequisite check for an execution task",
+    )
+    p.add_argument("--work-id", required=True)
+    p.add_argument("--task", required=True, type=_positive_int)
+    p.add_argument("--require-version", required=True, type=_positive_int)
+    p.set_defaults(func=_cmd_execution_prerequisite_check)
+
+    p = subparsers.add_parser(
+        "execution-metrics-bootstrap",
+        help="Crash-idempotently bootstrap metrics for the self-hosted Phase 0 run",
+    )
+    p.add_argument("--work-id", required=True)
+    p.add_argument("--profile", required=True, choices=["strict"])
+    p.add_argument("--self-hosted-gap-through-task", required=True, type=_positive_int)
+    p.set_defaults(func=_cmd_execution_metrics_bootstrap)
+
+    p = subparsers.add_parser(
+        "execution-metrics-status",
+        help="Read the canonical metrics append/finalization status",
+    )
+    p.add_argument("--work-id", required=True)
+    p.set_defaults(func=_cmd_execution_metrics_status)
+
+    p = subparsers.add_parser(
+        "execution-metrics-append",
+        help="Atomically append one structured role invocation",
+    )
+    p.add_argument("--work-id", required=True)
+    p.add_argument("--record-json", required=True)
+    p.set_defaults(func=_cmd_execution_metrics_append)
+
+    p = subparsers.add_parser(
+        "execution-metrics-ack",
+        help="Acknowledge one persisted metrics completion after progress is durable",
+    )
+    p.add_argument("--work-id", required=True)
+    p.add_argument("--expected-sequence", required=True, type=_positive_int)
+    p.set_defaults(func=_cmd_execution_metrics_ack)
+
+    p = subparsers.add_parser(
+        "execution-metrics-finalize",
+        help="Atomically derive change shape and finalize metrics",
+    )
+    p.add_argument("--work-id", required=True)
+    p.add_argument("--expected-invocation-count", required=True, type=_nonnegative_int)
+    p.set_defaults(func=_cmd_execution_metrics_finalize)
+
+    p = subparsers.add_parser(
+        "execution-samples-validate",
+        help="Read-only validator for three archived strict metrics samples",
+    )
+    p.add_argument("--sample-dir", action="append", type=Path, default=[])
+    p.set_defaults(func=_cmd_execution_samples_validate)
 
     # plan-task-brief
     p = subparsers.add_parser(
@@ -2412,12 +2983,61 @@ def _cmd_context_build(args):
     )
 
 
+def _cmd_context_view(args):
+    """Print the complete deterministic semantic context view for an executing run."""
+    work_id = _validate_work_id(args.work_id)
+    try:
+        view = build_context_view(args.base_path or Path.cwd(), work_id)
+    except ContextSourceNotFoundError as exc:
+        print_and_exit(format_error(str(exc), exit_code=EXIT_NOT_FOUND), EXIT_NOT_FOUND)
+    except (UnsafeContextSourceError, ContextViewError) as exc:
+        print_and_exit(format_error(str(exc), exit_code=EXIT_CONFLICT), EXIT_CONFLICT)
+
+    if is_json_mode():
+        print_and_exit(
+            format_success(
+                {
+                    "work_id": view.work_id,
+                    "sources": [
+                        {
+                            "path": source.path,
+                            "raw_bytes": source.raw_bytes,
+                            "semantic_bytes": source.semantic_bytes,
+                        }
+                        for source in view.sources
+                    ],
+                    "raw_bytes": view.raw_bytes,
+                    "semantic_bytes": view.semantic_bytes,
+                    "content": view.content,
+                },
+                message="context view ready",
+            ),
+            EXIT_OK,
+        )
+
+    if args.with_stats:
+        sys.stdout.write(f"semantic_bytes: {view.semantic_bytes}\n\n")
+    sys.stdout.write(view.content)
+    sys.exit(EXIT_OK)
+
+
 def _register_context_commands(subparsers):
     p = subparsers.add_parser("context-build", help="Build Project Context Pack for a run")
     p.add_argument("--work-id", required=True)
     p.add_argument("--repo-path", required=True)
     p.add_argument("--base-path", type=Path, default=argparse.SUPPRESS)
     p.set_defaults(func=_cmd_context_build)
+
+    p = subparsers.add_parser(
+        "context-view", help="Print the deterministic semantic context view for an executing run"
+    )
+    p.add_argument("--work-id", required=True)
+    p.add_argument(
+        "--with-stats", action="store_true",
+        help="Prefix human output with aggregate semantic_bytes for role metrics",
+    )
+    p.add_argument("--base-path", type=Path, default=argparse.SUPPRESS)
+    p.set_defaults(func=_cmd_context_view)
 
 
 # ---------------------------------------------------------------------------

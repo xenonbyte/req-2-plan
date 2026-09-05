@@ -72,6 +72,33 @@ class TestAgentTemplateCheckpointGuidance(unittest.TestCase):
             + ", ".join(missing),
         )
 
+    def test_plan_author_surfaces_carry_v2_cohesive_slice_protocol(self):
+        """SPEC-GRANULARITY-004 / SPEC-PARITY-008 stay synchronized."""
+        surfaces = [
+            "tools/workflow_cli/agent_templates/claude/SKILL.md",
+            "tools/workflow_cli/agent_templates/claude/commands/r2p-continue.md",
+            "tools/workflow_cli/agent_templates/codex/skills/r2p-continue/SKILL.md",
+            "tools/workflow_cli/agent_templates/gemini/commands/r2p-continue.toml",
+        ]
+        required_terms = (
+            "phase-level cohesive slice",
+            "operation-homogeneous task group",
+            "intermediate contract",
+            "Prerequisite: none",
+            "Prerequisite: PLAN-TASK-NNN",
+            "dispatch prerequisite gate",
+            "profile-aware prerequisite semantics",
+            "must not be copied into `Verification`",
+            "Dependencies:",
+        )
+        missing = []
+        for rel in surfaces:
+            text = (REPO_ROOT / rel).read_text(encoding="utf-8")
+            for term in required_terms:
+                if term not in text:
+                    missing.append(f"{rel}:{term}")
+        self.assertEqual(missing, [], f"missing Phase 2 PLAN-author protocol: {missing}")
+
 
 def _get_role_section(text, heading_prefix):
     """Return text from the line starting with heading_prefix to the next ### or ## heading."""
@@ -94,6 +121,11 @@ EXECUTE_SURFACES = [
     "tools/workflow_cli/agent_templates/codex/skills/r2p-execute/SKILL.md",
 ]
 
+ARCHIVE_SURFACES = [
+    "tools/workflow_cli/agent_templates/claude/commands/r2p-archive.md",
+    "tools/workflow_cli/agent_templates/codex/skills/r2p-archive/SKILL.md",
+]
+
 REQUIRED_TEMPLATE_HARDENING_TOKENS = [
     # EXE-1: final reviewer reads the full upstream context incl. 07-plan + per-task reports/reviews + Minor
     "the final reviewer is the one role that reads `07-plan.md`",
@@ -101,11 +133,17 @@ REQUIRED_TEMPLATE_HARDENING_TOKENS = [
     "a non-clean code tree at a task boundary",
     # EXE-3: brief-contents lists Files + reviewer compares changed files vs the brief's Files
     "against the brief's `Files`",
-    # EXE-4: derive-on-resume BASE reconstruction (lowest-numbered unchecked task; preceding completion head7)
-    "reconstruct the in-progress task's BASE",
-    # EXE-5: report evidence sections; no Context-Read checklist
-    "Verification Evidence",
+    # EXE-4: resume uses the persisted dispatch BASE, never guessed Git history.
+    "retains its original dispatch BASE",
+    # EXE-5: compact, audit-preserving report sections; no Context-Read checklist
+    "Status",
+    "Commit Range",
     "Changed Files",
+    "Verification Records",
+    "Concerns",
+    "⚠️ DEFER",
+    "`Final Fix Wave: <N>`",
+    "`Final Fix Waves: none`",
 ]
 
 
@@ -125,6 +163,24 @@ class TestExecuteTemplateContent(unittest.TestCase):
                 offenders.append(rel)
         self.assertEqual(missing, [], f"missing installed r2p-task-brief wrapper call: {missing}")
         self.assertEqual(offenders, [], f"execute surfaces call nonexistent wrapper: {offenders}")
+
+    def test_execute_surfaces_run_prerequisite_only_at_implementation_boundary(self):
+        for rel in EXECUTE_SURFACES:
+            text = (REPO_ROOT / rel).read_text(encoding="utf-8")
+            self.assertIn(
+                "{{R2P_BIN_DIR}}/r2p-prerequisite-check",
+                text,
+                f"{rel}: prerequisite must use the installed wrapper",
+            )
+            self.assertIn("before dispatching this task's implementer", text)
+            self.assertIn("ordinary post-commit reviewer or fixer", text)
+            reviewer_section = _get_role_section(text, "### 5.")
+            self.assertNotIn(
+                "r2p-prerequisite-check",
+                reviewer_section,
+                f"{rel}: post-commit reviewer must not rerun the dispatch gate",
+            )
+            self.assertNotIn("`execution-prerequisite-check", text)
 
     def test_execute_surfaces_carry_sdd_orchestration_tokens(self):
         surfaces = [
@@ -396,11 +452,11 @@ class TestExecuteTemplateContent(unittest.TestCase):
             "tools/workflow_cli/agent_templates/codex/skills/r2p-execute/SKILL.md",
         ]
         required = (
-            "Persist the Task 1 BASE immediately in tracked execution state",
+            "Persist the Task 1 BASE immediately in durable execution state",
             "`execution/progress.md`",
             "`Execution BASE: <execution-base-commit>`",
-            "On resume, read `execution/progress.md`",
-            "Do not recalculate it from `HEAD`",
+            "Preserve the ledger's full `Execution BASE:` for final review",
+            "never capture a fresh task BASE from HEAD",
         )
         missing = []
         for rel in surfaces:
@@ -426,35 +482,36 @@ class TestExecuteTemplateContent(unittest.TestCase):
                     missing.append(f"{rel}:{tok}")
         self.assertEqual(missing, [], f"missing final-diff logs mkdir guidance: {missing}")
 
-    def test_execute_surfaces_hand_authoritative_context_set(self):
-        """DES-TEST-001 / FR-AC7: ACS block, matrix, per-role read instruction, and exclusion split on both surfaces."""
+    def test_execute_surfaces_adopt_role_side_semantic_context_view(self):
+        """SPEC-CONTEXT-011/REPORT-012: role-side view, compact audit, no payload relay."""
         surfaces = [
             "tools/workflow_cli/agent_templates/claude/commands/r2p-execute.md",
             "tools/workflow_cli/agent_templates/codex/skills/r2p-execute/SKILL.md",
         ]
 
-        # Whole-file required tokens: ACS heading (1), six read-set paths (2–7),
-        # matrix (8), conflict rule BLOCKED+reopen (9–10), ledger read-only (11),
-        # sibling escalation (12–13), §6 diff regen (14), report-path regression (15–16).
         required_whole = (
-            "## Authoritative Context Set",
-            "02-project-context.md",
-            "03-requirement-brief.md",
-            "04-risk-discovery.md",
-            "05-design.md",
-            "06-spec.md",
-            "execution/progress.md",
+            "## Semantic Context View",
+            "r2p-context-view --work-id <id>",
+            "semantic_view",
+            "semantic_payload_bytes",
+            "controller must not read or forward the semantic content",
+            "No persistent context artifact",
             "Responsibility Matrix",
             "BLOCKED",
             "reopen",
-            "read-only to subagents",
+            "subagents read but do not write to the ledger",
             "r2p-task-brief --task",
             "NEEDS_CONTEXT",
-            "regenerates `logs/task-N-diff.md`",
+            "regenerate `logs/task-N-diff.md` from every returned `review_ranges` entry",
             "Pass the `review_report_path` to the fix subagent",
             "Fix all Critical and Important findings in the review report",
+            "Status",
+            "Commit Range",
+            "Changed Files",
+            "Verification Records",
+            "Concerns",
+            "⚠️ DEFER",
         )
-        # Whole-file forbidden tokens: Scene-setting context absent (17), r2p-gap-open absent (18).
         forbidden_whole = (
             "Scene-setting context",
             "`r2p-gap-open`",
@@ -470,77 +527,190 @@ class TestExecuteTemplateContent(unittest.TestCase):
             for tok in forbidden_whole:
                 if tok in text:
                     offenders.append(f"{rel}:{tok}")
-        self.assertEqual(missing, [], f"missing ACS tokens: {missing}")
-        self.assertEqual(offenders, [], f"forbidden ACS tokens present: {offenders}")
+        self.assertEqual(missing, [], f"missing semantic-context tokens: {missing}")
+        self.assertEqual(offenders, [], f"forbidden semantic-context tokens present: {offenders}")
 
-        # Per-role slice: §2, §5, §6 each contain the ACS read instruction (check 8 per spec).
+        # Every role invokes the view itself; the controller passes only the command.
         for rel in surfaces:
             text = (REPO_ROOT / rel).read_text(encoding="utf-8")
             for section_prefix in ("### 2.", "### 5.", "### 6."):
                 section = _get_role_section(text, section_prefix)
                 self.assertIn(
-                    "Read the Authoritative Context Set before acting",
+                    "Run `{{R2P_BIN_DIR}}/r2p-context-view --work-id <id> --with-stats` yourself before acting",
                     section,
-                    f"{rel}: section {section_prefix!r} must reference the ACS read instruction",
+                    f"{rel}: section {section_prefix!r} must require role-side context view",
                 )
 
-        # ACS read-set / exclusion split (check 9 per spec):
-        # The exclusion sentence names 07-plan.md, 00-raw-requirement.md, 01-intake-brief.md.
-        # Split the ACS block at that line; verify the six read-set paths appear BEFORE it
-        # and the three excluded paths do NOT appear before it.
         for rel in surfaces:
             text = (REPO_ROOT / rel).read_text(encoding="utf-8")
-            acs_start = text.find("## Authoritative Context Set")
-            self.assertNotEqual(acs_start, -1, f"{rel}: missing ACS heading")
-            next_h2 = text.find("\n## ", acs_start + 1)
-            acs_block = text[acs_start:next_h2] if next_h2 != -1 else text[acs_start:]
-            acs_lines = acs_block.splitlines()
-            # Find the first line in the ACS block that names the excluded 07-plan.md
-            excl_idx = next(
-                (i for i, line in enumerate(acs_lines) if "`07-plan.md`" in line),
-                None,
-            )
-            self.assertIsNotNone(
-                excl_idx,
-                f"{rel}: ACS block lacks an exclusion sentence for 07-plan.md",
-            )
-            read_set_portion = "\n".join(acs_lines[:excl_idx])
-            # Six read-set paths must appear before the exclusion line
-            for path in (
-                "02-project-context.md",
-                "03-requirement-brief.md",
-                "04-risk-discovery.md",
-                "05-design.md",
-                "06-spec.md",
-                "execution/progress.md",
-            ):
-                self.assertIn(
-                    path, read_set_portion,
-                    f"{rel}: {path!r} missing from ACS read-set portion (before exclusion line)",
-                )
-            # Three excluded paths must NOT appear before the exclusion line
-            for path in ("07-plan.md", "00-raw-requirement.md", "01-intake-brief.md"):
-                self.assertNotIn(
-                    path, read_set_portion,
-                    f"{rel}: excluded path {path!r} found in ACS read-set portion",
-                )
+            self.assertIn("No persistent context artifact", text, f"{rel}: no persistent context bundle")
 
     def test_execute_surfaces_carry_template_hardening_tokens(self):
         """SPEC-GUARD-001: EXE-1..EXE-5 distinctive tokens on both r2p-execute surfaces."""
+        final_fix_contracts = []
         for surface in EXECUTE_SURFACES:
             text = (REPO_ROOT / surface).read_text(encoding="utf-8")
             for tok in REQUIRED_TEMPLATE_HARDENING_TOKENS:
                 self.assertIn(tok, text, f"{surface}: missing token: {tok!r}")
+            final_fix_contracts.append([
+                line
+                for line in text.splitlines()
+                if "`Final Fix Wave: <N>`" in line or "`Final Fix Waves: none`" in line
+            ])
             self.assertNotIn(
                 "`r2p-gap-open`",
                 text,
                 f"{surface}: execution runs are closed; must not reference r2p-gap-open",
             )
+        self.assertEqual(
+            final_fix_contracts[0],
+            final_fix_contracts[1],
+            "Claude and Codex final-fix marker contracts must remain lockstep",
+        )
+
+    def test_archive_surfaces_document_closed_execution_residue_force_semantics(self):
+        required = (
+            "closed_at_plan_checkpoint",
+            "execution/` must be absent",
+            "re-run `r2p-execute` to recover/resume",
+            "use `--force` only when intentionally archiving an abandoned or superseded run",
+            "Symlinked or non-directory `execution` paths are unsafe and must not be forced",
+        )
+        copies = []
+        for surface in ARCHIVE_SURFACES:
+            text = (REPO_ROOT / surface).read_text(encoding="utf-8")
+            for token in required:
+                self.assertIn(token, text, f"{surface}: missing archive residue token: {token!r}")
+            copies.append([line for line in text.splitlines() if "execution/" in line or "--force" in line])
+        self.assertEqual(copies[0], copies[1], "Claude and Codex archive residue guidance must match")
+
+    def test_execute_surfaces_carry_phase_zero_role_and_metrics_protocol(self):
+        required = (
+            "brand-new zero-history subagent invocation",
+            "targeted or directly affected tests",
+            "shared/core/high-risk",
+            "scope=full_suite",
+            "Final reviewers and final re-reviewers always",
+            "execution/metrics.md",
+            "metrics ledger is non-authoritative",
+            "verification_records",
+            "verification_total_seconds",
+            "⚠️ DEFER",
+            "semantic_view",
+            "semantic_payload_bytes",
+            "r2p-metrics-status",
+            "r2p-metrics-append",
+            "r2p-metrics-ack",
+            "r2p-metrics-finalize",
+            "{{R2P_BIN_DIR}}/r2p-prerequisite-check",
+            "pending_completion",
+            "do not write it a second time",
+            "expected_sequence",
+            "already_applied",
+            "metrics_incomplete",
+            "fast_profile_review",
+            "--confirm-fast-eligible",
+            "--reject-fast-ineligible",
+            "N implementers + primary final reviewer",
+            "Task N: implemented",
+            "Profile Escalation: fast -> strict",
+            "never synthesizes task-reviewer blocks",
+            "primary per-task review",
+            "atomic full-file update",
+            "final review clean",
+            "--require-version 2",
+            "prerequisite semantics version 1",
+            "already contains exactly one `Execution BASE:`",
+            "original task ranges",
+            "verification_records` and `verification_total_seconds",
+            "first_actionable_task",
+            "started_at`, `ended_at`, and `elapsed_seconds`",
+            "`Fix Wave N`",
+        )
+        for surface in EXECUTE_SURFACES:
+            text = (REPO_ROOT / surface).read_text(encoding="utf-8")
+            for token in required:
+                self.assertIn(token, text, f"{surface}: missing Phase 0 token: {token!r}")
+            self.assertNotIn(
+                "by adding `Execution BASE:",
+                text,
+                f"{surface}: must reuse the transaction-owned BASE line",
+            )
+            self.assertNotIn(
+                "lowest-numbered unchecked",
+                text,
+                f"{surface}: resume must use the parsed first actionable task",
+            )
+            for obsolete in (
+                "replace the highest-numbered task marker's HEAD",
+                "A blocked append is terminal",
+                "next role is not dispatched until the acknowledgment succeeds",
+            ):
+                self.assertNotIn(obsolete, text, f"{surface}: obsolete recovery rule")
+            reviewer_section = _get_role_section(text, "### 5.")
+            self.assertIn(
+                "`verification_records` and `verification_total_seconds`",
+                reviewer_section,
+                f"{surface}: task-reviewer inline metrics contract is incomplete",
+            )
+            self.assertIn("r2p-context-view --work-id <id> --with-stats", text)
+            for heading in ("### 2.", "### 5.", "### 6.", "## Final Whole-Branch Review"):
+                section = _get_role_section(text, heading)
+                self.assertIn("semantic_bytes", section, f"{surface}: {heading} lacks role byte count")
+
+        codex = (REPO_ROOT / EXECUTE_SURFACES[1]).read_text(encoding="utf-8")
+        self.assertIn('fork_turns="none"', codex)
+
+        claude = (REPO_ROOT / EXECUTE_SURFACES[0]).read_text(encoding="utf-8")
+        for token in (
+            "built-in `Agent` tool",
+            "new non-fork invocation",
+            "Do not resume an agent ID",
+            "built-in `Task` tool without `task_id`",
+            "`task_id` resumes an existing subagent session",
+        ):
+            self.assertIn(token, claude)
+
+    def test_execute_surfaces_share_authoritative_progress_protocol(self):
+        copies = []
+        for surface in EXECUTE_SURFACES:
+            text = (REPO_ROOT / surface).read_text(encoding="utf-8")
+            section = _get_role_section(text, "### Authoritative role checkpoints")
+            for token in (
+                "r2p-progress begin", "r2p-progress complete", "r2p-progress escalate",
+                "role_sequence", "recover_role_result", "review_ranges", "Execution Inflight",
+                "never automatically redispatch", "later task/final fixer commits",
+            ):
+                self.assertIn(token, section, f"{surface}: missing progress protocol")
+            copies.append(section)
+            metrics = _get_role_section(text, "### Structured metrics protocol")
+            for token in (
+                "After its authoritative progress completion succeeds",
+                "TDD red", "retries the same", "latest outcome",
+                "Missing observations cannot be finalized", "never choose a role",
+            ):
+                self.assertIn(token, metrics, f"{surface}: observation authority drift")
+        self.assertEqual(copies[0], copies[1])
 
     def test_gemini_execute_toml_mentions_in_place_and_archive(self):
         text = (REPO_ROOT / "tools/workflow_cli/agent_templates/gemini/commands/r2p-execute.toml").read_text(encoding="utf-8")
         self.assertIn("r2p-execute", text)
         self.assertIn("current branch", text)
+        self.assertIn("zero-history", text)
+        self.assertIn("fail closed", text)
+        self.assertIn("Strict is the default", text)
+        self.assertIn("fast is explicit opt-in", text)
+        self.assertIn("preflight/eligibility handshake", text)
+        self.assertIn("primary final task-by-task review", text)
+        self.assertIn("r2p-context-view", text)
+        self.assertIn("r2p-metrics-status", text)
+        self.assertIn("r2p-metrics-append", text)
+        self.assertIn("r2p-metrics-ack", text)
+        self.assertIn("r2p-progress begin", text)
+        self.assertIn("r2p-progress complete", text)
+        self.assertIn("recover_role_result", text)
+        self.assertIn("r2p-metrics-finalize", text)
+        self.assertIn("metrics_incomplete", text)
 
 
 if __name__ == "__main__":

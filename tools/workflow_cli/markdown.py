@@ -19,6 +19,16 @@ _READONLY_SECTION_END_RE = re.compile(
     r"^[ \t]{0,3}<!--\s*/r2p-read-only\s*-->\s*$",
     re.IGNORECASE,
 )
+# Source masks must retain every boundary recognized by str.splitlines().
+# Compact filtering keeps its existing CR/LF-only comment masking contract.
+_SOURCE_LINE_BREAKS = "\n\r\v\f\x1c\x1d\x1e\x85\u2028\u2029"
+
+# Shared grammar for the authoritative execution-completion checkbox surface.
+# Consumers decide whether an empty mark or ``x``/``X`` is legal for their
+# current state, but spacing/case acceptance must stay identical.
+PLAN_TASK_CHECKBOX_RE = re.compile(
+    r"^\s*-\s*\[\s*([xX]?)\s*\]\s*(PLAN-TASK-\d+)\b"
+)
 
 
 def unfenced_markdown_lines(content: str):
@@ -59,19 +69,21 @@ def unfenced_markdown_text(content: str) -> str:
     return "".join(line for line, _, _ in unfenced_markdown_lines(content))
 
 
+def _blank_preserving_newlines(text: str, *, line_breaks: str = "\r\n") -> str:
+    return "".join(char if char in line_breaks else " " for char in text)
+
+
 def _mask_html_comments_outside_fences(
     content: str,
     *,
     preserve_readonly_end_marker: bool = False,
+    line_breaks: str = "\r\n",
 ) -> str:
     """Blank comment characters while preserving offsets, newlines, and fences."""
     pieces: list[str] = []
     fence_char = ""
     fence_len = 0
     in_comment = False
-
-    def masked(text: str) -> str:
-        return "".join(char if char in "\r\n" else " " for char in text)
 
     for line in content.splitlines(keepends=True):
         marker = _FENCE_MARKER_RE.match(line)
@@ -106,10 +118,10 @@ def _mask_html_comments_outside_fences(
             if in_comment:
                 end = line.find("-->", cursor)
                 if end < 0:
-                    pieces.append(masked(line[cursor:]))
+                    pieces.append(_blank_preserving_newlines(line[cursor:], line_breaks=line_breaks))
                     cursor = len(line)
                     continue
-                pieces.append(masked(line[cursor:end + 3]))
+                pieces.append(_blank_preserving_newlines(line[cursor:end + 3], line_breaks=line_breaks))
                 cursor = end + 3
                 in_comment = False
                 continue
@@ -134,67 +146,46 @@ def strip_html_comments_outside_fences(content: str) -> str:
     return _mask_html_comments_outside_fences(content)
 
 
-def strip_readonly_sections(content: str) -> str:
-    """Remove seeded read-only Markdown sections before structural validation."""
+def _readonly_section_ranges(content: str) -> list[tuple[int, int]]:
+    """Find merged seeded regions in linear time, using original offsets."""
     scan_content = _mask_html_comments_outside_fences(
         content,
         preserve_readonly_end_marker=True,
     )
-    lines = list(unfenced_markdown_lines(scan_content))
-    headings = [
-        (start, level)
-        for line, start, _ in lines
-        if (level := heading_level(line)) is not None
-    ]
-    markers = [
-        (start, len(match.group(1)))
-        for line, start, _ in lines
-        if (match := _READONLY_SECTION_RE.match(line))
-    ]
+    # A reverse pass remembers the nearest qualifying heading for each of the
+    # six supported read-only heading levels. An explicit terminator takes
+    # precedence over copied headings, but cannot cross another read-only start.
+    next_heading = [len(content)] * 7
+    explicit_end = None
     removals: list[tuple[int, int]] = []
-    for marker_start, marker_level in markers:
-        next_marker_start = next(
-            (start for start, _ in markers if start > marker_start),
-            len(content),
-        )
-        # Seeded payloads can contain copied documents with their own #/##
-        # headings, so prefer the explicit terminator when the seed provides it.
-        explicit_end = next(
-            (
-                line_end
-                for line, start, line_end in lines
-                if marker_start < start < next_marker_start
-                and _READONLY_SECTION_END_RE.match(line)
-            ),
-            None,
-        )
-        if explicit_end is not None:
-            removals.append((marker_start, explicit_end))
-            continue
-
-        end = len(content)
-        for heading_start, heading_level_ in headings:
-            if heading_start <= marker_start:
-                continue
-            if heading_level_ <= marker_level:
-                end = heading_start
-                break
-        removals.append((marker_start, end))
-
-    if not removals:
-        return content
+    for line, start, end in reversed(list(unfenced_markdown_lines(scan_content))):
+        marker = _READONLY_SECTION_RE.match(line)
+        if marker:
+            boundary = explicit_end if explicit_end is not None else next_heading[len(marker.group(1))]
+            removals.append((start, boundary))
+            explicit_end = None
+        elif _READONLY_SECTION_END_RE.match(line):
+            explicit_end = end
+        level = heading_level(line)
+        if level is not None:
+            for enclosing_level in range(level, 7):
+                next_heading[enclosing_level] = start
 
     merged: list[tuple[int, int]] = []
-    for start, end in sorted(removals):
+    for start, end in reversed(removals):
         if not merged or start > merged[-1][1]:
             merged.append((start, end))
         else:
             prev_start, prev_end = merged[-1]
             merged[-1] = (prev_start, max(prev_end, end))
+    return merged
 
+
+def strip_readonly_sections(content: str) -> str:
+    """Remove seeded read-only Markdown sections before structural validation."""
     pieces: list[str] = []
     cursor = 0
-    for start, end in merged:
+    for start, end in _readonly_section_ranges(content):
         pieces.append(content[cursor:start])
         cursor = end
     pieces.append(content[cursor:])
@@ -204,6 +195,18 @@ def strip_readonly_sections(content: str) -> str:
 def strip_nonsemantic_markdown(content: str) -> str:
     """Remove seeded read-only sections and prose HTML comments consistently."""
     return strip_html_comments_outside_fences(strip_readonly_sections(content))
+
+
+def mask_nonsemantic_markdown(content: str) -> str:
+    """Blank nonsemantic text, preserving source offsets and splitlines boundaries."""
+    pieces: list[str] = []
+    cursor = 0
+    for start, end in _readonly_section_ranges(content):
+        pieces.append(content[cursor:start])
+        pieces.append(_blank_preserving_newlines(content[start:end], line_breaks=_SOURCE_LINE_BREAKS))
+        cursor = end
+    pieces.append(content[cursor:])
+    return _mask_html_comments_outside_fences("".join(pieces), line_breaks=_SOURCE_LINE_BREAKS)
 
 
 def heading_level(line: str) -> int | None:

@@ -2,3 +2,4 @@
 /.workflow-active
 /*/logs/
 /*/execution/
+/*/.execution-start-transaction.json
