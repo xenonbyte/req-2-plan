@@ -175,6 +175,10 @@ def test_rejects_execution_directory_symlink(tmp_path):
 def test_rejects_regular_file_replaced_between_pre_stat_and_open(tmp_path, monkeypatch):
     run_dir = _make_workspace(tmp_path)
     target = run_dir / "04-risk-discovery.md"
+    replacement = run_dir / "replacement.md"
+    replacement.write_text("replacement\n", encoding="utf-8")
+    # Keep both files alive so the filesystem cannot recycle the target inode.
+    assert replacement.stat().st_ino != target.stat().st_ino
     real_open = os.open
     swapped = False
 
@@ -182,8 +186,7 @@ def test_rejects_regular_file_replaced_between_pre_stat_and_open(tmp_path, monke
         nonlocal swapped
         if path == "04-risk-discovery.md" and dir_fd is not None and not swapped:
             swapped = True
-            target.unlink()
-            target.write_text("replacement\n", encoding="utf-8")
+            replacement.replace(target)
         return real_open(path, flags, mode, dir_fd=dir_fd)
 
     monkeypatch.setattr("tools.workflow_cli.execution_context.os.open", racing_open)
